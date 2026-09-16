@@ -1,0 +1,13 @@
+kiteconnect==5.0.1
+pandas==2.2.2
+numpy==1.26.4
+apscheduler==3.10.4
+feedparser==6.0.11
+python-dotenv==1.0.1
+google-generativeai==0.8.3
+streamlit==1.38.0
+plotly==5.24.1
+scipy==1.14.1
+requests==2.32.3
+scikit-learn==1.5.2
+joblib==1.4.2
