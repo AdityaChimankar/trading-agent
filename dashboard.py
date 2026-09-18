@@ -5,18 +5,17 @@ Opens at http://localhost:8501 - no cloud hosting needed.
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+
 from db import get_connection, init_db
 from quant_indicators import load_candles, compute_rsi, compute_atr, compute_adx
-from rankings import rank_watchlist, top_bullish, top_bearish
+from rankings import rank_watchlist, top_bullish, top_bearish, annotate_contradictions, get_contradictions
+from position_monitor import get_all_position_statuses
+from portfolio_risk import close_position as _close_position
 
 # Ensures the schema (including any new columns from a migration) is
 # up to date every time the dashboard starts - init_db() is idempotent
 # (CREATE TABLE IF NOT EXISTS + safe ALTER TABLE that ignores "already
-# exists" errors), so this is harmless to call on every launch. Without
-# this, updating portfolio_risk.py/schema.sql alone isn't enough - a
-# schema change only takes effect once something actually calls
-# init_db(), which previously only happened via manually running
-# `python db.py` - easy to forget after pulling file updates.
+# exists" errors), so this is harmless to call on every launch.
 init_db()
 
 st.set_page_config(page_title="Intraday Trading Agent", layout="wide")
@@ -24,19 +23,44 @@ st.title("Intraday Trading Agent Dashboard")
 
 conn = get_connection()
 
-# --- Sidebar: Top 10 Bullish / Bearish panel ---
-# Cached for 60s so switching the toggle or opening a symbol doesn't
-# re-score the whole watchlist on every rerun - only refreshes when
-# the cache expires or new candle/pattern data changes meaningfully.
+# --- Cached data fetches, both defined up top so the sidebar (which
+# needs both the technical rankings AND live position P&L to cross-check
+# them against each other) and the main-body Position Monitor panel can
+# share the same cached results instead of fetching twice. ---
+
 @st.cache_data(ttl=60)
 def _cached_rankings():
     return rank_watchlist()
 
+# Signal-reversal checking calls decision_agent.decide() per position,
+# which is real computation (not free at scale) - cache briefly so
+# switching tabs/toggles doesn't repeatedly recompute it.
+@st.cache_data(ttl=30)
+def _cached_position_statuses():
+    return get_all_position_statuses(fetch_current_signals=True)
+
+position_statuses = _cached_position_statuses()
+
+# --- Sidebar: Top 10 Bullish / Bearish panel, plus bias-vs-P&L
+# contradiction warnings for any open position where the technical read
+# disagrees with what the position is actually doing. ---
 with st.sidebar:
     st.header("Watchlist Bias")
-    view = st.radio("Show", ["Bullish", "Bearish"], horizontal=True)
 
     scored = _cached_rankings()
+    scored = annotate_contradictions(scored, position_statuses)
+    scored_by_symbol = {s["symbol"]: s for s in scored}
+
+    contradictions = get_contradictions(scored)
+    if contradictions:
+        with st.expander(f"⚠️ {len(contradictions)} bias contradiction(s)", expanded=True):
+            st.caption("Open positions where this panel's technical bias "
+                       "disagrees with live P&L - the position is winning "
+                       "in the opposite direction of the flag below.")
+            for c in contradictions:
+                st.warning(f"**{c['symbol']}**: {c['contradiction']}")
+
+    view = st.radio("Show", ["Bullish", "Bearish"], horizontal=True)
     ranked_list = top_bullish(scored) if view == "Bullish" else top_bearish(scored)
     score_key = "bullish_score" if view == "Bullish" else "bearish_score"
 
@@ -44,9 +68,13 @@ with st.sidebar:
         st.write(f"No {view.lower()} candidates right now.")
     else:
         for entry in ranked_list:
-            label = f"{entry['symbol']}  ·  RSI {entry['rsi']}  ·  score {entry[score_key]}"
+            pin = "📌 " if entry.get("has_open_position") else ""
+            warn = "⚠️ " if entry.get("contradiction") else ""
+            label = f"{warn}{pin}{entry['symbol']} · RSI {entry['rsi']} · trend {entry.get('trend', '?')} · score {entry[score_key]}"
             if st.button(label, key=f"{view}_{entry['symbol']}", use_container_width=True):
                 st.session_state["selected_symbol"] = entry["symbol"]
+            if entry.get("contradiction"):
+                st.caption(f"⚠️ {entry['contradiction']}")
 
     st.divider()
     st.header("Position Sizing")
@@ -64,19 +92,11 @@ if digest_row:
 # --- Position Monitor: dedicated panel for every open position, with
 # live P&L (placed value vs current value) and a HOLD/SELL indicator
 # per symbol - separate from the per-symbol view below since this
-# should stay visible regardless of which symbol you're looking at. ---
+# should stay visible regardless of which symbol you're looking at.
+# Reuses position_statuses fetched above (same cache) rather than
+# re-querying - it's the same data the sidebar contradiction check
+# just used. ---
 st.header("📊 Position Monitor")
-from position_monitor import get_all_position_statuses
-from portfolio_risk import close_position as _close_position
-
-# Signal-reversal checking calls decision_agent.decide() per position,
-# which is real computation (not free at scale) - cache briefly so
-# switching tabs/toggles doesn't repeatedly recompute it.
-@st.cache_data(ttl=30)
-def _cached_position_statuses():
-    return get_all_position_statuses(fetch_current_signals=True)
-
-position_statuses = _cached_position_statuses()
 
 if not position_statuses:
     st.write("No open positions. Size a trade below and click **Record as open position** to track it here.")
@@ -84,6 +104,7 @@ else:
     total_placed_value = sum(s.position["position_value"] for s in position_statuses)
     total_current_value = sum(s.current_value for s in position_statuses)
     total_pnl = sum(s.pnl for s in position_statuses)
+
     mcol1, mcol2, mcol3 = st.columns(3)
     mcol1.metric("Placed value", f"Rs.{total_placed_value:,.0f}")
     mcol2.metric("Current value", f"Rs.{total_current_value:,.0f}")
@@ -105,6 +126,13 @@ else:
                 st.cache_data.clear()
                 st.rerun()
             st.caption(f"{indicator} — {status.reason}")
+
+            # Surface the same bias-vs-P&L contradiction here too, right
+            # next to the position it's actually about, not just in the
+            # sidebar's flat list.
+            bias_entry = scored_by_symbol.get(p["symbol"])
+            if bias_entry and bias_entry.get("contradiction"):
+                st.warning(f"⚠️ {bias_entry['contradiction']}")
 
 st.divider()
 
@@ -128,6 +156,7 @@ if symbol:
         # --- Advanced multi-panel chart: price+MAs+signals / volume / RSI / ADX,
         # all sharing one synced x-axis (zoom or pan any panel, they move together) ---
         from plotly.subplots import make_subplots
+
         fig = make_subplots(
             rows=4, cols=1, shared_xaxes=True,
             row_heights=[0.5, 0.15, 0.175, 0.175], vertical_spacing=0.03,
@@ -138,6 +167,7 @@ if symbol:
             x=df["timestamp"], open=df["open"], high=df["high"],
             low=df["low"], close=df["close"], name=symbol,
         ), row=1, col=1)
+
         fig.add_trace(go.Scatter(x=df["timestamp"], y=df["ma20"], name="MA20",
                                   line=dict(color="orange", width=1)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df["timestamp"], y=df["ma50"], name="MA50",
@@ -150,10 +180,12 @@ if symbol:
             "AND timestamp >= ? ORDER BY timestamp",
             conn, params=(symbol, df["timestamp"].min()),
         )
+
         if not signal_markers.empty:
             buys = signal_markers[signal_markers["action"] == "BUY"]
             sells = signal_markers[signal_markers["action"] == "SELL"]
             price_lookup = df.set_index("timestamp")["close"]
+
             if not buys.empty:
                 buy_prices = buys["timestamp"].map(price_lookup)
                 fig.add_trace(go.Scatter(
@@ -195,6 +227,7 @@ if symbol:
 
         fig.update_layout(height=850, xaxis_rangeslider_visible=False, showlegend=True,
                            legend=dict(orientation="h", yanchor="bottom", y=1.02))
+
         st.plotly_chart(fig, use_container_width=True)
 
         # --- Indicator summary ---
@@ -205,15 +238,18 @@ if symbol:
 
         # --- Position sizing, portfolio-adjusted for correlation + total risk budget ---
         from portfolio_risk import calculate_portfolio_adjusted_position, add_open_position
+
         latest_signal = conn.execute(
             "SELECT action FROM signals WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1", (symbol,)
         ).fetchone()
+
         st.subheader("Position Sizing (ATR-based, portfolio-adjusted)")
         if not latest_signal or latest_signal["action"] == "HOLD":
             st.write("No active BUY/SELL signal for this symbol - nothing to size.")
         else:
             adjusted = calculate_portfolio_adjusted_position(symbol, latest_signal["action"], capital)
             plan = adjusted.base_plan
+
             if plan is None:
                 st.write("Not enough data to calculate a position yet.")
             else:
@@ -221,7 +257,7 @@ if symbol:
                 pcol1.metric("Stop-loss", plan.stop_loss)
                 pcol2.metric("Take-profit", plan.take_profit)
                 pcol3.metric("Approved size", f"{adjusted.approved_size} shares",
-                             delta=f"{adjusted.approved_size - plan.position_size} vs per-trade-only" if adjusted.approved_size != plan.position_size else None)
+                              delta=f"{adjusted.approved_size - plan.position_size} vs per-trade-only" if adjusted.approved_size != plan.position_size else None)
                 pcol4.metric("Approved value", f"Rs.{adjusted.approved_value:,.0f}")
 
                 if adjusted.blocked:

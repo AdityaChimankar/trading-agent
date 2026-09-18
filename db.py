@@ -20,7 +20,13 @@ def get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     return conn
-
+def get_open_position_symbols() -> set:
+    """Symbols with a currently-open paper position, for cross-referencing
+    against the watchlist ranking (so the sidebar can flag them)."""
+    conn = get_connection()
+    rows = conn.execute("SELECT DISTINCT symbol FROM open_positions WHERE status = 'open'").fetchall()
+    conn.close()
+    return {r["symbol"] for r in rows}
 
 def init_db() -> None:
     conn = get_connection()
