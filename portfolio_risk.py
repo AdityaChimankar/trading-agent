@@ -61,9 +61,9 @@ def add_open_position(plan: PositionPlan) -> None:
     conn = get_connection()
     conn.execute(
         "INSERT INTO open_positions (symbol, action, entry_price, position_size, position_value, "
-        "risk_amount, opened_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
+        "risk_amount, stop_loss, take_profit, opened_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
         (plan.symbol, plan.action, plan.entry_price, plan.position_size, plan.position_value,
-         plan.risk_amount, datetime.now().isoformat()),
+         plan.risk_amount, plan.stop_loss, plan.take_profit, datetime.now().isoformat()),
     )
     conn.commit()
     conn.close()

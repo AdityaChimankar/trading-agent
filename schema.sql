@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS open_positions (
     position_size INTEGER NOT NULL,
     position_value REAL NOT NULL,
     risk_amount REAL NOT NULL,      -- rupees at risk if stop-loss is hit
+    stop_loss REAL,                 -- from the PositionPlan that opened this position
+    take_profit REAL,
     opened_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open'   -- 'open' or 'closed'
 );

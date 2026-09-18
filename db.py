@@ -27,8 +27,31 @@ def init_db() -> None:
     with open(SCHEMA_PATH) as f:
         conn.executescript(f.read())
     conn.commit()
+    _migrate_add_missing_columns(conn)
     conn.close()
     print(f"DB ready at {DB_PATH}")
+
+
+def _migrate_add_missing_columns(conn: sqlite3.Connection) -> None:
+    """CREATE TABLE IF NOT EXISTS is a no-op on a table that already
+    exists, so a schema.sql change that adds a column to an existing
+    table won't apply to a DB someone already created. This adds any
+    genuinely new columns safely, ignoring 'duplicate column' errors
+    for columns that are already there. Add new (table, column, type)
+    entries here whenever schema.sql adds a column to an EXISTING
+    table (new tables don't need this - CREATE TABLE IF NOT EXISTS
+    handles those fine on its own)."""
+    migrations = [
+        ("open_positions", "stop_loss", "REAL"),
+        ("open_positions", "take_profit", "REAL"),
+    ]
+    for table, column, col_type in migrations:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise  # a real error, not just "already migrated" - don't swallow it
 
 
 def get_watchlist() -> list:

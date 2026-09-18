@@ -42,6 +42,17 @@ TRAIN_CANDLES = 3750   # ~50 trading days of 5-min candles
 TEST_CANDLES = 750     # ~10 trading days - out-of-sample window per fold
 MIN_TRAIN_TRADES = 15  # skip a parameter combo on train if it fires too few trades to trust
 
+# Capped rather than defaulting to os.cpu_count(): each worker process
+# has to reload scipy's compiled linear algebra libraries from scratch
+# on startup, and spawning many of these at once can exceed Windows'
+# default page file size ("DLL load failed... paging file is too
+# small"), especially with scipy/numpy/sklearn all loading together.
+# Since this runs vectorized and already completes 500 symbols in well
+# under a minute serially, a small worker count costs little speed
+# while avoiding that failure mode. Raise this only if you've also
+# increased your system's virtual memory / page file size.
+MAX_WORKERS = 4
+
 # Grid kept intentionally modest - a huge grid on a small train window
 # risks picking noise, not a real pattern.
 PARAM_GRID = {
@@ -301,12 +312,12 @@ def _summarize_quiet(trades: list) -> dict:
 
 def run_walk_forward_multi(symbols: list, parallel: bool = True) -> dict:
     print(f"Running walk-forward optimization on {len(symbols)} symbol(s)"
-          + (" in parallel..." if parallel else " serially..."))
+          + (f" in parallel (max {MAX_WORKERS} workers)..." if parallel else " serially..."))
     start_time = time.time()
     per_symbol_results = {}
 
     if parallel and len(symbols) > 1:
-        with ProcessPoolExecutor() as executor:
+        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(run_walk_forward, s, False): s for s in symbols}
             done = 0
             for future in as_completed(futures):

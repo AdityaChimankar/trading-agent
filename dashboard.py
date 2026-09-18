@@ -5,9 +5,19 @@ Opens at http://localhost:8501 - no cloud hosting needed.
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from db import get_connection
+from db import get_connection, init_db
 from quant_indicators import load_candles, compute_rsi, compute_atr, compute_adx
 from rankings import rank_watchlist, top_bullish, top_bearish
+
+# Ensures the schema (including any new columns from a migration) is
+# up to date every time the dashboard starts - init_db() is idempotent
+# (CREATE TABLE IF NOT EXISTS + safe ALTER TABLE that ignores "already
+# exists" errors), so this is harmless to call on every launch. Without
+# this, updating portfolio_risk.py/schema.sql alone isn't enough - a
+# schema change only takes effect once something actually calls
+# init_db(), which previously only happened via manually running
+# `python db.py` - easy to forget after pulling file updates.
+init_db()
 
 st.set_page_config(page_title="Intraday Trading Agent", layout="wide")
 st.title("Intraday Trading Agent Dashboard")
@@ -50,6 +60,53 @@ digest_row = conn.execute("SELECT summary FROM digests WHERE date = ?", (date.to
 if digest_row:
     with st.expander("📋 Today's Digest", expanded=True):
         st.write(digest_row["summary"])
+
+# --- Position Monitor: dedicated panel for every open position, with
+# live P&L (placed value vs current value) and a HOLD/SELL indicator
+# per symbol - separate from the per-symbol view below since this
+# should stay visible regardless of which symbol you're looking at. ---
+st.header("📊 Position Monitor")
+from position_monitor import get_all_position_statuses
+from portfolio_risk import close_position as _close_position
+
+# Signal-reversal checking calls decision_agent.decide() per position,
+# which is real computation (not free at scale) - cache briefly so
+# switching tabs/toggles doesn't repeatedly recompute it.
+@st.cache_data(ttl=30)
+def _cached_position_statuses():
+    return get_all_position_statuses(fetch_current_signals=True)
+
+position_statuses = _cached_position_statuses()
+
+if not position_statuses:
+    st.write("No open positions. Size a trade below and click **Record as open position** to track it here.")
+else:
+    total_placed_value = sum(s.position["position_value"] for s in position_statuses)
+    total_current_value = sum(s.current_value for s in position_statuses)
+    total_pnl = sum(s.pnl for s in position_statuses)
+    mcol1, mcol2, mcol3 = st.columns(3)
+    mcol1.metric("Placed value", f"Rs.{total_placed_value:,.0f}")
+    mcol2.metric("Current value", f"Rs.{total_current_value:,.0f}")
+    mcol3.metric("Total P&L", f"Rs.{total_pnl:,.0f}", delta=f"{(total_pnl/total_placed_value*100) if total_placed_value else 0:.2f}%")
+
+    for status in position_statuses:
+        p = status.position
+        pnl_color = "🟢" if status.pnl >= 0 else "🔴"
+        indicator = "🟡 HOLD" if status.recommendation == "HOLD" else "🔴 SELL"
+
+        with st.container(border=True):
+            c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 1])
+            c1.write(f"**{p['symbol']}** ({p['action']})")
+            c2.write(f"Placed: Rs.{p['position_value']:,.0f} @ {p['entry_price']}")
+            c3.write(f"Now: Rs.{status.current_value:,.0f} @ {status.current_price}")
+            c4.write(f"{pnl_color} Rs.{status.pnl:,.0f} ({status.pnl_pct}%)")
+            if c5.button("Close", key=f"monitor_close_{p['id']}"):
+                _close_position(p["id"])
+                st.cache_data.clear()
+                st.rerun()
+            st.caption(f"{indicator} — {status.reason}")
+
+st.divider()
 
 symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM watchlist").fetchall()]
 default_symbol = st.session_state.get("selected_symbol")
@@ -147,7 +204,7 @@ if symbol:
         col3.metric("ATR (latest)", f"{df['atr'].iloc[-1]:.2f}")
 
         # --- Position sizing, portfolio-adjusted for correlation + total risk budget ---
-        from portfolio_risk import calculate_portfolio_adjusted_position, get_open_positions, add_open_position, close_position
+        from portfolio_risk import calculate_portfolio_adjusted_position, add_open_position
         latest_signal = conn.execute(
             "SELECT action FROM signals WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1", (symbol,)
         ).fetchone()
@@ -181,22 +238,11 @@ if symbol:
                 if not adjusted.blocked and adjusted.approved_size > 0:
                     if st.button(f"Record as open position ({adjusted.approved_size} shares)", key=f"open_{symbol}"):
                         add_open_position(plan)
+                        st.cache_data.clear()
                         st.rerun()
                 st.caption("This is a calculated plan, not an order - nothing is placed automatically.")
 
-        # --- Open positions ledger (paper tracking, for the portfolio-risk checks above) ---
-        st.subheader("Open Positions (paper-tracked)")
-        open_positions = get_open_positions()
-        if not open_positions:
-            st.write("No open positions recorded.")
-        else:
-            for pos in open_positions:
-                pcols = st.columns([3, 1])
-                pcols[0].write(f"**{pos['symbol']}** {pos['action']} · {pos['position_size']} shares · "
-                                f"Rs.{pos['position_value']:,.0f} · risk Rs.{pos['risk_amount']:,.0f} · opened {pos['opened_at'][:16]}")
-                if pcols[1].button("Close", key=f"close_{pos['id']}"):
-                    close_position(pos["id"])
-                    st.rerun()
+        # (Open positions are now shown in the Position Monitor panel at the top of the page)
 
         # --- Pattern detection ---
         from pattern_detection import detect_patterns
