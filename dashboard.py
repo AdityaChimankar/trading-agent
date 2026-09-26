@@ -8,9 +8,10 @@ import plotly.graph_objects as go
 
 from db import get_connection, init_db
 from quant_indicators import load_candles, compute_rsi, compute_atr, compute_adx
-from rankings import rank_watchlist, top_bullish, top_bearish, annotate_contradictions, get_contradictions
+from rankings import rank_watchlist, rank_watchlist_with_sizing, annotate_contradictions, get_contradictions
 from position_monitor import get_all_position_statuses
 from portfolio_risk import close_position as _close_position
+from opportunity_finder import find_opportunities
 
 # Ensures the schema (including any new columns from a migration) is
 # up to date every time the dashboard starts - init_db() is idempotent
@@ -41,9 +42,10 @@ def _cached_position_statuses():
 
 position_statuses = _cached_position_statuses()
 
-# --- Sidebar: Top 10 Bullish / Bearish panel, plus bias-vs-P&L
-# contradiction warnings for any open position where the technical read
-# disagrees with what the position is actually doing. ---
+# --- Sidebar: capital input first (sizing below needs it), then
+# bias-vs-P&L contradiction warnings, then the ranked watchlist -
+# now combined with an ACTUAL portfolio-adjusted position size and
+# open-position status per symbol, not just a raw score. ---
 with st.sidebar:
     st.header("Watchlist Bias")
 
@@ -60,8 +62,17 @@ with st.sidebar:
             for c in contradictions:
                 st.warning(f"**{c['symbol']}**: {c['contradiction']}")
 
+    capital = st.number_input("Available capital (Rs.)", min_value=1000.0, value=100000.0, step=1000.0,
+                               help="Used to size every suggested BUY/SELL on this page.")
+
+    @st.cache_data(ttl=60)
+    def _cached_rankings_with_sizing(capital_value):
+        return rank_watchlist_with_sizing(capital_value, n=10)
+
+    sized = _cached_rankings_with_sizing(capital)
+
     view = st.radio("Show", ["Bullish", "Bearish"], horizontal=True)
-    ranked_list = top_bullish(scored) if view == "Bullish" else top_bearish(scored)
+    ranked_list = sized["bullish"] if view == "Bullish" else sized["bearish"]
     score_key = "bullish_score" if view == "Bullish" else "bearish_score"
 
     if not ranked_list:
@@ -69,18 +80,95 @@ with st.sidebar:
     else:
         for entry in ranked_list:
             pin = "📌 " if entry.get("has_open_position") else ""
-            warn = "⚠️ " if entry.get("contradiction") else ""
+            warn = "⚠️ " if scored_by_symbol.get(entry["symbol"], {}).get("contradiction") else ""
             label = f"{warn}{pin}{entry['symbol']} · RSI {entry['rsi']} · trend {entry.get('trend', '?')} · score {entry[score_key]}"
             if st.button(label, key=f"{view}_{entry['symbol']}", use_container_width=True):
                 st.session_state["selected_symbol"] = entry["symbol"]
-            if entry.get("contradiction"):
-                st.caption(f"⚠️ {entry['contradiction']}")
+
+            contradiction = scored_by_symbol.get(entry["symbol"], {}).get("contradiction")
+            if contradiction:
+                st.caption(f"⚠️ {contradiction}")
+
+            if entry["blocked"]:
+                st.caption(f"🚫 {entry['action']} blocked - {entry['block_reason']}")
+            elif entry["suggested_size"] is not None and entry["suggested_size"] > 0:
+                st.caption(f"Suggested {entry['action']}: {entry['suggested_size']} sh @ {entry['entry_price']} "
+                           f"(Rs.{entry['suggested_value']:,.0f}) · stop {entry['stop_loss']} · target {entry['take_profit']}")
+            else:
+                st.caption("Not enough data to size this trade yet.")
 
     st.divider()
-    st.header("Position Sizing")
-    capital = st.number_input("Available capital (Rs.)", min_value=1000.0, value=100000.0, step=1000.0)
     st.caption("Risk 1% of capital per trade, stop-loss set at 1.5x ATR, "
-               "capped at 20% of capital per position. Adjust in position_sizing.py.")
+               "capped at 20% of capital per position/cluster, 6% total risk budget. "
+               "Adjust in position_sizing.py / portfolio_risk.py.")
+
+# --- Top Opportunity: the SINGLE highest-conviction bullish and bearish
+# pick right now, front and center. "Conviction" means agreement across
+# your independent signals (technical score, ML model, LLM agent,
+# sentiment) - NOT a promise of profit, and NOT a bigger position for a
+# "better" setup (position sizing deliberately risks a fixed % of
+# capital per trade regardless of conviction - that consistency is the
+# point of risk-based sizing). A higher-conviction setup is simply more
+# likely to actually reach its (fixed) profit target than a
+# contradicted one. See opportunity_finder.py for the full reasoning. ---
+st.header("🎯 Top Opportunity")
+st.caption("Ranked by agreement across your signals - technical score, ML model, LLM agent, and "
+           "sentiment - plus real room to the next resistance/support level. Not a profit guarantee.")
+
+@st.cache_data(ttl=60)
+def _cached_opportunities(capital_value):
+    return find_opportunities(capital_value)
+
+opportunities = _cached_opportunities(capital)
+
+opp_col1, opp_col2 = st.columns(2)
+for col, direction, arrow in [(opp_col1, "bullish", "🟢"), (opp_col2, "bearish", "🔴")]:
+    with col:
+        picks = opportunities[direction]
+        if not picks:
+            st.info(f"No {direction} candidates right now.")
+            continue
+
+        top = picks[0]
+        with st.container(border=True):
+            st.markdown(f"### {arrow} {top.symbol} — {top.action}")
+            st.metric("Conviction score", top.conviction_score,
+                      delta=f"{top.conviction_score - top.technical_score:+.1f} from signal agreement"
+                      if top.conviction_score != top.technical_score else None)
+
+            if top.agreements:
+                for a in top.agreements:
+                    st.caption(f"✅ {a}")
+            if top.disagreements:
+                for d in top.disagreements:
+                    st.caption(f"❌ {d}")
+            if not top.agreements and not top.disagreements:
+                st.caption("Technical score only - no ML/LLM/sentiment signal available yet for this symbol.")
+
+            if top.blocked:
+                st.warning(f"🚫 Blocked: {top.block_reason}")
+            elif top.suggested_size:
+                st.write(f"**{top.suggested_size} shares** @ {top.entry_price} "
+                         f"(Rs.{top.suggested_value:,.0f})")
+                st.caption(f"Stop {top.stop_loss} · Target {top.take_profit}"
+                           + (f" · Room to next level: Rs.{top.room_to_target:.2f} "
+                              f"(realistic R:R {top.realistic_reward_risk})" if top.room_to_target else
+                              " · No further resistance/support level detected yet"))
+            else:
+                st.caption("Not enough data to size this trade yet.")
+
+            if st.button(f"Select {top.symbol}", key=f"top_opp_{direction}"):
+                st.session_state["selected_symbol"] = top.symbol
+                st.rerun()
+
+        if len(picks) > 1:
+            with st.expander(f"Next {min(4, len(picks)-1)} {direction} candidates"):
+                for o in picks[1:5]:
+                    st.write(f"**{o.symbol}**: conviction {o.conviction_score} "
+                             f"(technical {o.technical_score})"
+                             + (" 🚫 blocked" if o.blocked else ""))
+
+st.divider()
 
 # --- Today's digest, if generated ---
 from datetime import date

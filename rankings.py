@@ -149,6 +149,54 @@ def top_bearish(scored: list, n: int = 10) -> list:
     return sorted(candidates, key=lambda s: s["bearish_score"], reverse=True)[:n]
 
 
+def rank_watchlist_with_sizing(capital: float, n: int = 10) -> dict:
+    """
+    Combines the accumulated bullish/bearish score (rank_watchlist) with
+    an actual portfolio-adjusted position-sizing suggestion for the top
+    N symbols in EACH direction - not the whole watchlist, since sizing
+    is real work (candle loads, a correlation matrix across your open
+    positions) and doing that for 500 symbols when only a handful are
+    ever actionable would be wasteful.
+
+    A bullish-ranked symbol is sized as a BUY; a bearish-ranked symbol
+    as a SELL (short) - the direction the accumulated score implies.
+    Sizing goes through calculate_portfolio_adjusted_position(), so a
+    symbol that scores strongly bullish but is already at your
+    same-symbol/correlation-cluster/total-risk-budget cap will
+    correctly come back blocked or reduced here, not just full-sized -
+    the accumulated score and your actual portfolio state are combined,
+    not shown side by side as two disconnected numbers.
+    """
+    from portfolio_risk import calculate_portfolio_adjusted_position
+
+    scored = rank_watchlist()
+
+    def _with_sizing(entries: list, action: str) -> list:
+        enriched = []
+        for entry in entries:
+            adjusted = calculate_portfolio_adjusted_position(entry["symbol"], action, capital)
+            plan = adjusted.base_plan
+            enriched.append({
+                **entry,
+                "action": action,
+                "entry_price": plan.entry_price if plan else None,
+                "stop_loss": plan.stop_loss if plan else None,
+                "take_profit": plan.take_profit if plan else None,
+                "suggested_size": adjusted.approved_size,
+                "suggested_value": adjusted.approved_value,
+                "blocked": adjusted.blocked,
+                "block_reason": adjusted.block_reason,
+                "total_risk_used_pct": adjusted.total_risk_used_pct,
+                "correlated_with": adjusted.correlated_with,
+            })
+        return enriched
+
+    return {
+        "bullish": _with_sizing(top_bullish(scored, n), "BUY"),
+        "bearish": _with_sizing(top_bearish(scored, n), "SELL"),
+    }
+
+
 def annotate_contradictions(scored: list, position_statuses: list) -> list:
     """Cross-checks each symbol's dominant technical bias against any
     open position's actual direction + live P&L. Flags a contradiction
