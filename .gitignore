@@ -2,6 +2,7 @@
 .access_token
 __pycache__/
 *.pyc
+*.log
 *.db
 *.db-shm
 *.db-wal

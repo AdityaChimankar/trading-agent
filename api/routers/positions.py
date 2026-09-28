@@ -18,7 +18,7 @@ class OpenPositionRequest(BaseModel):
 @router.get("/positions")
 def list_positions():
     """Every open position with live P&L and a HOLD/SELL indicator."""
-    from position_monitor import get_all_position_statuses
+    from risk.position_monitor import get_all_position_statuses
 
     return jsonable(get_all_position_statuses(fetch_current_signals=True))
 
@@ -34,7 +34,7 @@ def open_position(payload: OpenPositionRequest):
     UI claimed. This records the approved size, which is what the label
     always promised.
     """
-    from portfolio_risk import add_open_position, calculate_portfolio_adjusted_position
+    from risk.portfolio_risk import add_open_position, calculate_portfolio_adjusted_position
 
     adjusted = calculate_portfolio_adjusted_position(payload.symbol, payload.action, payload.capital)
 
@@ -56,7 +56,7 @@ def open_position(payload: OpenPositionRequest):
 
 @router.post("/positions/{position_id}/close")
 def close(position_id: int):
-    from portfolio_risk import close_position
+    from risk.portfolio_risk import close_position
 
     close_position(position_id)
     return {"closed": position_id}

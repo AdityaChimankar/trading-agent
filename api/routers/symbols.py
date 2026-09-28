@@ -7,9 +7,9 @@ refreshes fast, the news table doesn't need to).
 from fastapi import APIRouter, HTTPException, Query
 
 from api.serializers import jsonable
-from db import get_connection, get_watchlist_symbols
-from quant_indicators import compute_adx, compute_atr, compute_rsi, load_candles
-from pattern_detection import compute_pattern_columns, detect_patterns
+from core.pattern_detection import compute_pattern_columns, detect_patterns
+from core.quant_indicators import compute_adx, compute_atr, compute_rsi, load_candles
+from storage.db import get_connection, get_watchlist_symbols
 
 router = APIRouter(prefix="/api/symbols", tags=["symbols"])
 
@@ -96,7 +96,7 @@ def sizing(symbol: str, capital: float = Query(100000.0, gt=0)):
         return jsonable({"symbol": symbol, "has_signal": False,
                          "action": latest["action"] if latest else None, "adjusted": None})
 
-    from portfolio_risk import calculate_portfolio_adjusted_position
+    from risk.portfolio_risk import calculate_portfolio_adjusted_position
 
     adjusted = calculate_portfolio_adjusted_position(symbol, latest["action"], capital)
     return jsonable({"symbol": symbol, "has_signal": True, "action": latest["action"],

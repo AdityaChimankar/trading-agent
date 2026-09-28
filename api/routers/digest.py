@@ -4,7 +4,7 @@ from datetime import date as _date
 from fastapi import APIRouter, Query
 
 from api.serializers import jsonable
-from db import get_connection
+from storage.db import get_connection
 
 router = APIRouter(prefix="/api", tags=["digest"])
 

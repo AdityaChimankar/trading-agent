@@ -1,0 +1,79 @@
+"""SQLite connection + one-time schema setup."""
+import sqlite3
+from paths import DB_PATH, SCHEMA_PATH
+
+
+def get_connection() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    
+    # Execute as a single script for faster initialization
+    conn.executescript("""
+        PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=NORMAL;      -- Fast disk writes (safe in WAL mode)
+        PRAGMA temp_store=MEMORY;       -- Store temp tables/indices in RAM
+        PRAGMA mmap_size=30000000000;   -- Use memory mapping for ultra-fast reads
+        PRAGMA busy_timeout=30000;
+    """)
+    conn.row_factory = sqlite3.Row
+    return conn
+def get_open_position_symbols() -> set:
+    """Symbols with a currently-open paper position, for cross-referencing
+    against the watchlist ranking (so the sidebar can flag them)."""
+    conn = get_connection()
+    rows = conn.execute("SELECT DISTINCT symbol FROM open_positions WHERE status = 'open'").fetchall()
+    conn.close()
+    return {r["symbol"] for r in rows}
+
+def init_db() -> None:
+    conn = get_connection()
+    with open(SCHEMA_PATH) as f:
+        conn.executescript(f.read())
+    conn.commit()
+    _migrate_add_missing_columns(conn)
+    conn.close()
+    print(f"DB ready at {DB_PATH}")
+
+
+def _migrate_add_missing_columns(conn: sqlite3.Connection) -> None:
+    """CREATE TABLE IF NOT EXISTS is a no-op on a table that already
+    exists, so a schema.sql change that adds a column to an existing
+    table won't apply to a DB someone already created. This adds any
+    genuinely new columns safely, ignoring 'duplicate column' errors
+    for columns that are already there. Add new (table, column, type)
+    entries here whenever schema.sql adds a column to an EXISTING
+    table (new tables don't need this - CREATE TABLE IF NOT EXISTS
+    handles those fine on its own)."""
+    migrations = [
+        ("open_positions", "stop_loss", "REAL"),
+        ("open_positions", "take_profit", "REAL"),
+    ]
+    for table, column, col_type in migrations:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise  # a real error, not just "already migrated" - don't swallow it
+
+
+def get_watchlist() -> list:
+    """Single source of truth for the watchlist - reads from the DB
+    (populated by ingest.fetch_historical's seed_watchlist(), which
+    itself reads ingest/watchlist_resolved.py). Every file that needs symbols or
+    tokens should call this instead of hardcoding its own list - a
+    hardcoded list silently drifts out of sync the moment you change
+    your watchlist anywhere else."""
+    conn = get_connection()
+    rows = conn.execute("SELECT symbol, instrument_token, exchange FROM watchlist").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_watchlist_symbols() -> list:
+    """Just the symbol strings, for files that only need names not tokens."""
+    return [w["symbol"] for w in get_watchlist()]
+
+
+if __name__ == "__main__":
+    init_db()

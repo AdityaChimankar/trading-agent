@@ -1,0 +1,206 @@
+# Architecture
+
+## Layering
+
+Packages form a strict stack. Arrows point in the direction of the import — a
+layer may import the layers below it, never above.
+
+```
+                       scripts/            (orchestration: scheduler, pre-flight)
+                          │
+        ┌─────────────────┼──────────────────────────┐
+        ▼                 ▼                          ▼
+   strategy/          analysis/                   ingest/         (all use core + storage)
+        │                 │                          │
+        └────────┬────────┘                          │
+                 ▼                                   │
+              risk/  ─────────────────────────────────┤
+                 │                                   │
+                 ▼                                   ▼
+              core/  ◄────────────────────────────────┘      (indicators, patterns, sizing)
+                 │
+                 ▼
+             storage/                                   (SQLite: connection, schema, watchlist)
+                 │
+                 ▼
+              paths.py                                  (file locations; no imports at all)
+
+   research/  sits beside the stack: it imports core, storage and strategy,
+              and nothing imports it except diagnostics tooling and strategy's
+              shared-helper import (see "Known inversion" below).
+
+   api/  is a read-only façade — it imports any layer, nothing imports it.
+   frontend/  only ever talks to api/ over HTTP.
+```
+
+### What each package is allowed to do
+
+| Package | Responsibility | Not allowed |
+|---|---|---|
+| `paths.py` | Resolve every file location from `__file__` | Import anything project-local |
+| `storage/` | SQLite connection, schema, migrations, watchlist reads | Contain trading logic |
+| `core/` | Deterministic math: indicators, patterns, sizing | Call an LLM, write files, place orders |
+| `ingest/` | Talk to Kite/NSE/RSS, write candles and news | Decide anything |
+| `analysis/` | Read stored data and describe it | Write signals |
+| `strategy/` | Turn features into BUY/SELL/HOLD | Size positions or enforce portfolio limits |
+| `risk/` | Allocate capital, cap exposure, monitor positions | Generate entry signals |
+| `research/` | Offline validation of `strategy/` | Run during market hours |
+| `scripts/` | Wire the pipeline into a schedule | Contain business logic |
+| `api/` | Serialize existing functions to JSON | Re-implement any calculation |
+
+## Known inversion: `strategy/` → `research/`
+
+Two strategy modules import shared helpers from `research/backtest.py`:
+
+- `strategy/ml_features.py` → `prepare_symbol_series`, `precompute_pattern_bias_codes`
+- `strategy/ml_decision_agent.py` → the same two
+
+That is backwards: validation code should depend on the strategy, not the other
+way around. It is a deliberate, documented wart rather than a bug — these helpers
+are the *canonical* implementations, and `research/backtest.py` is where they were
+written and verified. `research/backtest.py` itself imports
+`strategy/decision_agent.py`'s `evaluate_signals`, so the two packages reference
+each other.
+
+There is **no import-time cycle** (importing `strategy.ml_features` pulls in
+`research.backtest`, which pulls in `strategy.decision_agent`, which imports only
+`core`/`storage` — the chain terminates). But the layering is wrong, and the fix
+is to lift the shared pieces — `SLIPPAGE`, `DEFAULT_PARAMS`,
+`precompute_pattern_bias_codes`, `vectorized_evaluate`, `prepare_symbol_series`
+— into a new `core/signals.py`, leaving `research/backtest.py` as a caller. That
+makes `strategy → core` and `research → {core, strategy}`, with no inverted edge.
+
+## Data flow, end to end
+
+```
+                      ┌──────────────────────────────────────────────┐
+  Kite WebSocket ───► │ ingest/live_ticker.py                        │
+  (1-min buckets)     │  ticker thread: in-memory only               │
+                      │  flush thread:  → candles                     │
+                      └──────────────────────────────────────────────┘
+  Kite REST ────────► ingest/fetch_historical.py ──► candles
+  RSS feeds ────────► ingest/fetch_news.py ────────► news
+                                        │
+                                        ▼
+                            analysis/sentiment.py ──► sentiment
+                                        │
+   candles ─────► core/quant_indicators.py   (RSI, ATR, ADX)
+                  core/pattern_detection.py  (candles + swings)
+                                        │
+                                        ▼
+                          strategy/decision_agent.py  ──► signals
+                          strategy/llm_decision_agent.py ──► llm_signals
+                          strategy/ml_decision_agent.py  ──► ml_signals
+                                        │
+                                        ▼
+                            analysis/digest.py ──► digests
+
+   On demand / by hand:
+     analysis/rankings.py ──► analysis/opportunity_finder.py   (conviction picks)
+     core/position_sizing.py ──► risk/portfolio_risk.py ──► open_positions
+     risk/position_monitor.py  ──► live P&L + HOLD/SELL per position
+```
+
+The three decision agents are **parallel, not sequential**. `decision_agent.py`
+is the only one that counts; the LLM and ML paths exist to build a comparison
+track record on identical inputs. They write to separate tables precisely so a
+comparison can never contaminate the tested path.
+
+## Storage schema
+
+SQLite, WAL mode, `data/trading_agent.db`. Defined in `storage/schema.sql` and
+created/migrated by `storage/db.py`:
+
+| Table | Written by | Contents |
+|---|---|---|
+| `watchlist` | `ingest/fetch_historical.py` | symbol, instrument_token, exchange — **the single source of truth** |
+| `candles` | `ingest/fetch_historical.py`, `ingest/live_ticker.py` | OHLCV bars per symbol/timestamp |
+| `news` | `ingest/fetch_news.py` | RSS items keyword-tagged to symbols |
+| `sentiment` | `analysis/sentiment.py` | Gemini score per news item |
+| `signals` | `strategy/decision_agent.py` | Rule-based BUY/SELL/HOLD (the tested path) |
+| `llm_signals` | `strategy/llm_decision_agent.py` | LLM calls, for comparison only |
+| `ml_signals` | `strategy/ml_decision_agent.py` | Model calls, for comparison only |
+| `digests` | `analysis/digest.py` | End-of-day narrative |
+| `open_positions` | `risk/portfolio_risk.py` (via the API) | Paper ledger, incl. stop_loss / take_profit |
+
+`init_db()` is idempotent and self-healing — it runs `schema.sql` and then adds
+any column missing from an existing table. `api/main.py` calls it on startup,
+which is what closes the "I forgot to re-run `python -m storage.db` after
+upgrading" gap.
+
+## Concurrency model
+
+Four processes touch the DB during market hours, so contention is the default
+assumption rather than an edge case:
+
+- **WAL mode + 30 s `busy_timeout`** (`storage/db.py`) lets readers and one
+  writer coexist instead of failing fast with "database is locked".
+- **`ingest/live_ticker.py` commits nothing from the tick callback.** `on_ticks`
+  does in-memory dict updates only; a separate thread drains completed
+  minute-buckets every 5 s. Blocking `on_ticks` on I/O is what caused repeated
+  WebSocket 1006 disconnects at scale.
+- **Every write loop commits per symbol**, not once per watchlist scan. Holding a
+  transaction open across 500 symbols — with network-latency LLM calls in the
+  middle — can outlast even a generous `busy_timeout`.
+- **`MAX_WORKERS = 4`** in the parallel research tools, rather than
+  `os.cpu_count()`. Many processes each re-importing scipy's compiled libraries
+  simultaneously can exhaust Windows' default page file and die with a DLL load
+  error.
+
+## API and frontend boundary
+
+`api/` is a pure JSON façade. It contains **no trading logic** — each endpoint
+imports and calls the same function the CLI calls, so there is exactly one
+implementation of every calculation.
+
+| Endpoint | Delegates to |
+|---|---|
+| `GET /api/health` | — |
+| `GET /api/watchlist` | `storage.db`, `analysis.rankings`, `risk.position_monitor` |
+| `GET /api/rankings` | `analysis.rankings` |
+| `GET /api/positions` | `risk.position_monitor` |
+| `POST /api/positions` | `risk.portfolio_risk.calculate_portfolio_adjusted_position` |
+| `POST /api/positions/{id}/close` | `risk.portfolio_risk.close_position` |
+| `GET /api/opportunities` | `analysis.opportunity_finder` |
+| `GET /api/digest` | `analysis.digest` |
+| `GET /api/symbols/{symbol}/{chart,patterns,sizing,news,signals,llm-signals,ml-signals}` | `storage.db`, `core.quant_indicators`, `core.pattern_detection`, `risk.portfolio_risk` |
+
+Only the two position endpoints are mutations, and both write to the paper
+ledger — nothing reaches a broker.
+
+Two details worth knowing:
+
+- **`api/serializers.py` exists because NaN is not valid JSON.** The analysis
+  modules return dataclasses, `sqlite3.Row`s and numpy scalars; everything
+  crossing the boundary is normalized there, so a NaN indicator arrives as
+  `null` instead of breaking the response.
+- **Transport is separate from the layers.** In dev, Vite (`:5173`) proxies
+  `/api` to uvicorn on `:8000` and CORS allows localhost origins. The front end
+  never imports Python and never computes a signal — it renders what the API
+  returns. That is why `npm run build` and `npx tsc --noEmit` are the only
+  frontend gates that matter.
+
+## Verifying a change
+
+There is no test suite; verification is by self-checking entry points and
+cheap smoke tests. In rough order of value:
+
+```bash
+python -m py_compile paths.py storage/*.py core/*.py ingest/*.py analysis/*.py \
+    strategy/*.py risk/*.py research/*.py scripts/*.py api/*.py api/routers/*.py
+
+python -m research.backtest --selftest             # vectorized fast path == slow reference
+python -m research.walk_forward_optimizer --selftest 360ONE   # 27/27 grid combos match
+python -m strategy.ml_features 360ONE              # feature build produces labelled rows
+cd frontend && npx tsc --noEmit                    # strict TS
+```
+
+`research/backtest.py --selftest` and
+`research/walk_forward_optimizer.py --selftest` are the load-bearing ones: they
+independently confirm that the vectorized fast paths reproduce the slow
+per-candle loops on *your* stored data, which is the assumption the entire
+validation story rests on.
+
+Because every command is a `python -m` invocation, **the working directory must
+be the repository root**. That is also what guarantees `paths.py` and `.env` are
+found.

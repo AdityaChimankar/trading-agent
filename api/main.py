@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import digest, opportunities, positions, symbols, watchlist
-from db import init_db
+from storage.db import init_db
 
 
 @asynccontextmanager

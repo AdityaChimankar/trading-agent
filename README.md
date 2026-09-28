@@ -1,305 +1,300 @@
 # Intraday Trading Signal Agent
 
-A local-first AI agent that combines real-time market data, deterministic
-technical/pattern analysis, LLM-based sentiment scoring, and an ML model
-to generate intraday BUY/SELL/HOLD signals for NSE stocks, with ATR-based
-position sizing, portfolio-level risk checks, walk-forward parameter
-validation, and live position monitoring. Paper-trading signals only -
-no live order execution.
+A local-first research pipeline for NSE intraday signals. It ingests live and
+historical candles, computes deterministic technical/pattern features, and runs
+**three independent decision paths side by side** — rule-based, LLM, and ML — so
+their calls can be compared on real outcomes instead of argued about. On top of
+that: ATR-based position sizing, portfolio-level risk caps, walk-forward
+threshold validation, paper-position monitoring, and a FastAPI + React dashboard.
 
-## Project structure
-
-```
-trading-agent/
-├── README.md                        This file
-├── requirements.txt                  All Python dependencies
-├── .env.example                       Credential template (Kite + Gemini keys)
-├── schema.sql                         SQLite schema
-├── db.py                              DB connection (WAL mode) + watchlist single source of
-│                                       truth + safe schema migrations
-│
-├── build_nifty500_symbols.py          Downloads current Nifty 500 list from NSE -> symbols.txt
-├── instrument_lookup.py               Resolves symbols -> Kite instrument tokens -> watchlist_resolved.py
-├── kite_auth.py                       Daily Zerodha login, generates access token
-├── validate_setup.py                   Pre-flight check: Kite auth/data, news feeds, Gemini API, watchlist
-├── fetch_historical.py                Chunked, resumable, rate-limit-safe historical backfill
-├── live_ticker.py                     WebSocket live candle streaming (background-thread DB flush)
-├── fetch_news.py                       Free RSS news polling, keyword-tagged to symbols
-│
-├── quant_indicators.py                RSI, ATR, ADX - deterministic, no LLM
-├── pattern_detection.py               Candlestick + swing patterns
-├── sentiment.py                        Gemini sentiment scoring on tagged news
-├── decision_agent.py                  Rule-based BUY/SELL/HOLD (tested, backtestable, tunable thresholds)
-├── llm_decision_agent.py              LLM-based decision agent - runs PARALLEL for comparison
-├── ml_features.py                      Feature engineering for the ML model (no lookahead, verified)
-├── train_ml_model.py                   Trains the ML model (chronological train/test split)
-├── ml_decision_agent.py                ML-based decision agent - runs PARALLEL for comparison
-├── digest.py                           End-of-day narrative summary
-├── rankings.py                         Watchlist-wide bullish/bearish scoring (dashboard sidebar)
-├── position_sizing.py                  ATR-based position sizing + stop-loss/take-profit
-├── portfolio_risk.py                    Portfolio-level risk: same-symbol + correlation clusters +
-│                                        total risk budget
-├── position_monitor.py                 Live P&L + HOLD/SELL indicator for open positions
-│
-├── backtest.py                         Vectorized backtesting harness (single/multi-symbol/--all)
-├── walk_forward_optimizer.py          Rolling train/test parameter re-fitting, out-of-sample
-│                                        validated, parallelized (capped workers) + --selftest
-├── scheduler.py                        Automation: news -> sentiment -> decisions -> ML compare
-│                                        -> LLM compare -> digest
-├── api/                               FastAPI backend for the dashboard - JSON over the same
-│   │                                    modules above, no trading logic of its own
-│   ├── main.py                         App, CORS, startup DB init, router registration
-│   ├── serializers.py                  numpy/pandas/dataclass -> JSON-safe conversion
-│   └── routers/                        watchlist, positions, opportunities, digest, symbols
-│
-├── frontend/                          React + TypeScript + Vite dashboard
-│   ├── package.json                   Node dependencies (run `npm install` inside frontend/)
-│   ├── vite.config.ts                  Dev server + /api proxy to the FastAPI backend
-│   └── src/                            App shell, polling API hooks, chart, panels
-│
-└── data/
-    └── trading_agent.db                SQLite database (created/migrated by db.py)
-```
-
-## Tech stack & cost
-
-| Layer | Choice | Cost |
-|---|---|---|
-| Market data + news | Zerodha Kite Connect | ~Rs.500/month |
-| Watchlist sourcing | NSE Nifty 500 CSV + `requests` | Rs.0 |
-| Quant + patterns | pandas, numpy, scipy | Rs.0 |
-| Sentiment + LLM decisions | Gemini Flash-Lite API | ~Rs.400-1200/month |
-| ML model | scikit-learn (HistGradientBoostingClassifier) + joblib | Rs.0 |
-| Orchestration | plain Python + APScheduler | Rs.0 |
-| Storage | SQLite (WAL mode) | Rs.0 |
-| Dashboard API | FastAPI + uvicorn | Rs.0 |
-| Dashboard UI | React + TypeScript + Vite + Plotly.js | Rs.0 |
+**Paper trading only.** Nothing in this repository places a real order. The
+`open_positions` table is a manual ledger you fill in by clicking a button.
 
 ---
 
-## Phase 1: One-time setup
+## ⚠️ Current status: the rule-based signal has no measured edge
+
+Read this before you run anything live. `research/diagnose_edge.py` measures the
+signal against the only benchmark that matters — **entering at a random candle** —
+and the entry rule does not beat it:
+
+| | gross EV / trade | vs random | t |
+|---|---|---|---|
+| random entry (baseline long) | +0.0014% | — | +3.3 |
+| **all signals** (direction-adjusted) | **−0.0042%** | −0.0042% | −4.5 |
+| BUY signals (n = 117,349) | −0.0006% | −0.0020% | −0.4 |
+| SELL signals (n = 389,039) | −0.0053% | −0.0040% | −4.9 |
+
+BUY is statistically indistinguishable from a coin flip (t = −0.4). The "pattern
+confirmation" gate is not a gate at all — a bullish or bearish pattern code is
+present on **98.0%** of candles, so it filters almost nothing while structurally
+biasing the book ~76% short. Slippage is 0.05% per trade; the best edge found
+anywhere in the ablation is 0.009% — about 5× too small to survive costs.
+
+The single largest measured improvement is an exit-logic change: **removing the
+fixed take-profit** gains ~+0.009%/trade (~33% relative) versus the exit logic
+currently traded live, because the 2:1 target fires on 23.4% of trades while the
+1.5×ATR stop fires on 55.9%.
+
+Full numbers, method, tolerance/horizon/component sweeps and ranked
+recommendations: **[docs/EDGE_ANALYSIS.md](docs/EDGE_ANALYSIS.md)**.
+
+Treat this repo as a *measurement harness* — that part works well. The strategy
+is a hypothesis that has not held up, and no amount of RSI/ADX threshold tuning
+will fix it (that would be curve-fitting noise). See the docs for what to change.
+
+---
+
+## Project structure
+
+Layers point downward only: `storage` → `core` → `{analysis, strategy, risk}` →
+`research`. `scripts/` orchestrates, `api/` reads.
+
+```
+trading-agent/
+├── paths.py                        Every file location in the project, in one place
+├── symbols.txt                     Your watchlist seed (one NSE symbol per line)
+├── requirements.txt
+├── .env.example                    Credential template (Kite + Gemini keys)
+│
+├── storage/                        SQLite persistence
+│   ├── db.py                        Connection (WAL), schema init, migrations, watchlist reads
+│   └── schema.sql                   Table definitions
+│
+├── core/                           Deterministic primitives — no LLM, no I/O side effects
+│   ├── quant_indicators.py          RSI, ATR, ADX
+│   ├── pattern_detection.py         Candlestick + swing patterns
+│   └── position_sizing.py           ATR-based size, stop-loss, take-profit
+│
+├── ingest/                         Getting market data in
+│   ├── kite_auth.py                 Daily Zerodha login -> .access_token
+│   ├── build_nifty500_symbols.py    NSE Nifty 500 list -> symbols.txt
+│   ├── instrument_lookup.py         symbols.txt -> instrument tokens
+│   ├── instruments.csv              Kite instrument dump (~9 MB, downloaded, tracked)
+│   ├── watchlist_resolved.py        Generated token map (read by fetch_historical)
+│   ├── fetch_historical.py          Resumable, rate-limited 5-min candle backfill
+│   ├── fetch_news.py                Free RSS feeds, keyword-tagged to symbols
+│   └── live_ticker.py               KiteTicker WebSocket -> 1-min candles
+│
+├── analysis/                       Read-only intelligence over stored data
+│   ├── sentiment.py                 Gemini sentiment scoring on tagged news
+│   ├── rankings.py                  Watchlist-wide bullish/bearish scoring
+│   ├── opportunity_finder.py        Conviction-ranked top picks
+│   ├── technical_summary.py         Human-readable indicator read
+│   └── digest.py                    End-of-day narrative summary
+│
+├── strategy/                       The three decision paths + experimental candidates
+│   ├── decision_agent.py            Rule-based — THE tested path
+│   ├── llm_decision_agent.py        Gemini decisions, parallel comparison
+│   ├── ml_decision_agent.py         Trained-model decisions, parallel comparison
+│   ├── ml_features.py               Feature engineering (no lookahead, verified)
+│   ├── train_ml_model.py            Chronological train/test split + trade simulation
+│   ├── candidates.py                Candidate entries (long-only, evidence-derived)
+│   └── shadow.py                    Logs candidate votes to strategy_signals, live
+│
+├── risk/
+│   ├── portfolio_risk.py            Risk budget + same-symbol + correlation caps
+│   └── position_monitor.py          Live P&L and HOLD/SELL per open position
+│
+├── research/                       Offline validation
+│   ├── backtest.py                  Vectorized harness, --selftest
+│   ├── walk_forward_optimizer.py    Rolling out-of-sample threshold fitting
+│   ├── diagnose_edge.py             Is there any edge at all? (baseline + ablations)
+│   └── strategy_lab.py              Measures candidates vs baselines, with costs
+│
+├── scripts/
+│   ├── scheduler.py                 The daily automation loop
+│   └── validate_setup.py            Pre-flight check before market hours
+│
+├── api/                            FastAPI JSON layer — NO trading logic
+│   ├── main.py                      App, CORS, startup DB init, router registration
+│   ├── serializers.py               numpy/pandas/dataclass -> JSON-safe conversion
+│   └── routers/                     watchlist, positions, opportunities, digest, symbols
+│
+├── frontend/                       React + TypeScript + Vite dashboard
+│   └── src/                         App shell, polling hooks, Plotly chart, panels
+│
+├── models/ml_model.joblib          Trained ML model artifact
+└── data/trading_agent.db           SQLite database (gitignored, created by storage/db.py)
+```
+
+Details in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+---
+
+## Quickstart
+
+**Every command below is run from the repository root** — that is a requirement
+of the `python -m` form, and it is what makes the package imports resolve.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-1. Sign up at https://developers.kite.trade/signup and subscribe to the
-   paid Kite Connect plan (required for live + historical data).
+1. Sign up at https://developers.kite.trade/signup and subscribe to the paid
+   Kite Connect plan (required for live *and* historical data).
 2. Get a free Gemini API key at https://ai.google.dev.
-3. Copy `.env.example` to `.env` and fill in `KITE_API_KEY`,
-   `KITE_API_SECRET`, and `GEMINI_API_KEY`.
-4. Build your watchlist:
-   ```bash
-   python build_nifty500_symbols.py         # -> symbols.txt (or write your own list)
-   python instrument_lookup.py symbols.txt   # -> watchlist_resolved.py
-   ```
-5. Initialize the database:
-   ```bash
-   python db.py
-   ```
-6. Install the dashboard front end's dependencies (Node 18+):
-   ```bash
-   cd frontend
-   npm install
-   ```
-
-## Phase 2: Historical backfill (one-time, or occasional top-up)
+3. Copy `.env.example` to `.env` and fill in `KITE_API_KEY`, `KITE_API_SECRET`,
+   and `GEMINI_API_KEY`.
+4. Build the watchlist and create the database:
 
 ```bash
-python kite_auth.py          # daily login - opens a URL, paste back the request_token
-python fetch_historical.py   # backfills ~1 year of 5-min candles, resumable if interrupted
+python -m ingest.build_nifty500_symbols        # -> symbols.txt (or write your own list)
+python -m ingest.instrument_lookup symbols.txt # -> ingest/watchlist_resolved.py
+python -m storage.db                           # create/migrate the schema
 ```
 
-For 500 symbols, expect the backfill itself to take 30-60 minutes due to
-Kite's per-request rate limit - this is a one-time cost, re-runs skip
-symbols already backfilled.
-
-## Phase 3: Validate before trusting anything live
+5. Install the front end's dependencies (Node 18+):
 
 ```bash
-python backtest.py --all
-python walk_forward_optimizer.py --all
-python walk_forward_optimizer.py --selftest      # optional: verify the fast path on YOUR data
-python train_ml_model.py --all                    # optional: train the ML comparison model
+cd frontend && npm install && cd ..
 ```
 
-`backtest.py` checks win rate, risk-reward ratio, and max drawdown with
-fixed default thresholds. `walk_forward_optimizer.py` goes further - it
-re-fits RSI/ADX thresholds per stock on rolling training windows and
-validates on genuinely out-of-sample data it never saw during tuning.
-`--selftest` independently confirms its vectorized fast path matches the
-slow per-candle loop on your actual market data (not just the synthetic
-data it was verified against during development). `train_ml_model.py`
-trains the optional ML comparison model with a strict chronological
-train/test split and reports both classification accuracy and an actual
-trade simulation. Don't skip any of this - it's what tells you whether
-the rule-based logic has an edge before it runs live.
-
-## Phase 4: Daily routine (every trading day, 9:15 AM - 3:30 PM IST)
+## Backfill (one-time, or an occasional top-up)
 
 ```bash
-python kite_auth.py          # 1. refresh today's access token (manual, ~1 min, required daily)
-python validate_setup.py     # 2. pre-flight check - confirms Kite, news feeds, and Gemini are all working
+python -m ingest.kite_auth          # daily login: opens a URL, paste back the request_token
+python -m ingest.fetch_historical   # ~1 year of 5-min candles, resumable if interrupted
 ```
 
-`validate_setup.py` exits with code 0 if everything passes, 1 if not -
-catches a dead API key or expired token here, not 5 minutes into market
-hours. You can chain it: `python validate_setup.py && python live_ticker.py`
-will refuse to start if a check fails.
+For 500 symbols, expect 30–60 minutes — Kite rate-limits historical requests.
+Re-runs skip symbols that are already backfilled.
+
+## Validate before trusting anything
+
+```bash
+python -m research.backtest --all
+python -m research.diagnose_edge --n 120        # is there an edge at all?
+python -m research.walk_forward_optimizer --all
+python -m research.backtest --selftest          # verify the fast path on YOUR data
+python -m strategy.train_ml_model --all         # optional: the ML comparison model
+```
+
+`research/backtest.py` reports win rate, risk-reward and max drawdown at the
+default thresholds. `research/walk_forward_optimizer.py` re-fits RSI/ADX per
+stock on rolling windows and validates out-of-sample — the only number here that
+isn't in-sample. `research/diagnose_edge.py` is the one to run first: it tells
+you whether there is anything to tune, which the other two cannot answer.
+
+## Daily routine (trading days, 9:15 AM – 3:30 PM IST)
+
+```bash
+python -m ingest.kite_auth        # 1. refresh today's access token (required daily, ~1 min)
+python -m scripts.validate_setup  # 2. pre-flight: Kite, news feeds, Gemini, DB all working
+```
+
+`scripts/validate_setup.py` exits 0 on success and 1 on failure, so you can
+chain it: `python -m scripts.validate_setup && python -m ingest.live_ticker`
+refuses to start on a failed check.
 
 Then, in separate terminals:
+
 ```bash
-python live_ticker.py        # 3. streams live candles all day
-python scheduler.py          # 4. runs news / sentiment / decisions (5 min) / ML compare (5 min) /
-                              #    LLM compare (15 min) / digest (3:35 PM)
-python -m uvicorn api.main:app --reload --port 8000   # 5. dashboard API (terminal 3)
-cd frontend && npm run dev                            # 6. dashboard UI (terminal 4)
-                                                      #    open http://localhost:5173
+python -m ingest.live_ticker                             # 3. live candle stream
+python -m scripts.scheduler                              # 4. news / sentiment /
+                                                         #    decisions (5 min) / ML (5 min) /
+                                                         #    LLM (15 min) / digest (3:35 PM)
+python -m uvicorn api.main:app --reload --port 8000      # 5. dashboard API
+cd frontend && npm run dev                               # 6. dashboard UI -> localhost:5173
 ```
 
-The UI polls the API on its own schedule (positions every 15s, rankings and
-opportunities every 60s, the chart every 15s), so the page keeps updating
-without a manual refresh - the top bar shows a `⟳ live` indicator while any
-request is in flight. FastAPI also serves interactive endpoint docs at
+The UI polls on its own schedule (positions and charts every 15 s, rankings and
+opportunities every 60 s) and the top bar shows a `⟳ live` indicator while a
+request is in flight. FastAPI serves interactive endpoint docs at
 http://localhost:8000/docs.
 
-At market close (3:30 PM), Ctrl+C `live_ticker.py`, `scheduler.py`, the
-uvicorn server and the Vite dev server - no cleanup needed.
+The scheduler also runs a **shadow cycle** every 5 minutes: the candidate
+strategies in `strategy/candidates.py` vote on the latest candle and their
+votes are logged to the `strategy_signals` table — alongside the rule agent's
+action on the same candle — without influencing any live decision. That table
+is the out-of-sample track record used by the promotion rules in
+[docs/STRATEGIES.md](docs/STRATEGIES.md).
 
-## Design notes worth knowing
+At close, Ctrl+C all four — no cleanup needed.
 
-- **The watchlist has ONE source of truth: the `watchlist` DB table**,
-  read via `db.get_watchlist()` / `get_watchlist_symbols()`. Every file
-  reads from there - none hardcode their own symbol list. That was
-  exactly the bug that once caused signals to silently run on only 2
-  symbols after a 500-symbol watchlist was already set up.
-- **`decision_agent.py` is the tested path.** Its `evaluate_signals()` rule
-  logic is what `backtest.py` and `walk_forward_optimizer.py` validate.
-  Thresholds are parameterized (not hardcoded) with defaults matching the
-  originally tested values, so only the optimizer passes non-default
-  values - normal live runs are unaffected. `llm_decision_agent.py` and
-  `ml_decision_agent.py` both run alongside for comparison, writing to
-  *separate* `llm_signals` / `ml_signals` tables - neither feeds into the
-  rule-based decision, and neither is a replacement until its agreement
-  rate + real outcomes justify that.
-- **`ml_decision_agent.py`'s live feature-building was checked against
-  `train_ml_model.py`'s training-time feature-building and confirmed
-  identical** (a real train/serve skew bug was caught and fixed during
-  development - the two initially disagreed because they were compared
-  at different candle indices, not because the logic itself was wrong,
-  but it's exactly the kind of mismatch that silently produces bad
-  predictions if it isn't checked).
-- **SQLite runs in WAL mode with a 30s busy_timeout** (set in
-  `db.py`'s `get_connection()`), since `live_ticker.py`, `scheduler.py`,
-  and the dashboard API all access the DB concurrently. On top of that,
-  every write loop (decision cycles, LLM/ML comparison cycles) commits
-  **per-symbol**, not once at the end of a whole watchlist scan -
-  holding one write transaction open across hundreds of symbols
-  (especially with real network-latency LLM calls in between) can
-  exceed even a generous busy_timeout and cause "database is locked"
-  errors in other processes trying to write at the same time.
-- **`db.py`'s `init_db()` is idempotent and self-healing, and
-  `api/main.py` calls it on every startup.** `CREATE TABLE IF NOT
-  EXISTS` alone won't add a new column to a table that already exists
-  on your machine - a schema change (like adding `stop_loss`/
-  `take_profit` to `open_positions`) only takes effect once something
-  actually runs the migration. Relying on remembering to manually
-  re-run `python db.py` after every update is exactly what caused a
-  real `no column named stop_loss` crash during development - calling
-  `init_db()` from the API's startup closes that gap for good.
-- **The dashboard is a plain JSON API + a React SPA, not Streamlit.**
-  `api/` holds no trading logic - every endpoint calls the same Python
-  modules the Streamlit dashboard used, so there is still exactly one
-  implementation of each calculation. The front end never computes a
-  signal; it renders what the API returns. `api/serializers.py` exists
-  because those modules return dataclasses, `sqlite3.Row`s and numpy
-  scalars, and NaN is not valid JSON - everything crossing the boundary
-  is normalised there, which is why a NaN indicator shows as `null`
-  instead of breaking the response.
-- **`live_ticker.py`'s tick callback (`on_ticks`) does ONLY in-memory
-  dict updates - no DB access at all.** All SQLite writes happen in a
-  separate background thread that flushes completed minute-buckets
-  every few seconds. Kite's own guidance is that the WebSocket
-  connection gets dropped if `on_ticks` blocks on calculation or I/O -
-  doing DB writes inside that callback at scale (hundreds of symbols)
-  was the root cause of repeated 1006 disconnects.
-- **Kite Connect has no news API.** News comes from free RSS feeds
-  (Moneycontrol, Economic Times), keyword-matched to your watchlist.
-- **Backtest, walk-forward, and ML training sentiment is neutral
-  (0.0)/unused.** Historical news isn't backfilled candle-by-candle the
-  way price is, so all three currently validate the RSI/ADX/pattern
-  logic in isolation. Once you've run the live pipeline for a few
-  weeks, real historical sentiment will exist for future work.
-- **Transaction costs are modeled in the backtest and ML labels, but
-  not in the live P&L.** `backtest.SLIPPAGE` (0.05% round-trip) is
-  deducted from every simulated trade, and `ml_features.py` labels use
-  that same constant, so training and backtesting agree. This is exactly
-  the kind of value that used to be duplicated - it was a literal
-  `0.0005` in three files before being pulled into one place, and the
-  entry-price convention had already silently drifted between the
-  backtest and the walk-forward optimizer. `position_monitor.py`'s live
-  P&L still values open positions at the raw last price, so its numbers
-  remain slightly optimistic versus a real fill.
-- **`validate_setup.py` checks the REST APIs (Kite quotes, news feeds,
-  Gemini), not the live WebSocket connection itself.** A passing
-  pre-flight check doesn't guarantee `live_ticker.py`'s stream won't
-  drop mid-day - watch its terminal output during market hours too.
-- **`position_sizing.py` only calculates a plan - it never places
-  orders.** Risk-per-trade, ATR-based stop distance, and a hard max-
-  position-% cap are all tunable constants at the top of the file.
-- **`portfolio_risk.py` sizes trades against what's ALREADY open, not
-  in isolation - THREE checks, not two.** (1) A total risk budget
-  across all simultaneously open positions (default 6% of capital).
-  (2) Same-symbol concentration - closes a real gap found during
-  testing where the correlation check correctly excludes a symbol from
-  being "correlated with itself," which meant nothing stopped
-  accumulating multiple positions in the SAME stock; reproduced it
-  concretely (combined exposure reached 37.9% of capital, blowing past
-  the intended 20% cap) before fixing it. (3) A correlation-cluster cap
-  (default 20%) across DIFFERENT positions that move together -
-  measures REAL correlation from historical candle returns, not an
-  assumed sector label, so it catches co-movement a sector
-  classification would miss. All three verified against synthetic data
-  with deliberately correlated/independent/concentrated scenarios.
-  Uses a paper `open_positions` ledger (dashboard has Record/Close
-  buttons, now also storing each position's stop-loss/take-profit) -
-  not a real broker feed.
-- **`position_monitor.py` shows live P&L (placed value vs current
-  value) and a HOLD/SELL indicator per open position**, checked in
-  order: stop-loss hit -> take-profit hit -> current rule-based signal
-  reversed -> else HOLD. It only calculates a recommendation - closing
-  a position is still a manual click. Every branch (long/short profit
-  and loss, both exit triggers, signal reversal) was individually
-  tested with known price/level combinations before trusting it.
-- **`walk_forward_optimizer.py`'s fast path is vectorized (NumPy
-  array ops instead of a per-candle Python loop) and was verified to
-  produce byte-identical results to the original loop-based logic
-  across 135 test cases before being trusted** - this is what makes
-  500-symbol optimization take under a minute instead of several hours.
-  Run `python walk_forward_optimizer.py --selftest [symbols]` any time
-  to re-verify this on your own data. Parallel execution caps at
-  `MAX_WORKERS = 4` rather than using every CPU core - spawning many
-  processes that each reload scipy's compiled libraries at once can
-  exceed Windows' default virtual memory (page file) size and crash
-  with a DLL load error; lower `MAX_WORKERS` further (or raise it, if
-  you've increased your page file) as needed.
+---
 
-## Known gaps / next steps
+## Command reference
 
-- Access token refresh is manual daily; a TOTP-based auto-login script
-  would remove that step if it becomes tedious.
-- `live_ticker.py` needs a static IP registered with Zerodha only if you
-  later add order placement (not needed for data-only / paper trading).
-- `portfolio_risk.py`'s correlation lookback (500 candles) and
-  thresholds are fixed constants, not re-validated the way
-  `walk_forward_optimizer.py` validates the decision thresholds. Worth
-  the same rigor eventually.
-- The ML model (`train_ml_model.py`) uses scikit-learn's
-  `HistGradientBoostingClassifier`, not LightGBM/XGBoost - a deliberate
-  substitution (both are histogram-based gradient boosting, same
-  family) made because this project's dev environment couldn't install
-  the other two; worth trying if you can install them in yours. No
-  model versioning or drift detection yet either - each training run
-  overwrites the previous model file.
-- SEBI algo trading disclosure rules apply once this moves from personal
-  signals to automated order placement - out of scope for this POC.
+| What | Command |
+|---|---|
+| Pre-flight check | `python -m scripts.validate_setup` |
+| Refresh Kite token | `python -m ingest.kite_auth` |
+| Build watchlist from NSE | `python -m ingest.build_nifty500_symbols` |
+| Resolve instrument tokens | `python -m ingest.instrument_lookup symbols.txt` |
+| Create/migrate the DB | `python -m storage.db` |
+| Backfill history | `python -m ingest.fetch_historical` |
+| Stream live candles | `python -m ingest.live_ticker` |
+| Run the daily automation | `python -m scripts.scheduler` |
+| Backtest | `python -m research.backtest [SYMBOLS... \| --all \| --selftest]` |
+| Walk-forward validation | `python -m research.walk_forward_optimizer [SYMBOLS... \| --all \| --selftest]` |
+| Edge diagnostics | `python -m research.diagnose_edge [--n N \| --all \| SYMBOLS...] [--exits]` |
+| Strategy lab | `python -m research.strategy_lab [--n N \| --all] [--stop-mult 3.0]` |
+| Shadow log candidates | automatic via scheduler, or `python -m strategy.shadow` |
+| Train the ML model | `python -m strategy.train_ml_model [SYMBOLS... \| --all]` |
+| ML decision cycle | `python -m strategy.ml_decision_agent` |
+| Digest (end of day) | `python -m analysis.digest` |
+| Dashboard API | `python -m uvicorn api.main:app --reload --port 8000` |
+| Dashboard UI | `cd frontend && npm run dev` |
+| Frontend typecheck/build | `cd frontend && npx tsc --noEmit && npm run build` |
+
+## Configuration
+
+Credentials live in `.env`:
+
+| Variable | Purpose |
+|---|---|
+| `KITE_API_KEY` | Kite Connect API key |
+| `KITE_API_SECRET` | Kite Connect API secret |
+| `GEMINI_API_KEY` | Gemini API key (sentiment + LLM decisions) |
+
+`.access_token` (gitignored, written by `ingest/kite_auth.py`) holds the daily
+Kite session. Everything else is a named constant at the top of the relevant
+module — the ones that change behaviour most are `SLIPPAGE` and `DEFAULT_PARAMS`
+in `research/backtest.py`, and `RISK_PER_TRADE_PCT`, `ATR_STOP_MULTIPLIER`,
+`REWARD_RISK_RATIO`, `MAX_POSITION_PCT_OF_CAPITAL` in `core/position_sizing.py`.
+
+---
+
+## Key design decisions
+
+A short version — the reasoning, the bugs that forced each choice, and the
+trade-offs are in **[docs/DESIGN.md](docs/DESIGN.md)**.
+
+- **The `watchlist` DB table is the single source of truth.** No module hardcodes
+  a symbol list. A hardcoded list once silently ran signals on 2 of 500 symbols.
+- **`strategy/decision_agent.py` is the tested path.** `llm_decision_agent.py`
+  and `ml_decision_agent.py` run alongside it and write to their own
+  `llm_signals` / `ml_signals` tables. Neither feeds the rule-based decision.
+- **SQLite runs in WAL mode, and every write loop commits per symbol.** Holding
+  one write transaction across 500 symbols while making network LLM calls in
+  between is what produced "database is locked".
+- **`ingest/live_ticker.py` never touches the DB from its tick callback.** All
+  writes happen on a background flush thread; blocking `on_ticks` caused
+  repeated WebSocket 1006 disconnects at scale.
+- **The API holds no trading logic.** Every endpoint calls the same Python
+  modules the CLI does, so each calculation has exactly one implementation.
+
+## Known gaps
+
+- Access-token refresh is manual daily (a TOTP auto-login would remove it).
+- `risk/portfolio_risk.py`'s correlation lookback and thresholds are fixed
+  constants, not validated the way the decision thresholds are.
+- No model versioning or drift detection — each training run overwrites
+  `models/ml_model.joblib`.
+- `walk_forward_optimizer.py` tunes **entry thresholds only**; it cannot
+  validate exit logic, which is where the largest measurable gain is.
+- `ingest/live_ticker.py` is the one module that can't be tested offline (it
+  opens a live WebSocket at import) — watch its terminal output during market
+  hours.
+- SEBI algo-trading disclosure rules apply once this moves from personal signals
+  to automated order placement. Out of scope for this POC.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, data flow, dependency rules, DB schema, threading and API boundaries |
+| [docs/DESIGN.md](docs/DESIGN.md) | Why the code is built this way — decisions, the bugs behind them, trade-offs |
+| [docs/EDGE_ANALYSIS.md](docs/EDGE_ANALYSIS.md) | Measured evidence that the signal has no edge, and what to change |
+| [docs/STRATEGIES.md](docs/STRATEGIES.md) | The candidate strategies, how they're measured, and the promotion rules |

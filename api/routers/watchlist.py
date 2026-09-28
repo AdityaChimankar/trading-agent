@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Query
 
 from api.serializers import jsonable
-from db import get_watchlist_symbols
+from storage.db import get_watchlist_symbols
 
 router = APIRouter(prefix="/api", tags=["watchlist"])
 
@@ -24,13 +24,13 @@ def rankings(capital: float = Query(100000.0, gt=0)):
     front end joins them by symbol to attach the contradiction flag to
     each sized entry.
     """
-    from rankings import (
+    from analysis.rankings import (
         annotate_contradictions,
         get_contradictions,
         rank_watchlist,
         rank_watchlist_with_sizing,
     )
-    from position_monitor import get_all_position_statuses
+    from risk.position_monitor import get_all_position_statuses
 
     statuses = get_all_position_statuses(fetch_current_signals=True)
     scored = annotate_contradictions(rank_watchlist(), statuses)
