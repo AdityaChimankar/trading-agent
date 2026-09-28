@@ -41,6 +41,10 @@ class PositionPlan:
     position_value: float  # rupees
     capped_by_max_position: bool  # True if MAX_POSITION_PCT_OF_CAPITAL reduced the size
 
+def round_to_tick(price: float, tick_size: float = 0.05) -> float:
+    """Rounds a price to the nearest valid NSE tick size."""
+    return round(round(price / tick_size) * tick_size, 2)
+
 
 def calculate_position(symbol: str, action: str, capital: float) -> PositionPlan | None:
     """
@@ -79,11 +83,19 @@ def calculate_position(symbol: str, action: str, capital: float) -> PositionPlan
     capped = raw_size > max_size_by_cap
     position_size = min(raw_size, max_size_by_cap)
 
+    # Stop-loss and take-profit are snapped to a valid NSE tick size so
+    # the plan shows prices that could actually be placed; entry stays the
+    # raw last price.
     return PositionPlan(
-        symbol=symbol, action=action, entry_price=round(entry_price, 2), atr=round(atr, 2),
-        stop_loss=round(stop_loss, 2), take_profit=round(take_profit, 2),
-        stop_distance=round(stop_distance, 2), risk_amount=round(risk_amount, 2),
-        position_size=position_size, position_value=round(position_size * entry_price, 2),
+        symbol=symbol, action=action,
+        entry_price=round(entry_price, 2),
+        atr=round(atr, 2),
+        stop_loss=round_to_tick(stop_loss),
+        take_profit=round_to_tick(take_profit),
+        stop_distance=round(stop_distance, 2),
+        risk_amount=round(risk_amount, 2),
+        position_size=position_size,
+        position_value=round(position_size * entry_price, 2),
         capped_by_max_position=capped,
     )
 

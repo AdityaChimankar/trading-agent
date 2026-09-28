@@ -1,6 +1,6 @@
 """
-Pre-flight check - run this BEFORE live_ticker.py / scheduler.py /
-dashboard.py every trading day. Verifies Kite auth + API, news feeds,
+Pre-flight check - run this BEFORE live_ticker.py / scheduler.py / the
+dashboard API every trading day. Verifies Kite auth + API, news feeds,
 Gemini API, and the DB/watchlist are all actually working - so a dead
 API key or an expired token surfaces here, not 5 minutes into market
 hours with a silent failure buried in a scheduler log.
@@ -149,7 +149,7 @@ def main():
         print(f"  {mark} {name}")
 
     if all(results.values()):
-        print("\nAll checks passed - safe to start live_ticker.py / scheduler.py / dashboard.py")
+        print("\nAll checks passed - safe to start live_ticker.py / scheduler.py / the dashboard API")
         sys.exit(0)
     else:
         print("\nOne or more checks failed - fix the issues above before starting the pipeline.")

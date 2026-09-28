@@ -67,6 +67,9 @@ def decide(symbol: str) -> dict:
         "rsi": rsi, "adx": adx, "atr": indicators["atr"],
         "sentiment_score": sentiment,
         "patterns": ",".join(patterns_found) if patterns_found else None,
+        # Timestamp of the candle this decision was made on (None if the
+        # indicator read failed) - see run_decision_cycle().
+        "signal_timestamp": indicators.get("timestamp"),
     }
 
 
@@ -76,11 +79,16 @@ def run_decision_cycle():
     computation (no network calls) so it's much faster and less risky,
     but at 500 symbols it still adds up, and keeping the pattern
     consistent avoids reintroducing the same class of bug here."""
-    timestamp = datetime.now().isoformat()
     symbols = get_watchlist_symbols()
 
     for symbol in symbols:
         result = decide(symbol)
+        # Log against the candle the decision came from, not wall-clock
+        # now(). Signals were previously written at arbitrary seconds
+        # (09:17:23) while candles are minute buckets (09:15:00), so the
+        # dashboard chart could never line a signal up with its bar.
+        # Falls back to now() only when the indicator read failed.
+        timestamp = result.get("signal_timestamp") or datetime.now().isoformat()
         conn = get_connection()
         conn.execute(
             "INSERT INTO signals (symbol, timestamp, action, rsi, adx, atr, sentiment_score, rationale) "

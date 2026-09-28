@@ -12,8 +12,7 @@ import joblib
 import numpy as np
 from pathlib import Path
 from datetime import datetime
-from backtest import prepare_symbol_series
-from walk_forward_optimizer import precompute_pattern_bias_codes
+from backtest import prepare_symbol_series, precompute_pattern_bias_codes
 from quant_indicators import compute_atr, load_candles
 from decision_agent import decide as rule_based_decide
 from db import get_connection, get_watchlist_symbols
@@ -86,11 +85,13 @@ def ml_decide(symbol: str, model, feature_columns: list) -> dict:
 
 def run_ml_decision_cycle(symbols: list):
     model, feature_columns = _load_model()
-    timestamp = datetime.now().isoformat()
 
     for symbol in symbols:
         ml_result = ml_decide(symbol, model, feature_columns)
         rule_result = rule_based_decide(symbol)
+        # Same candle-aligned timestamp reasoning as decision_agent.py -
+        # see run_decision_cycle() there.
+        timestamp = rule_result.get("signal_timestamp") or datetime.now().isoformat()
 
         conn = get_connection()
         conn.execute(

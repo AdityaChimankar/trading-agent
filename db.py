@@ -8,16 +8,16 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(exist_ok=True)
-    # This DB is written to concurrently by live_ticker.py (background
-    # flush thread), scheduler.py, and read by dashboard.py at the same
-    # time during market hours. SQLite's default mode only allows one
-    # writer with no wait, so overlapping writes fail immediately with
-    # "database is locked" instead of queuing. WAL mode lets readers and
-    # a writer coexist, and busy_timeout makes any remaining contention
-    # wait (up to 30s) and retry instead of erroring out right away.
     conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    
+    # Execute as a single script for faster initialization
+    conn.executescript("""
+        PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=NORMAL;      -- Fast disk writes (safe in WAL mode)
+        PRAGMA temp_store=MEMORY;       -- Store temp tables/indices in RAM
+        PRAGMA mmap_size=30000000000;   -- Use memory mapping for ultra-fast reads
+        PRAGMA busy_timeout=30000;
+    """)
     conn.row_factory = sqlite3.Row
     return conn
 def get_open_position_symbols() -> set:

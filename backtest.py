@@ -37,13 +37,24 @@ FORWARD_WINDOW = 6       # candles to look ahead for outcome (6 x 5min = 30 min 
 SWING_ORDER = 5          # bars on each side required to confirm a swing high/low
 NEUTRAL_SENTIMENT = 0.0  # see limitation note above
 
+# Round-trip cost (slippage + charges) deducted from every simulated
+# trade, as a fraction. Defined ONCE here and imported everywhere else
+# that models a trade's return (walk_forward_optimizer.py, ml_features.py)
+# so the labelling/training convention can never silently drift away
+# from what the backtest actually measures.
+SLIPPAGE = 0.0005
+
 PATTERN_COLS_BULLISH = {"hammer", "bullish_engulfing", "double_bottom"}
 PATTERN_COLS_BEARISH = {"bearish_engulfing", "double_top"}
 
-# evaluate_signals()'s own defaults - duplicated here (not imported) so
+# evaluate_signals()'s own defaults - held here (not imported) so
 # vectorized_evaluate() below can apply them without a function-call per
-# candle. Must match decision_agent.py's evaluate_signals() defaults exactly.
-_DEFAULT_PARAMS = {
+# candle. Must match decision_agent.py's evaluate_signals() defaults
+# exactly. This is the SINGLE definition for the whole project -
+# walk_forward_optimizer.py imports it rather than keeping its own copy,
+# because two copies of the same thresholds is exactly how a silent
+# behavioural drift starts.
+DEFAULT_PARAMS = {
     "rsi_oversold": 30, "rsi_overbought": 70, "adx_threshold": 20,
     "pattern_confirm_buy_rsi": 45, "pattern_confirm_sell_rsi": 55,
 }
@@ -67,7 +78,9 @@ def prepare_symbol_series(symbol: str, candle_limit: int = 20000) -> dict | None
 
     return {
         "symbol": symbol, "length": len(df),
-        "closes": df["close"].values, "rsis": df["rsi"].values, "adxs": df["adx"].values,
+        "closes": df["close"].values,
+        "opens": df["open"].values,
+        "rsis": df["rsi"].values, "adxs": df["adx"].values,
         "dojis": df["doji"].values, "hammers": df["hammer"].values,
         "bull_engulf": df["bullish_engulfing"].values, "bear_engulf": df["bearish_engulfing"].values,
         "timestamps": df["timestamp"].values, "swings": swings,
@@ -133,7 +146,7 @@ def vectorized_evaluate(rsi: np.ndarray, adx: np.ndarray, pattern_codes: np.ndar
     always False at sentiment=0.0, so only the pattern-confirmed
     branches can ever fire - which is exactly what makes BUY/SELL
     mutually exclusive by construction below."""
-    p = {**_DEFAULT_PARAMS, **(params or {})}
+    p = {**DEFAULT_PARAMS, **(params or {})}
 
     with np.errstate(invalid="ignore"):
         adx_ok = adx >= p["adx_threshold"]
@@ -157,7 +170,7 @@ def _simulate_trades_reference(prepared: dict, params: dict = None, index_range:
     verified to produce identical results before being trusted."""
     params = params or {}
     symbol = prepared["symbol"]
-    closes, rsis, adxs = prepared["closes"], prepared["rsis"], prepared["adxs"]
+    closes, opens, rsis, adxs = prepared["closes"], prepared["opens"], prepared["rsis"], prepared["adxs"]
     dojis, hammers = prepared["dojis"], prepared["hammers"]
     bull_engulf, bear_engulf = prepared["bull_engulf"], prepared["bear_engulf"]
     timestamps, swings = prepared["timestamps"], prepared["swings"]
@@ -194,10 +207,15 @@ def _simulate_trades_reference(prepared: dict, params: dict = None, index_range:
         if action == "HOLD":
             continue
 
-        entry_price, exit_price = closes[i], closes[i + FORWARD_WINDOW]
+        # Enter at the NEXT candle's open (not the signal candle's close)
+        # and exit FORWARD_WINDOW candles later, minus slippage - this
+        # must match simulate_trades() exactly, or the selftest that
+        # compares the two will (correctly) report a mismatch.
+        entry_price, exit_price = opens[i + 1], closes[i + FORWARD_WINDOW]
         pct_return = (exit_price - entry_price) / entry_price
         if action == "SELL":
             pct_return = -pct_return
+        pct_return -= SLIPPAGE
 
         trades.append({
             "symbol": symbol, "timestamp": timestamps[i], "action": action,
@@ -229,16 +247,23 @@ def simulate_trades(prepared: dict, params: dict = None, index_range: tuple = No
     if len(trade_idx) == 0:
         return []
 
-    closes, timestamps, symbol = prepared["closes"], prepared["timestamps"], prepared["symbol"]
+    closes, opens, timestamps, symbol = prepared["closes"], prepared["opens"], prepared["timestamps"], prepared["symbol"]
     trades = []
     for local_i in trade_idx:
         i = start + local_i
-        entry_price, exit_price = closes[i], closes[i + FORWARD_WINDOW]
+        
+        # Enter at the NEXT candle's open, exit at the target candle's close
+        entry_price, exit_price = opens[i + 1], closes[i + FORWARD_WINDOW]
+        
         pct_return = (exit_price - entry_price) / entry_price
         if actions[local_i] == 2:
             pct_return = -pct_return
+            
+        # Deduct round-trip cost for slippage and transaction charges
+        pct_return -= SLIPPAGE
+        
         trades.append({
-            "symbol": symbol, "timestamp": timestamps[i],
+            "symbol": symbol, "timestamp": timestamps[i], # Keep original timestamp for the signal
             "action": "BUY" if actions[local_i] == 1 else "SELL",
             "entry": entry_price, "exit": exit_price, "return_pct": pct_return,
         })

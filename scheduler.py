@@ -38,7 +38,7 @@ scheduler.add_job(
     fetch_and_store_news,
     CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/5"),
     id="fetch_news",
-)
+)       
 scheduler.add_job(
     run_sentiment_pass,
     CronTrigger(day_of_week="mon-fri", hour="9-15", minute="1-59/5"),
@@ -53,7 +53,8 @@ scheduler.add_job(
 # predictions are local/fast with no per-call cost like the LLM path
 scheduler.add_job(
     run_ml_decision_cycle_safe,
-    CronTrigger(day_of_week="mon-fri", hour="9-15", minute="2-59/5"),
+    # Shifted from "2-59/5" to "3-59/5" to prevent SQLite deadlocks
+    CronTrigger(day_of_week="mon-fri", hour="9-15", minute="3-59/5"),
     id="ml_decide",
 )
 # LLM comparison - every 15 min, offset so news/sentiment are already fresh

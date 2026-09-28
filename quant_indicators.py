@@ -18,8 +18,9 @@ def load_candles(symbol: str, limit: int = 200) -> pd.DataFrame:
 
 def compute_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     delta = df["close"].diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = -delta.clip(upper=0).rolling(period).mean()
+    # Replace simple rolling mean with Exponential Weighted Math (alpha = 1/period)
+    gain = delta.clip(lower=0).ewm(alpha=1/period, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(alpha=1/period, adjust=False).mean()
     rs = gain / loss.replace(0, 1e-9)
     return 100 - (100 / (1 + rs))
 
@@ -38,10 +39,12 @@ def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     plus_dm = ((up_move > down_move) & (up_move > 0)) * up_move
     minus_dm = ((down_move > up_move) & (down_move > 0)) * down_move
     atr = compute_atr(df, period).replace(0, 1e-9)
-    plus_di = 100 * plus_dm.rolling(period).mean() / atr
-    minus_di = 100 * minus_dm.rolling(period).mean() / atr
+    
+    # Replace simple rolling mean with Exponential Weighted Math
+    plus_di = 100 * plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
-    return dx.rolling(period).mean()
+    return dx.ewm(alpha=1/period, adjust=False).mean()
 
 
 def compute_di(df: pd.DataFrame, period: int = 14) -> tuple:
@@ -124,6 +127,11 @@ def indicators_from_df(df: pd.DataFrame) -> dict:
         "rsi": round(last["rsi"], 2) if pd.notna(last["rsi"]) else None,
         "atr": round(last["atr"], 2) if pd.notna(last["atr"]) else None,
         "adx": round(last["adx"], 2) if pd.notna(last["adx"]) else None,
+        # The candle these indicators were computed from. Callers log
+        # signals against THIS rather than wall-clock now(), so a signal
+        # row always lines up with a candle instead of landing on an
+        # arbitrary second between bars.
+        "timestamp": last["timestamp"],
     }
 
 

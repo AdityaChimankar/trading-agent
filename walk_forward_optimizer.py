@@ -26,15 +26,19 @@ Usage:
   python walk_forward_optimizer.py --all                  # everything in your watchlist, parallelized
 """
 import sys
-import bisect
 import time
 import itertools
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
+# precompute_pattern_bias_codes and vectorized_evaluate live in backtest.py
+# and are re-used here rather than redefined. They were previously
+# duplicated verbatim in both files, which meant any fix to one could
+# silently leave the other (and the optimizer's results) wrong.
 from backtest import (
     prepare_symbol_series, simulate_trades, summarize,
-    FORWARD_WINDOW, SWING_ORDER, LOOKBACK_MIN,
+    precompute_pattern_bias_codes, vectorized_evaluate,
+    DEFAULT_PARAMS, FORWARD_WINDOW, LOOKBACK_MIN, SLIPPAGE,
 )
 from db import get_watchlist_symbols
 
@@ -61,95 +65,9 @@ PARAM_GRID = {
     "adx_threshold": [15, 20, 25],
 }
 
-# Must match evaluate_signals()'s own defaults exactly - used for the
-# "default params" comparison arm.
-DEFAULT_PARAMS = {
-    "rsi_oversold": 30, "rsi_overbought": 70, "adx_threshold": 20,
-    "pattern_confirm_buy_rsi": 45, "pattern_confirm_sell_rsi": 55,
-}
-
-
 def _grid_combinations() -> list:
     keys = list(PARAM_GRID.keys())
     return [dict(zip(keys, values)) for values in itertools.product(*PARAM_GRID.values())]
-
-
-# ---------------------------------------------------------------------
-# Pattern bias precomputation - ONCE per symbol, independent of any
-# parameter combo (pattern detection doesn't depend on RSI/ADX
-# thresholds at all).
-# ---------------------------------------------------------------------
-
-def precompute_pattern_bias_codes(prepared: dict, order: int = SWING_ORDER, tolerance: float = 0.015) -> np.ndarray:
-    """Returns an int8 array (0=neutral, 1=bullish, 2=bearish) for every
-    candle. Replicates pattern_detection.py's exact precedence:
-      - single-candle: bearish_engulfing set first, then hammer/
-        bullish_engulfing overwrite it (bullish wins on same candle)
-      - swing: double_top is checked BEFORE double_bottom with an
-        early return (swing_bias_at) - so double_top always wins over
-        double_bottom when both hold at the same point, and the swing
-        result only contributes bullish/bearish alongside (not
-        overriding) any single-candle pattern already found.
-      - overall: bullish wins if ANY bullish signal present (hammer,
-        bullish_engulfing, or swing=='double_bottom'); bearish only if
-        no bullish signal but a bearish one is present.
-    """
-    n = prepared["length"]
-    hammers, bull_engulf, bear_engulf = prepared["hammers"], prepared["bull_engulf"], prepared["bear_engulf"]
-    swings = prepared["swings"]
-
-    high_idxs = [j for j, _ in swings["highs"]]
-    high_prices = [p for _, p in swings["highs"]]
-    low_idxs = [j for j, _ in swings["lows"]]
-    low_prices = [p for _, p in swings["lows"]]
-
-    codes = np.zeros(n, dtype=np.int8)
-    for i in range(n):
-        cutoff = i - order
-        swing = None
-        h_count = bisect.bisect_right(high_idxs, cutoff)
-        if h_count >= 2:
-            h1, h2 = high_prices[h_count - 2], high_prices[h_count - 1]
-            if abs(h1 - h2) / h1 < tolerance:
-                swing = "double_top"
-        if swing is None:
-            l_count = bisect.bisect_right(low_idxs, cutoff)
-            if l_count >= 2:
-                l1, l2 = low_prices[l_count - 2], low_prices[l_count - 1]
-                if abs(l1 - l2) / l1 < tolerance:
-                    swing = "double_bottom"
-
-        bullish = bool(hammers[i]) or bool(bull_engulf[i]) or (swing == "double_bottom")
-        bearish = bool(bear_engulf[i]) or (swing == "double_top")
-        if bullish:
-            codes[i] = 1
-        elif bearish:
-            codes[i] = 2
-
-    return codes
-
-
-def vectorized_evaluate(rsi: np.ndarray, adx: np.ndarray, pattern_codes: np.ndarray, params: dict) -> np.ndarray:
-    """Returns an int8 action array (0=HOLD, 1=BUY, 2=SELL) for every
-    candle - vectorized equivalent of evaluate_signals()'s if/elif
-    chain. ONLY valid for NEUTRAL_SENTIMENT (0.0) - the sentiment>0.3 /
-    sentiment<-0.3 branches in evaluate_signals() are always False at
-    sentiment=0.0, so only the pattern-confirmed branches can ever
-    fire here, which is exactly what makes buy/sell mutually exclusive
-    by construction below. This is the same neutral-sentiment
-    limitation backtest.py already documents."""
-    p = {**DEFAULT_PARAMS, **(params or {})}
-
-    with np.errstate(invalid="ignore"):
-        adx_ok = adx >= p["adx_threshold"]
-        buy = adx_ok & (pattern_codes == 1) & (rsi < p["pattern_confirm_buy_rsi"])
-        sell = adx_ok & (pattern_codes == 2) & (rsi > p["pattern_confirm_sell_rsi"])
-
-    actions = np.zeros(len(rsi), dtype=np.int8)
-    actions[sell] = 2
-    actions[buy] = 1
-    actions[np.isnan(rsi) | np.isnan(adx)] = 0
-    return actions
 
 
 def vectorized_trades(prepared: dict, pattern_codes: np.ndarray, params: dict, index_range: tuple) -> list:
@@ -171,14 +89,16 @@ def vectorized_trades(prepared: dict, pattern_codes: np.ndarray, params: dict, i
     if len(trade_idx) == 0:
         return []
 
-    closes, timestamps = prepared["closes"], prepared["timestamps"]
+    closes, opens, timestamps = prepared["closes"], prepared["opens"], prepared["timestamps"]
     trades = []
     for local_i in trade_idx:
         i = start + local_i
-        entry_price, exit_price = closes[i], closes[i + FORWARD_WINDOW]
+        # Same entry/exit/slippage convention as backtest.simulate_trades()
+        entry_price, exit_price = opens[i + 1], closes[i + FORWARD_WINDOW]
         pct_return = (exit_price - entry_price) / entry_price
         if actions[local_i] == 2:
             pct_return = -pct_return
+        pct_return -= SLIPPAGE
         trades.append({
             "symbol": prepared["symbol"], "timestamp": timestamps[i],
             "action": "BUY" if actions[local_i] == 1 else "SELL",
@@ -202,10 +122,14 @@ def vectorized_score(prepared: dict, pattern_codes: np.ndarray, params: dict, in
     pattern_slice = pattern_codes[start:end]
     actions = vectorized_evaluate(rsi_slice, adx_slice, pattern_slice, params)
 
-    closes_entry = prepared["closes"][start:end]
+    # Entry at the NEXT candle's open, exit FORWARD_WINDOW candles later,
+    # minus slippage - identical convention to simulate_trades(), so the
+    # combo this ranks as "best" is scored on the same returns the
+    # backtest would report for it.
+    opens_entry = prepared["opens"][start + 1:end + 1]
     closes_exit = prepared["closes"][start + FORWARD_WINDOW:end + FORWARD_WINDOW]
-    pct_returns = (closes_exit - closes_entry) / closes_entry
-    pct_returns = np.where(actions == 2, -pct_returns, pct_returns)
+    pct_returns = (closes_exit - opens_entry) / opens_entry
+    pct_returns = np.where(actions == 2, -pct_returns, pct_returns) - SLIPPAGE
 
     mask = actions != 0
     count = int(mask.sum())

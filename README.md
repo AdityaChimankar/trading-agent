@@ -46,8 +46,16 @@ trading-agent/
 │                                        validated, parallelized (capped workers) + --selftest
 ├── scheduler.py                        Automation: news -> sentiment -> decisions -> ML compare
 │                                        -> LLM compare -> digest
-├── dashboard.py                        Streamlit dashboard: multi-panel chart, sidebar rankings,
-│                                        Position Monitor panel, portfolio-aware position sizing
+├── api/                               FastAPI backend for the dashboard - JSON over the same
+│   │                                    modules above, no trading logic of its own
+│   ├── main.py                         App, CORS, startup DB init, router registration
+│   ├── serializers.py                  numpy/pandas/dataclass -> JSON-safe conversion
+│   └── routers/                        watchlist, positions, opportunities, digest, symbols
+│
+├── frontend/                          React + TypeScript + Vite dashboard
+│   ├── package.json                   Node dependencies (run `npm install` inside frontend/)
+│   ├── vite.config.ts                  Dev server + /api proxy to the FastAPI backend
+│   └── src/                            App shell, polling API hooks, chart, panels
 │
 └── data/
     └── trading_agent.db                SQLite database (created/migrated by db.py)
@@ -64,7 +72,8 @@ trading-agent/
 | ML model | scikit-learn (HistGradientBoostingClassifier) + joblib | Rs.0 |
 | Orchestration | plain Python + APScheduler | Rs.0 |
 | Storage | SQLite (WAL mode) | Rs.0 |
-| Dashboard | Streamlit + Plotly | Rs.0 |
+| Dashboard API | FastAPI + uvicorn | Rs.0 |
+| Dashboard UI | React + TypeScript + Vite + Plotly.js | Rs.0 |
 
 ---
 
@@ -87,6 +96,11 @@ pip install -r requirements.txt
 5. Initialize the database:
    ```bash
    python db.py
+   ```
+6. Install the dashboard front end's dependencies (Node 18+):
+   ```bash
+   cd frontend
+   npm install
    ```
 
 ## Phase 2: Historical backfill (one-time, or occasional top-up)
@@ -138,12 +152,19 @@ Then, in separate terminals:
 python live_ticker.py        # 3. streams live candles all day
 python scheduler.py          # 4. runs news / sentiment / decisions (5 min) / ML compare (5 min) /
                               #    LLM compare (15 min) / digest (3:35 PM)
-streamlit run dashboard.py   # 5. optional - open http://localhost:8501 to watch live,
-                              #    manage open positions, and monitor P&L
+python -m uvicorn api.main:app --reload --port 8000   # 5. dashboard API (terminal 3)
+cd frontend && npm run dev                            # 6. dashboard UI (terminal 4)
+                                                      #    open http://localhost:5173
 ```
 
-At market close (3:30 PM), Ctrl+C both `live_ticker.py` and `scheduler.py` -
-no cleanup needed.
+The UI polls the API on its own schedule (positions every 15s, rankings and
+opportunities every 60s, the chart every 15s), so the page keeps updating
+without a manual refresh - the top bar shows a `⟳ live` indicator while any
+request is in flight. FastAPI also serves interactive endpoint docs at
+http://localhost:8000/docs.
+
+At market close (3:30 PM), Ctrl+C `live_ticker.py`, `scheduler.py`, the
+uvicorn server and the Vite dev server - no cleanup needed.
 
 ## Design notes worth knowing
 
@@ -170,7 +191,7 @@ no cleanup needed.
   predictions if it isn't checked).
 - **SQLite runs in WAL mode with a 30s busy_timeout** (set in
   `db.py`'s `get_connection()`), since `live_ticker.py`, `scheduler.py`,
-  and `dashboard.py` all access the DB concurrently. On top of that,
+  and the dashboard API all access the DB concurrently. On top of that,
   every write loop (decision cycles, LLM/ML comparison cycles) commits
   **per-symbol**, not once at the end of a whole watchlist scan -
   holding one write transaction open across hundreds of symbols
@@ -178,14 +199,23 @@ no cleanup needed.
   exceed even a generous busy_timeout and cause "database is locked"
   errors in other processes trying to write at the same time.
 - **`db.py`'s `init_db()` is idempotent and self-healing, and
-  `dashboard.py` calls it on every startup.** `CREATE TABLE IF NOT
+  `api/main.py` calls it on every startup.** `CREATE TABLE IF NOT
   EXISTS` alone won't add a new column to a table that already exists
   on your machine - a schema change (like adding `stop_loss`/
   `take_profit` to `open_positions`) only takes effect once something
   actually runs the migration. Relying on remembering to manually
   re-run `python db.py` after every update is exactly what caused a
   real `no column named stop_loss` crash during development - calling
-  `init_db()` from `dashboard.py` itself closes that gap for good.
+  `init_db()` from the API's startup closes that gap for good.
+- **The dashboard is a plain JSON API + a React SPA, not Streamlit.**
+  `api/` holds no trading logic - every endpoint calls the same Python
+  modules the Streamlit dashboard used, so there is still exactly one
+  implementation of each calculation. The front end never computes a
+  signal; it renders what the API returns. `api/serializers.py` exists
+  because those modules return dataclasses, `sqlite3.Row`s and numpy
+  scalars, and NaN is not valid JSON - everything crossing the boundary
+  is normalised there, which is why a NaN indicator shows as `null`
+  instead of breaking the response.
 - **`live_ticker.py`'s tick callback (`on_ticks`) does ONLY in-memory
   dict updates - no DB access at all.** All SQLite writes happen in a
   separate background thread that flushes completed minute-buckets
@@ -200,8 +230,16 @@ no cleanup needed.
   way price is, so all three currently validate the RSI/ADX/pattern
   logic in isolation. Once you've run the live pipeline for a few
   weeks, real historical sentiment will exist for future work.
-- **No transaction costs/slippage modeled** anywhere - real fills will
-  be slightly worse than the raw numbers shown.
+- **Transaction costs are modeled in the backtest and ML labels, but
+  not in the live P&L.** `backtest.SLIPPAGE` (0.05% round-trip) is
+  deducted from every simulated trade, and `ml_features.py` labels use
+  that same constant, so training and backtesting agree. This is exactly
+  the kind of value that used to be duplicated - it was a literal
+  `0.0005` in three files before being pulled into one place, and the
+  entry-price convention had already silently drifted between the
+  backtest and the walk-forward optimizer. `position_monitor.py`'s live
+  P&L still values open positions at the raw last price, so its numbers
+  remain slightly optimistic versus a real fill.
 - **`validate_setup.py` checks the REST APIs (Kite quotes, news feeds,
   Gemini), not the live WebSocket connection itself.** A passing
   pre-flight check doesn't guarantee `live_ticker.py`'s stream won't

@@ -27,9 +27,13 @@ genuine room beyond it, that's a more promising setup than the fixed
 target alone would suggest.
 """
 from dataclasses import dataclass, field
+
+import pandas as pd
+from scipy.signal import find_peaks
+
 from db import get_connection
 from rankings import rank_watchlist_with_sizing
-from quant_indicators import load_candles
+from quant_indicators import compute_atr, load_candles
 
 # Point weights for the conviction score - each confirming signal ADDS
 # up to this many points (scaled by its own confidence/magnitude); each
@@ -71,20 +75,15 @@ def _get_latest_signal(table: str, symbol: str) -> dict | None:
     return dict(row) if row else None
 
 
-from scipy.signal import find_peaks
-
-# Minimum PROMINENCE (how much a peak stands out from its surrounding
-# price action, not just whether it's locally higher than nearby
-# candles) required to count as meaningful resistance/support, as a
-# fraction of entry price. This is the actual fix for the noise problem
-# order-based local-extrema detection can't solve: a wider order still
-# finds noise peaks purely by chance on real data (verified during
-# development - even order=15 kept finding them), because "locally
-# higher than N neighbors" says nothing about how SIGNIFICANT a peak
-# is. Prominence directly measures significance instead.
-MIN_PROMINENCE_PCT = 0.01  # 1% of entry price
-
-
+# Minimum PROMINENCE - how much a peak stands out from its surrounding
+# price action, not just whether it's locally higher than nearby candles.
+# This is the actual fix for the noise problem order-based local-extrema
+# detection can't solve: a wider order still finds noise peaks purely by
+# chance on real data (verified during development - even order=15 kept
+# finding them), because "locally higher than N neighbors" says nothing
+# about how SIGNIFICANT a peak is. Prominence directly measures that.
+# The threshold itself is computed per-symbol as 1x ATR (see below) rather
+# than a fixed percentage, so it scales with each stock's own volatility.
 def _find_room_to_target(symbol: str, action: str, entry_price: float) -> float | None:
     """Distance in rupees to the nearest MEANINGFUL opposing level -
     the nearest sufficiently prominent swing HIGH above entry for a
@@ -94,7 +93,15 @@ def _find_room_to_target(symbol: str, action: str, entry_price: float) -> float 
     if len(df) < 30:
         return None
 
-    prominence = entry_price * MIN_PROMINENCE_PCT
+    # Prominence threshold from the stock's own volatility, so what counts
+    # as a "meaningful" level scales with the stock. A NaN ATR (too few
+    # warm-up candles) would make the threshold NaN and find_peaks would
+    # return nothing usable or error outright - reporting no room is the
+    # honest answer in that case.
+    current_atr = compute_atr(df).iloc[-1]
+    if pd.isna(current_atr) or current_atr <= 0:
+        return None
+    prominence = current_atr
 
     if action == "BUY":
         peak_idx, _ = find_peaks(df["high"].values, prominence=prominence)

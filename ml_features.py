@@ -13,14 +13,15 @@ forward, and it's kept completely separate from the feature columns.
 """
 import numpy as np
 import pandas as pd
-from backtest import prepare_symbol_series, FORWARD_WINDOW
-from walk_forward_optimizer import precompute_pattern_bias_codes
+from backtest import (
+    prepare_symbol_series, precompute_pattern_bias_codes, FORWARD_WINDOW, SLIPPAGE,
+)
 
-# Forward-return threshold that defines an "UP" or "DOWN" label vs FLAT.
-# Intentionally not zero - a +0.01% move over 30 min is noise, not a
-# real signal worth training the model to chase.
-LABEL_THRESHOLD = 0.0015  # 0.15%
-
+# The UP/DOWN threshold below is DYNAMIC, not a fixed constant: it is half
+# of each row's ATR-as-%-of-price at labelling time, so a calm stock needs
+# a smaller move than a volatile one before a row counts as UP or DOWN.
+# (A fixed +0.01% threshold would have been noise for one and trivial for
+# the other.) FLAT is the band in between.
 FEATURE_COLUMNS = [
     "rsi", "adx", "atr_pct", "pattern_code",
     "return_1", "return_3", "return_6",
@@ -75,11 +76,27 @@ def build_features(symbol: str, candle_limit: int = 20000) -> pd.DataFrame | Non
     # --- Label: forward return over FORWARD_WINDOW candles (same
     # horizon backtest.py uses) - this is the ONLY forward-looking
     # data in this whole function, and it never becomes a feature. ---
+    closes = prepared["closes"]
+    opens = raw_df["open"].values
     forward_return = np.full(n, np.nan)
-    forward_return[: n - FORWARD_WINDOW] = (closes[FORWARD_WINDOW:] - closes[: n - FORWARD_WINDOW]) / closes[: n - FORWARD_WINDOW]
+
+    opens_entry = opens[1: n - FORWARD_WINDOW + 1]
+    closes_exit = closes[FORWARD_WINDOW:]
+
+    forward_return[: n - FORWARD_WINDOW] = (closes_exit - opens_entry) / opens_entry
+    forward_return[: n - FORWARD_WINDOW] -= SLIPPAGE
+
+    # Only the first n - FORWARD_WINDOW rows have a defined forward
+    # return. Label them in-place on that slice - boolean-indexing the
+    # full-length label array with a shorter mask raises IndexError,
+    # which is what the previous version did.
+    usable = n - FORWARD_WINDOW
+    dynamic_threshold = atr_pct[:usable] * 0.5
+    fwd = forward_return[:usable]
+
     label = np.zeros(n, dtype=np.int8)
-    label[forward_return > LABEL_THRESHOLD] = 1   # UP
-    label[forward_return < -LABEL_THRESHOLD] = 2  # DOWN
+    label[:usable][fwd > dynamic_threshold] = 1    # UP
+    label[:usable][fwd < -dynamic_threshold] = 2   # DOWN
 
     df = pd.DataFrame({
         "timestamp": timestamps, "rsi": rsis, "adx": adxs, "atr_pct": atr_pct,
