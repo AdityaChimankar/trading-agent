@@ -1,116 +1,70 @@
--- Instruments you're tracking
-CREATE TABLE IF NOT EXISTS watchlist (
-    symbol TEXT PRIMARY KEY,
-    instrument_token INTEGER NOT NULL,
-    exchange TEXT NOT NULL DEFAULT 'NSE'
+-- ------- wallet ----------
+
+-- Paper capital you seed yourself: the starting balance the wallet builds
+-- from. One row, editable by you via the API. Nothing here touches real cash -
+-- this is a what-if ledger on top of the paper positions you already record.
+CREATE TABLE IF NOT EXISTS wallet_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),   -- singleton by convention
+    capital REAL NOT NULL DEFAULT 500000.0,
+    updated_at TEXT NOT NULL
 );
 
--- OHLCV candle data (both historical backfill and live-derived)
-CREATE TABLE IF NOT EXISTS candles (
-    symbol TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    open REAL, high REAL, low REAL, close REAL, volume INTEGER,
-    PRIMARY KEY (symbol, timestamp)
-);
-
--- News headlines, tagged to symbols where possible
-CREATE TABLE IF NOT EXISTS news (
+-- Every money movement in the paper book, in order:
+--   type = deposit  → +amount  (paper capital in)
+--   type = withdraw → −amount  (paper capital out, paper only)
+--   type = realized_pnl → +/-amount  (net of slippage, from a closed trade)
+-- The live balance = wallet_settings.capital + SUM(deposits) − SUM(withdrawals)
+--                    + SUM(realized P&L).
+-- after you add capital, withdrawals and realized P&L are inserted by the API,
+-- not by you.
+CREATE TABLE IF NOT EXISTS wallet_transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT,
-    headline TEXT NOT NULL,
-    source TEXT,
-    published_at TEXT NOT NULL,
-    fetched_at TEXT NOT NULL,
-    UNIQUE(headline, published_at)
+    type TEXT NOT NULL CHECK (type IN ('deposit', 'withdrawal', 'realized_pnl')),
+    amount REAL NOT NULL,
+    note TEXT,
+    symbol TEXT,                       -- which position this realized_pnl came from (null for
+                                      -- deposits/withrawals)
+    trade_id INTEGER REFERENCES trades(id),
+    transacted_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_wallet_txn_date ON wallet_transactions(transacted_at);
 
-CREATE INDEX IF NOT EXISTS idx_candles_symbol_ts ON candles(symbol, timestamp);
-CREATE INDEX IF NOT EXISTS idx_news_symbol ON news(symbol);
-
--- LLM sentiment score per news row, plus its short rationale
-CREATE TABLE IF NOT EXISTS sentiment (
-    news_id INTEGER PRIMARY KEY REFERENCES news(id),
-    symbol TEXT,
-    score REAL NOT NULL,          -- -1.0 (very negative) to +1.0 (very positive)
-    rationale TEXT,
-    scored_at TEXT NOT NULL
-);
-
--- Final rule-based agent output: one row per decision cycle per symbol
-CREATE TABLE IF NOT EXISTS signals (
+-- The real P&L ledger: every closed trade, so "entire days" and running P&L
+-- are computable across the life of the book, not just the currently-open
+-- positions. Filled by the API when you close a position - the realized P&L
+-- there is computed from the position's recorded entry vs the last known
+-- live price at the moment you closed it, then flowed into a realized_pnl
+-- transaction so the wallet balance reflects it.
+CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    action TEXT NOT NULL,          -- BUY / SELL / HOLD
-    rsi REAL, adx REAL, atr REAL,
-    sentiment_score REAL,
-    rationale TEXT
-);
-
--- LLM-based decision, kept SEPARATE from the rule-based `signals` table
--- on purpose - lets you compare the two before ever trusting the LLM
--- agent alone. Never merge these without deliberately deciding to.
-CREATE TABLE IF NOT EXISTS llm_signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    action TEXT NOT NULL,          -- BUY / SELL / HOLD
-    confidence REAL,               -- 0.0-1.0, self-reported by the model
-    rationale TEXT,
-    rule_based_action TEXT         -- what decision_agent.py said at the same moment, for comparison
-);
-
--- End-of-day narrative summaries
-CREATE TABLE IF NOT EXISTS digests (
-    date TEXT PRIMARY KEY,
-    summary TEXT NOT NULL,
-    generated_at TEXT NOT NULL
-);
-
--- ML model decision, kept SEPARATE from the rule-based `signals` table -
--- same reasoning as llm_signals: compare before ever trusting alone.
-CREATE TABLE IF NOT EXISTS ml_signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    action TEXT NOT NULL,          -- BUY / SELL / HOLD
-    confidence REAL,               -- model's predicted probability for the chosen class
-    rule_based_action TEXT         -- what decision_agent.py said at the same moment, for comparison
-);
-
--- Candidate strategy votes (strategy/candidates.py), logged in PARALLEL with
--- the rule-based `signals` table - same discipline as llm_signals/ml_signals.
--- One row per candidate per symbol per cycle, so each strategy's live track
--- record can be compared against the shipped agent and against every other
--- before any of them is trusted with capital. Written only by
--- strategy/shadow.py; never read by any live decision path.
-CREATE TABLE IF NOT EXISTS strategy_signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    strategy_name TEXT NOT NULL,
-    action TEXT NOT NULL,           -- BUY (candidate fired) / HOLD (it didn't)
-    fired INTEGER NOT NULL,         -- 1/0 mirror of action, for cheap SQL aggregation
-    atr REAL,
-    rule_based_action TEXT          -- what decision_agent.py said on the same candle
-);
-CREATE INDEX IF NOT EXISTS idx_strategy_signals_lookup
-    ON strategy_signals(strategy_name, symbol, timestamp);
-
--- Paper-tracked open positions - used by portfolio_risk.py to size NEW
--- trades against what's already "open", not just in isolation. This is
--- a paper/simulation ledger, not a real broker position feed - nothing
--- here reflects actual filled orders.
-CREATE TABLE IF NOT EXISTS open_positions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    action TEXT NOT NULL,           -- BUY or SELL
+    action TEXT NOT NULL,             -- BUY or SELL (the same as the open position)
+    position_id INTEGER REFERENCES open_positions(id),
     entry_price REAL NOT NULL,
+    entry_at TEXT NOT NULL,
+    exit_price REAL NOT NULL,         -- last known candle close at close time
+    exit_at TEXT NOT NULL,
     position_size INTEGER NOT NULL,
-    position_value REAL NOT NULL,
-    risk_amount REAL NOT NULL,      -- rupees at risk if stop-loss is hit
-    stop_loss REAL,                 -- from the PositionPlan that opened this position
-    take_profit REAL,
-    opened_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open'   -- 'open' or 'closed'
+    realized_pnl_rupees REAL NOT NULL,-- signed (profit positive), the sum the wallet sees
+    exit_reason TEXT NOT NULL,        -- 'manually_closed' | 'stop_loss_hit' | 'take_profit_hit' | 'signal_reversed'
+    slippage_deducted REAL NOT NULL DEFAULT 0.0,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
+CREATE INDEX IF NOT EXISTS idx_trades_exit_at ON trades(exit_at);
+
+-- A per-day snapshot of the portfolio so "entire days" can be viewed even
+-- if the live stream was interrupted. Filled once per trading day (whenever
+-- the window is still open) by a lightweight endpoint; or by you at close.
+-- For paper trading this is mostly for your own records - nothing automated
+-- needs it.
+CREATE TABLE IF NOT EXISTS wallet_daily_snapshots (
+    date TEXT PRIMARY KEY,
+    capital REAL NOT NULL,            -- capital at start of that day
+    deposits REAL NOT NULL DEFAULT 0.0,
+    withdrawals REAL NOT NULL DEFAULT 0.0,
+    closed_day_pnl REAL NOT NULL DEFAULT 0.0,   -- realized P&L of trades closed that day
+    open_positions_mark_value REAL NOT NULL DEFAULT 0.0,  -- mark-to-market of any still-open
+    open_positions_count INTEGER NOT NULL DEFAULT 0,
+    snapshot_at TEXT NOT NULL
 );

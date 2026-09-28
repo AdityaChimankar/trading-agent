@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import digest, opportunities, positions, symbols, watchlist
+from api.routers import digest, opportunities, positions, symbols, watchlist, wallet
 from storage.db import init_db
 
 

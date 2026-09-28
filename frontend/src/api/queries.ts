@@ -17,6 +17,7 @@ import type {
   SignalRow,
   SizingResponse,
   WatchlistResponse,
+  WalletResponse,
 } from './types'
 
 export const REFRESH = {
@@ -30,6 +31,7 @@ export const REFRESH = {
   agentSignals: 120_000,
   news: 120_000,
   digest: 300_000,
+  wallet: 15_000,
 } as const
 
 export function useWatchlist() {
@@ -55,7 +57,13 @@ export function usePositions() {
     refetchInterval: REFRESH.positions,
   })
 }
-
+export function useWallet() {
+  return useQuery({
+    queryKey: ['wallet'],
+    queryFn: () => apiGet<WalletResponse>('/api/wallet'),
+    refetchInterval: REFRESH.wallet,
+  })
+}
 export function useOpportunities(capital: number) {
   return useQuery({
     queryKey: ['opportunities', capital],

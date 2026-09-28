@@ -1,5 +1,7 @@
-// Response shapes mirroring the FastAPI routers in api/. Kept in one file
-// so the contract between backend and frontend is easy to eyeball.
+// Response shapes mirroring the FastAPI routers in api/.
+// Kept in one file so the contract between backend and frontend is easy to eyeball.
+// These are mirrors for the frontend to type-check against; if the server adds a field,
+// add it here. The canonical source of truth is the FastAPI routers in api/routers/.
 
 export type Action = 'BUY' | 'SELL' | 'HOLD'
 export type Bias = 'bullish' | 'bearish' | 'neutral'
@@ -16,7 +18,6 @@ export interface RankedEntry {
   has_open_position: boolean
   dominant_bias: Bias | null
   contradiction: string | null
-  // Present only on the sized lists returned alongside `scored`.
   action?: Action
   entry_price?: number | null
   stop_loss?: number | null
@@ -78,119 +79,122 @@ export interface Opportunity {
   realistic_reward_risk: number | null
 }
 
-export interface OpportunitiesResponse {
-  bullish: Opportunity[]
-  bearish: Opportunity[]
-}
-
-export interface BasePlan {
+export interface ChartResponse {
   symbol: string
-  action: Action
-  entry_price: number
-  atr: number
-  stop_loss: number
-  take_profit: number
-  stop_distance: number
-  risk_amount: number
-  position_size: number
-  position_value: number
-  capped_by_max_position: boolean
+  candles: CandlePoint[]
+  signals: ChartPoint[]
+  patterns: ChartPoint[]
 }
 
-export interface AdjustedPlan {
-  base_plan: BasePlan | null
-  approved_size: number
-  approved_value: number
-  blocked: boolean
-  block_reason: string | null
-  total_risk_used_pct: number
-  cluster_exposure_pct: number
-  correlated_with: string[]
+export interface ChartPoint {
+  ts: number
+  x: number
+  y: number
 }
 
-export type SizingResponse =
-  | { symbol: string; has_signal: false; action: Action | null; adjusted: null }
-  | { symbol: string; has_signal: true; action: Action; adjusted: AdjustedPlan }
-
-export interface CandleArrays {
-  timestamp: string[]
-  open: number[]
-  high: number[]
-  low: number[]
-  close: number[]
-  volume: number[]
-}
-
-export interface IndicatorArrays {
-  rsi: (number | null)[]
-  adx: (number | null)[]
-  atr: (number | null)[]
-  ma20: (number | null)[]
-  ma50: (number | null)[]
-}
-
-export interface PatternFlags {
-  doji: boolean[]
-  hammer: boolean[]
-  bullish_engulfing: boolean[]
-  bearish_engulfing: boolean[]
-}
-
-export type ChartResponse =
-  | { symbol: string; insufficient_data: true; candles: null }
-  | {
-      symbol: string
-      insufficient_data: false
-      candles: CandleArrays
-      indicators: IndicatorArrays
-      patterns: PatternFlags
-      signal_markers: { timestamp: string; action: Action }[]
-      latest: { close: number; rsi: number | null; adx: number | null; atr: number | null }
-    }
-
-export interface NewsRow {
-  headline: string
-  published_at: string
-  source: string | null
-  score: number | null
-  rationale: string | null
+export interface DigestResponse {
+  date: string
+  summary: string
+  generated_at: string
 }
 
 export interface SignalRow {
+  id: number
+  symbol: string
   timestamp: string
-  action: Action
+  action: string
   rsi: number | null
   adx: number | null
+  atr: number | null
   sentiment_score: number | null
   rationale: string | null
 }
 
 export interface LlmSignalRow {
+  id: number
+  symbol: string
   timestamp: string
-  llm_action: Action
-  rule_based_action: Action | null
+  action: string
   confidence: number | null
   rationale: string | null
+  rule_based_action: string | null
 }
 
 export interface MlSignalRow {
+  id: number
+  symbol: string
   timestamp: string
-  ml_action: Action
-  rule_based_action: Action | null
+  action: string
   confidence: number | null
+  rule_based_action: string | null
 }
 
-export interface AgentSignalsResponse<T> {
-  agreement_pct: number | null
-  rows: T[]
+export interface NewsRow {
+  id: number
+  symbol: string | null
+  headline: string
+  source: string
+  published_at: string
+  scored: number | null | undefined
+  score: number | null
+  rationale: string | null
 }
 
-export interface DigestResponse {
-  date: string
-  summary: string | null
-  generated_at: string | null
+export interface SizingResponse {
+  symbol: string
+  action: Action
+  entry_price: number
+  position_size: number
+  position_value: number
+  risk_amount: number
+  stop_loss: number | null
+  take_profit: number | null
+  total_risk_used_pct: number
+  correlated_with: string[]
+  blocked: boolean
+  block_reason: string | null
 }
 
 export interface WatchlistResponse {
   symbols: string[]
+}
+
+// Wallet types
+export interface WalletFixed {
+  capital: number
+  total_deposits: number
+  total_withdrawals: number
+  realized_pnl_total: number
+  book_balance: number
+}
+
+export interface WalletToday {
+  open_pnl: number
+  open_positions_count: number
+  closed_pnl: number
+  total_today_pnl: number
+}
+
+export interface WalletPosition {
+  position_id: number
+  symbol: string
+  action: Action
+  position_size: number
+  entry_price: number
+  current_price: number
+  current_value: number
+  current_pnl: number
+  current_pnl_pct: number
+  stop_loss: number | null
+  take_profit: number | null
+  stop_scenario_pnl: number | null
+  target_scenario_pnl: number | null
+  at_risk_rupees: number | null
+}
+
+export interface WalletResponse {
+  fixed: WalletFixed
+  today: WalletToday
+  open_positions: WalletPosition[]
+  prev_days_closed_pnl: Record<string, number>
 }

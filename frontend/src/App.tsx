@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useEffect, useState } from 'react'
 import { useIsFetching, useQueryClient } from '@tanstack/react-query'
 
-import { useWatchlist } from './api/queries'
+import { useWatchlist, useWallet } from './api/queries'
 import DigestPanel from './components/DigestPanel'
 import OpportunityPanel from './components/OpportunityPanel'
 import PositionMonitor from './components/PositionMonitor'
 import Sidebar from './components/Sidebar'
 import SymbolDetail from './components/SymbolDetail'
+import WalletPanel from './components/WalletPanel'
 
 export default function App() {
   const [capital, setCapital] = useState(100_000)
@@ -65,6 +66,7 @@ export default function App() {
         <main className="main">
           <OpportunityPanel capital={capital} onSelect={setSymbol} />
           <DigestPanel />
+          <WalletPanel capital={capital} />
           <PositionMonitor />
           <SymbolDetail symbol={symbol} capital={capital} />
         </main>
