@@ -75,7 +75,9 @@ so a skewed or non-IST machine clock can't bucket candles incorrectly.
 
 ### News comes from RSS because Kite Connect has no news API
 
-`ingest/fetch_news.py` polls free feeds (Moneycontrol, Economic Times) and
+`ingest/fetch_news.py` polls nine free feeds (Moneycontrol, Economic Times,
+CNBC-TV18, Livemint ×2, Business Standard ×2, NDTV Profit, and BSE's
+`announcements.xml`) and
 keyword-matches items to watchlist symbols. `analysis/sentiment.py` then scores
 them with Gemini.
 

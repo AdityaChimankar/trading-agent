@@ -24,11 +24,18 @@ Respond ONLY with JSON, no markdown fences, no preamble:
 """
 
 
-def fetch_unscored_news(conn, limit: int = 20):
+def fetch_unscored_news(conn, limit: int = 40):
+    # Newest first (id DESC). The expanded feed list (9 sources, incl. BSE
+    # announcements) adds tagged headlines faster than one pass can score
+    # them, so if a backlog ever builds, the FRESH headlines must be scored
+    # first - they are the ones intraday decisions read. Oldest unscored rows
+    # drain later (or during off-hours re-runs) instead of delaying current
+    # sentiment by sitting at the front of an FIFO queue.
     return conn.execute(
         """SELECT id, symbol, headline FROM news
            WHERE symbol IS NOT NULL
            AND id NOT IN (SELECT news_id FROM sentiment)
+           ORDER BY id DESC
            LIMIT ?""",
         (limit,),
     ).fetchall()

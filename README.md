@@ -73,7 +73,9 @@ trading-agent/
 │   ├── instruments.csv              Kite instrument dump (~9 MB, downloaded, tracked)
 │   ├── watchlist_resolved.py        Generated token map (read by fetch_historical)
 │   ├── fetch_historical.py          Resumable, rate-limited 5-min candle backfill
-│   ├── fetch_news.py                Free RSS feeds, keyword-tagged to symbols
+│   ├── fetch_news.py                9 free feeds (Moneycontrol, ET, CNBC-TV18, Livemint,
+│   │                                 Business Standard, NDTV Profit, BSE announcements),
+│   │                                 symbol-tagged via word-boundary + company-name matching
 │   └── live_ticker.py               KiteTicker WebSocket -> 1-min candles
 │
 ├── analysis/                       Read-only intelligence over stored data

@@ -87,17 +87,17 @@ def check_watchlist() -> bool:
 
 def check_news_feeds() -> bool:
     print("Checking news RSS feeds...")
-    from ingest.fetch_news import FEEDS
+    from ingest.fetch_news import FEEDS, _fetch_feed
     all_ok = True
-    for feed_url in FEEDS:
+    for source, feed_url in FEEDS:
         try:
-            feed = feedparser.parse(feed_url)
-            if feed.entries:
-                print(f"  {CHECK_MARK} {feed_url} - {len(feed.entries)} entries")
+            entries = _fetch_feed(feed_url)
+            if entries:
+                print(f"  {CHECK_MARK} {source} - {len(entries)} entries")
             else:
-                print(f"  {WARN_MARK} {feed_url} - reachable but returned 0 entries")
+                print(f"  {WARN_MARK} {source} - reachable but returned 0 entries")
         except Exception as e:
-            print(f"  {FAIL_MARK} {feed_url} - failed: {e}")
+            print(f"  {FAIL_MARK} {source} - failed: {e}")
             all_ok = False
     return all_ok
 
