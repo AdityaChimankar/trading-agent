@@ -114,14 +114,28 @@ created/migrated by `storage/db.py`:
 | Table | Written by | Contents |
 |---|---|---|
 | `watchlist` | `ingest/fetch_historical.py` | symbol, instrument_token, exchange — **the single source of truth** |
-| `candles` | `ingest/fetch_historical.py`, `ingest/live_ticker.py` | OHLCV bars per symbol/timestamp |
+| `candles` | `ingest/fetch_historical.py`, `ingest/live_ticker.py`, `ingest/gap_healer.py` | OHLCV bars per symbol/timestamp, 1-minute basis |
+| `backfill_state` | `ingest/fetch_historical.py` | which `(symbol, interval)` ranges are complete — the candles table cannot answer that once more than one interval has ever been stored |
+| `ingest_status` | `ingest/live_ticker.py` | heartbeat singleton: connected, last tick, buffer depth, repairs queued |
+| `candle_gaps` | `ingest/gap_healer.py` | every hole detected, and whether it was repaired (including repairs that recovered 0 candles) |
 | `news` | `ingest/fetch_news.py` | RSS items keyword-tagged to symbols |
 | `sentiment` | `analysis/sentiment.py` | Gemini score per news item |
 | `signals` | `strategy/decision_agent.py` | Rule-based BUY/SELL/HOLD (the tested path) |
 | `llm_signals` | `strategy/llm_decision_agent.py` | LLM calls, for comparison only |
 | `ml_signals` | `strategy/ml_decision_agent.py` | Model calls, for comparison only |
+| `strategy_signals` | `strategy/shadow.py` | Candidate votes, logged beside the rule agent's action on the same candle |
 | `digests` | `analysis/digest.py` | End-of-day narrative |
 | `open_positions` | `risk/portfolio_risk.py` (via the API) | Paper ledger, incl. stop_loss / take_profit |
+| `trades` | `risk/wallet.py` (via the API) | Closed trades: entry/exit, realized P&L, exit reason |
+| `wallet_settings` | the API | Singleton: paper capital the book builds from |
+| `wallet_transactions` | the API | Deposits, withdrawals, and realized P&L, in order |
+| `wallet_daily_snapshots` | the API | Per-day capital / P&L snapshot |
+
+Timestamps in `candles` are naive IST at minute precision. One consequence
+worth knowing before writing a query: pre-existing rows may carry Kite's
+`+05:30` suffix from the original backfill, so compare the 16-character minute
+prefix (`substr(timestamp, 1, 16)`) rather than the raw string, or use
+`core/freshness.minute_key()`. Both forms sort correctly as strings.
 
 `init_db()` is idempotent and self-healing — it runs `schema.sql` and then adds
 any column missing from an existing table. `api/main.py` calls it on startup,
@@ -139,6 +153,16 @@ assumption rather than an edge case:
   does in-memory dict updates only; a separate thread drains completed
   minute-buckets every 5 s. Blocking `on_ticks` on I/O is what caused repeated
   WebSocket 1006 disconnects at scale.
+- **A second background thread does network repair.** `heal_loop` consumes
+  outage windows from a queue and refetches them from Kite's historical
+  endpoint, throttled to ~2.5 req/s. It is separate from the flush thread so a
+  rate-limited sweep can never delay a write, and the flush thread's loop is
+  wrapped so it cannot die silently with a day's candles still in memory.
+- **Repair is idempotent and cheap when nothing is wrong.** `gap_healer`
+  compares the session timeline against stored minutes and fetches only the
+  holes, so a healthy sweep costs one indexed query per symbol and no requests
+  at all — which is what makes it safe to run on reconnect, on a restart, every
+  10 minutes while the feed is down, and after the close.
 - **Every write loop commits per symbol**, not once per watchlist scan. Holding a
   transaction open across 500 symbols — with network-latency LLM calls in the
   middle — can outlast even a generous `busy_timeout`.

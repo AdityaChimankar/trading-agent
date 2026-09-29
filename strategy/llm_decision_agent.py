@@ -21,6 +21,7 @@ import json
 from datetime import datetime
 import google.generativeai as genai
 from dotenv import load_dotenv
+from core.freshness import split_stale, warn_stale
 from core.pattern_detection import detect_patterns
 from core.quant_indicators import latest_indicators
 from storage.db import get_connection
@@ -99,6 +100,12 @@ def run_llm_decision_cycle(symbols: list):
     lock is only held for the brief moment of each individual write,
     not for the duration of the slow LLM call before it.
     """
+    # Same freshness gate as the rule-based path (core/freshness.py), checked
+    # before the fan-out so an outage doesn't spend hundreds of slow API calls
+    # producing confident decisions about prices that no longer exist.
+    symbols, stale = split_stale(symbols)
+    warn_stale(stale, "LLM cycle")
+
     # Process 10 symbols concurrently to bypass network latency
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         # Submit all LLM network calls to the thread pool

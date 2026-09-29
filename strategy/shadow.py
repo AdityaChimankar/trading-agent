@@ -18,6 +18,7 @@ Usage: python -m strategy.shadow            (one cycle over the whole watchlist)
 """
 import numpy as np
 
+from core.freshness import split_stale, warn_stale
 from core.pattern_detection import detect_patterns
 from core.quant_indicators import latest_indicators
 from storage.db import get_connection, get_watchlist_symbols, init_db
@@ -66,6 +67,11 @@ def run_shadow_cycle(symbols: list | None = None) -> None:
     # run init_db() since the upgrade.
     init_db()
     symbols = symbols or get_watchlist_symbols()
+    # Same freshness gate as the decision cycles: a vote cast on a stale
+    # candle would corrupt the out-of-sample track record these candidates
+    # are eventually promoted on.
+    symbols, stale = split_stale(symbols)
+    warn_stale(stale, "shadow cycle")
     conn = get_connection()
     for symbol in symbols:
         indicators = latest_indicators(symbol)

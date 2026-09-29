@@ -73,6 +73,48 @@ last price/volume/OHLC, never order-book depth), and the flush uses the latest
 **exchange** minute reported by the ticks rather than the machine's local clock,
 so a skewed or non-IST machine clock can't bucket candles incorrectly.
 
+### A completed minute is handed off, never overwritten
+
+When a tick arrives in a new minute, the finished bucket is appended to a
+`_completed` buffer that only the flush thread drains. It is not written from
+`on_ticks` (that would block the callback) and it is not replaced in place.
+
+**The bug:** the original tick path did `_buckets[token] = {…new minute…}`,
+replacing the dict. The completed candle survived only if the flush thread had
+already collected it — and since the flusher runs every 5 s while ticks arrive
+in milliseconds, it usually had not. For a heavily traded symbol the next tick
+destroys the candle almost instantly, so the loss was *inversely correlated
+with liquidity*: in one session, low-volume names kept ~230 candles and
+HDFCBANK kept 4 out of 305 possible minutes. Roughly 74% of that session's
+candles were lost this way. It is a list rather than a per-token slot so that
+if the flusher ever falls behind, two completed minutes for one symbol both
+survive.
+
+Two consequences worth noting. The flush thread wraps every iteration, because
+that thread dying would leave the day's candles in memory — the exact failure
+this buffering exists to prevent. And when the feed goes silent mid-minute, the
+partial candle for that minute is deliberately **dropped** rather than flushed:
+a bar built from a subset of ticks is wrong, and once written it no longer
+looks *missing*, so the healer could never correct it.
+
+### A candle timestamp has exactly one identity
+
+Everything that writes a candle goes through
+`core.freshness.candle_timestamp()`, which normalises to naive IST at minute
+precision.
+
+**The bug:** `fetch_historical.py` stored `c["date"].isoformat()` on Kite's
+tz-aware datetimes, producing `2026-09-25T09:15:00+05:30`, while
+`live_ticker.py` wrote `strftime` output — `2026-09-25T09:15:00`. The same
+minute therefore had two possible primary keys: `INSERT OR REPLACE` duplicated
+instead of replacing, equality checks never matched, and a later heal could
+leave a legacy row sitting beside the new one, double-counting that bar in
+every indicator. Gap detection was the worst affected — it compared strings, so
+it reported every one of a 9-million-row backfilled history as missing and
+would have refetched the entire watchlist on every sweep. Reads now compare
+16-character minute prefixes inside a half-open range, which is exact for both
+forms and still uses the `(symbol, timestamp)` index.
+
 ### News comes from RSS because Kite Connect has no news API
 
 `ingest/fetch_news.py` polls nine free feeds (Moneycontrol, Economic Times,
@@ -86,7 +128,17 @@ them with Gemini.
 Kite caps how many days one historical request may span, and rate-limits to
 roughly 3 requests/second. The backfill chunks requests per interval, throttles
 to ~2.5 req/s, retries on rate-limit errors, and skips symbols already fully
-backfilled — so a 500-symbol run that dies partway can simply be re-run.
+backfilled — so a 500-symbol run that dies partway can simply be re-run. The
+default interval is `minute`, matching what the live ticker writes.
+
+Completion is tracked per `(symbol, interval)` in `backfill_state` rather than
+inferred from `MIN(timestamp)` in `candles`. That inference was sound until the
+intervals diverged: a symbol with a year of 5-minute bars satisfies an
+earliest-candle test for a 60-day minute backfill, so it would be skipped
+forever and leave the live stream writing minute bars into a table whose
+history is a different interval. The recorded range is only stamped after a
+symbol's full range succeeds, so an interrupted run resumes it instead of
+marking it done.
 
 ---
 
@@ -252,8 +304,16 @@ a 1.5×ATR stop with a 2:1 target.
   overwrites `models/ml_model.joblib`.
 - `walk_forward_optimizer.py` tunes **entry thresholds only** and therefore
   cannot validate the exit logic, which is where the largest measured gain is.
-- `ingest/live_ticker.py` is the only module that cannot be exercised offline —
-  it opens a live WebSocket at import — so it is compile-checked and reviewed
-  only. Watch its terminal output during market hours.
+- `ingest/live_ticker.py`'s socket layer cannot be exercised offline — it opens
+  a live WebSocket at import — so it is compile-checked and reviewed only. Its
+  aggregation logic can now be driven directly, though: `on_ticks` and
+  `_collect_buckets` take synthetic tick dicts, which is how the candle-loss
+  regression above was confirmed. Watch the terminal output during market hours.
+- No process supervisor. `ingest/live_ticker.py` is a long-lived process that
+  nothing restarts: if it is killed, data stops until it is run again. The
+  scheduler's repair job fills the hole meanwhile and the post-close sweep
+  makes the session whole, but supervision is still the missing piece. The
+  watchdog also cannot recover from an expired access token — it retries and
+  fails forever, which is why `on_noreconnect` shouts.
 - SEBI algo-trading disclosure rules apply once this moves from personal signals
   to automated order placement. Out of scope for this POC.

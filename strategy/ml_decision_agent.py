@@ -12,6 +12,7 @@ import joblib
 import numpy as np
 from datetime import datetime
 
+from core.freshness import split_stale, warn_stale
 from core.quant_indicators import compute_atr, load_candles
 from paths import ML_MODEL_PATH
 from research.backtest import prepare_symbol_series, precompute_pattern_bias_codes
@@ -86,6 +87,11 @@ def ml_decide(symbol: str, model, feature_columns: list) -> dict:
 
 def run_ml_decision_cycle(symbols: list):
     model, feature_columns = _load_model()
+
+    # Same freshness gate as the rule-based cycle (core/freshness.py): an ML
+    # prediction from a stale candle is no more trustworthy than a rule hit.
+    symbols, stale = split_stale(symbols)
+    warn_stale(stale, "ML cycle")
 
     for symbol in symbols:
         ml_result = ml_decide(symbol, model, feature_columns)

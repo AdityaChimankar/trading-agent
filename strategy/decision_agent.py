@@ -9,6 +9,7 @@ evaluate_signals() is the pure rule function - both live trading
 results actually reflect what the live agent would have done.
 """
 from datetime import datetime
+from core.freshness import split_stale, warn_stale
 from core.pattern_detection import detect_patterns
 from core.quant_indicators import latest_indicators
 from storage.db import get_connection, get_watchlist_symbols
@@ -80,6 +81,10 @@ def run_decision_cycle():
     but at 500 symbols it still adds up, and keeping the pattern
     consistent avoids reintroducing the same class of bug here."""
     symbols = get_watchlist_symbols()
+
+    # Never decide on a price that no longer exists - see core/freshness.py.
+    symbols, stale = split_stale(symbols)
+    warn_stale(stale, "decision cycle")
 
     for symbol in symbols:
         result = decide(symbol)

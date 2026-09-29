@@ -6,6 +6,9 @@ historical candles, computes deterministic technical/pattern features, and runs
 their calls can be compared on real outcomes instead of argued about. On top of
 that: ATR-based position sizing, portfolio-level risk caps, walk-forward
 threshold validation, paper-position monitoring, and a FastAPI + React dashboard.
+Underneath all of it, a live-feed watchdog that detects a stalled stream,
+repairs the missing candles from the exchange's own record, and refuses to trade
+on prices that no longer exist — see [Liveness and gap repair](#liveness-and-gap-repair).
 
 **Paper trading only.** Nothing in this repository places a real order. The
 `open_positions` table is a manual ledger you fill in by clicking a button.
@@ -36,6 +39,14 @@ fixed take-profit** gains ~+0.009%/trade (~33% relative) versus the exit logic
 currently traded live, because the 2:1 target fires on 23.4% of trades while the
 1.5×ATR stop fires on 55.9%.
 
+**These numbers were measured on 5-minute candles — the old basis.** The
+pipeline now stores 1-minute bars end to end (see
+[Backfill](#backfill-one-time-or-an-occasional-top-up)), which changes what RSI,
+ADX and ATR are actually measuring. Re-run `research.diagnose_edge` and
+`research.backtest` on the new basis before reading anything below as current:
+the measurement harness is sound, but every number in this table was produced
+from a differently-sampled series.
+
 Full numbers, method, tolerance/horizon/component sweeps and ranked
 recommendations: **[docs/EDGE_ANALYSIS.md](docs/EDGE_ANALYSIS.md)**.
 
@@ -62,6 +73,7 @@ trading-agent/
 │   └── schema.sql                   Table definitions
 │
 ├── core/                           Deterministic primitives — no LLM, no I/O side effects
+│   ├── freshness.py                 Market-session + candle staleness — "is this data live?"
 │   ├── quant_indicators.py          RSI, ATR, ADX
 │   ├── pattern_detection.py         Candlestick + swing patterns
 │   └── position_sizing.py           ATR-based size, stop-loss, take-profit
@@ -72,11 +84,13 @@ trading-agent/
 │   ├── instrument_lookup.py         symbols.txt -> instrument tokens
 │   ├── instruments.csv              Kite instrument dump (~9 MB, downloaded, tracked)
 │   ├── watchlist_resolved.py        Generated token map (read by fetch_historical)
-│   ├── fetch_historical.py          Resumable, rate-limited 5-min candle backfill
+│   ├── fetch_historical.py          Resumable, rate-limited 1-min candle backfill
+│   ├── gap_healer.py                Finds missing minutes, refetches them from Kite
 │   ├── fetch_news.py                9 free feeds (Moneycontrol, ET, CNBC-TV18, Livemint,
 │   │                                 Business Standard, NDTV Profit, BSE announcements),
 │   │                                 symbol-tagged via word-boundary + company-name matching
-│   └── live_ticker.py               KiteTicker WebSocket -> 1-min candles
+│   └── live_ticker.py               KiteTicker WebSocket -> 1-min candles, heartbeat,
+│                                    stall watchdog, heal-on-reconnect
 │
 ├── analysis/                       Read-only intelligence over stored data
 │   ├── sentiment.py                 Gemini sentiment scoring on tagged news
@@ -111,7 +125,8 @@ trading-agent/
 ├── api/                            FastAPI JSON layer — NO trading logic
 │   ├── main.py                      App, CORS, startup DB init, router registration
 │   ├── serializers.py               numpy/pandas/dataclass -> JSON-safe conversion
-│   └── routers/                     watchlist, positions, opportunities, digest, symbols
+│   └── routers/                     watchlist, positions, opportunities, digest, symbols,
+│                                    liveness
 │
 ├── frontend/                       React + TypeScript + Vite dashboard
 │   └── src/                         App shell, polling hooks, Plotly chart, panels
@@ -156,11 +171,29 @@ cd frontend && npm install && cd ..
 
 ```bash
 python -m ingest.kite_auth          # daily login: opens a URL, paste back the request_token
-python -m ingest.fetch_historical   # ~1 year of 5-min candles, resumable if interrupted
+python -m ingest.fetch_historical   # 60 days of 1-min candles, resumable if interrupted
+```
+
+The default interval is **minute**, deliberately matching what the live ticker
+writes — a 5-minute history beside 1-minute live candles in one table made
+"the last 200 candles" mean two different horizons and silently rescaled ATR
+and RSI between backtest and session. Minute history is heavy (~375 rows per
+symbol per day), so the default lookback is 60 days rather than a year:
+
+```bash
+python -m ingest.fetch_historical --days 120            # more minute history
+python -m ingest.fetch_historical --interval 5minute    # the old behaviour
 ```
 
 For 500 symbols, expect 30–60 minutes — Kite rate-limits historical requests.
-Re-runs skip symbols that are already backfilled.
+Re-runs skip symbols already completed *for that interval* (tracked in the
+`backfill_state` table, since the candles table alone cannot tell a minute bar
+from a 5-minute one).
+
+A backfill **replaces the window it covers**, so re-running with
+`--interval minute` over an existing 5-minute history swaps it out instead of
+leaving both bars behind for every fifth minute — which is the intended way to
+migrate to the minute basis.
 
 ## Validate before trusting anything
 
@@ -195,10 +228,22 @@ Then, in separate terminals:
 python -m ingest.live_ticker                             # 3. live candle stream
 python -m scripts.scheduler                              # 4. news / sentiment /
                                                          #    decisions (5 min) / ML (5 min) /
-                                                         #    LLM (15 min) / digest (3:35 PM)
+                                                         #    LLM (15 min) / feed watchdog (10 min) /
+                                                         #    repair sweep (3:32 PM) / digest (3:35 PM)
 python -m uvicorn api.main:app --reload --port 8000      # 5. dashboard API
 cd frontend && npm run dev                               # 6. dashboard UI -> localhost:5173
 ```
+
+Any time during the session, one command answers "is this live?":
+
+```bash
+python -m core.freshness   # feed status, staleness, heartbeat; also /api/liveness
+```
+
+`live` means the heartbeat is current and every candle is fresh. `degraded`
+means the ticker is up but the data has fallen behind. `down` means no
+heartbeat, or no socket, during market hours — restart the ticker, then run
+`python -m ingest.gap_healer` to refill the hole.
 
 The UI polls on its own schedule (positions and charts every 15 s, rankings and
 opportunities every 60 s) and the top bar shows a `⟳ live` indicator while a
@@ -212,7 +257,11 @@ action on the same candle — without influencing any live decision. That table
 is the out-of-sample track record used by the promotion rules in
 [docs/STRATEGIES.md](docs/STRATEGIES.md).
 
-At close, Ctrl+C all four — no cleanup needed.
+At close, Ctrl+C the ticker first: it flushes its in-flight candle and then
+runs an end-of-session repair sweep over every symbol, so anything lost during
+the day comes back from the exchange's own record before you stop. The
+scheduler does the same sweep at 3:32 PM if you would rather just leave it.
+Ctrl+C the rest whenever — no cleanup needed.
 
 ---
 
@@ -225,8 +274,11 @@ At close, Ctrl+C all four — no cleanup needed.
 | Build watchlist from NSE | `python -m ingest.build_nifty500_symbols` |
 | Resolve instrument tokens | `python -m ingest.instrument_lookup symbols.txt` |
 | Create/migrate the DB | `python -m storage.db` |
-| Backfill history | `python -m ingest.fetch_historical` |
+| Backfill history | `python -m ingest.fetch_historical [--days N] [--interval minute]` |
 | Stream live candles | `python -m ingest.live_ticker` |
+| Repair missing candles | `python -m ingest.gap_healer [--recent 90]` |
+| Check feed liveness | `python -m core.freshness` |
+| Feed health over HTTP | `curl localhost:8000/api/liveness` |
 | Run the daily automation | `python -m scripts.scheduler` |
 | Backtest | `python -m research.backtest [SYMBOLS... \| --all \| --selftest]` |
 | Walk-forward validation | `python -m research.walk_forward_optimizer [SYMBOLS... \| --all \| --selftest]` |
@@ -256,6 +308,19 @@ module — the ones that change behaviour most are `SLIPPAGE` and `DEFAULT_PARAM
 in `research/backtest.py`, and `RISK_PER_TRADE_PCT`, `ATR_STOP_MULTIPLIER`,
 `REWARD_RISK_RATIO`, `MAX_POSITION_PCT_OF_CAPITAL` in `core/position_sizing.py`.
 
+The liveness layer is tuned by constants in the same style:
+
+| Constant | Where | Meaning |
+|---|---|---|
+| `FLUSH_INTERVAL_SEC` | `ingest/live_ticker.py` | how often buffered candles are written |
+| `STALL_WARN_SEC` | `ingest/live_ticker.py` | silence before the feed is called stalled |
+| `FORCE_RECONNECT_SEC` | `ingest/live_ticker.py` | silence before the socket is forced to re-handshake |
+| `RECONNECT_MAX_TRIES` / `RECONNECT_MAX_DELAY_SEC` | `ingest/live_ticker.py` | how long an outage is ridden out before `on_noreconnect` alerts |
+| `DEFAULT_MAX_AGE_MINUTES` | `core/freshness.py` | how far behind a candle may fall before it is refused |
+| `HEARTBEAT_MAX_AGE_SEC` | `core/freshness.py` | heartbeat age that counts as "alive" |
+| `HEARTBEAT_TRUST_SEC` / `FEED_DOWN_LOOKBACK_MIN` | `scripts/scheduler.py` | when the repair job stops trusting the ticker, and how far back it sweeps |
+| `DEFAULT_INTERVAL` / `DEFAULT_DAYS_BACK` | `ingest/fetch_historical.py` | the stored candle basis and its default lookback |
+
 ---
 
 ## Key design decisions
@@ -276,19 +341,89 @@ trade-offs are in **[docs/DESIGN.md](docs/DESIGN.md)**.
   repeated WebSocket 1006 disconnects at scale.
 - **The API holds no trading logic.** Every endpoint calls the same Python
   modules the CLI does, so each calculation has exactly one implementation.
+- **A finished candle is handed off, never overwritten.** `on_ticks` appends the
+  completed minute to a buffer the flush thread drains, instead of replacing the
+  bucket dict. Replacing it lost the candle for any symbol busy enough to receive
+  another tick before the next flush — which made data coverage *inversely*
+  correlated with liquidity. See [docs/DESIGN.md](docs/DESIGN.md).
+- **A candle timestamp has exactly one identity.** Everything that writes candles
+  normalises to naive IST via `core/freshness.candle_timestamp()`, and reads
+  compare 16-character minute prefixes, so the two forms that historically
+  coexisted in `candles` (one tz-aware, one naive) can no longer create two rows
+  for one minute.
+- **Staleness is checked, not assumed.** No indicator, decision or gate reads a
+  candle without `core/freshness.py` having a say in whether that candle is
+  current. A dead feed and a quiet market produce the same absent rows, and only
+  the clock can tell them apart.
+
+## Liveness and gap repair
+
+A live feed that goes quiet is indistinguishable from a quiet market unless
+something says so explicitly. Four things make it explicit:
+
+1. **Heartbeat.** The ticker's flush thread upserts a row into `ingest_status`
+   every 5 seconds (connected, last tick, buffer depth, repairs queued).
+   `GET /api/liveness` turns it into one word — `live`, `degraded`, `down` or
+   `closed`. `python -m core.freshness` prints the same thing.
+2. **Stall watchdog.** Silence during market hours is a dead feed, not a quiet
+   one: 500 symbols never all stop together. After 90s the ticker says so;
+   after 300s it sends a close frame so the client re-handshakes and
+   resubscribes. It deliberately does *not* call `close()`, which stops the
+   retry loop and would turn a recoverable stall into a dead process.
+3. **Repair.** Every detected outage window is refetched from Kite's own
+   historical record by `ingest/gap_healer.py` — on reconnect, on a restart
+   mid-session, every 10 minutes while the feed is down (via the scheduler),
+   and definitively after the close. Each hole is recorded in `candle_gaps`,
+   including the ones that recovered zero candles, because "the symbol
+   genuinely didn't trade" and "we weren't listening" are different facts.
+4. **Refusal.** `core/freshness.py` gates the decision cycles: a symbol whose
+   candles are more than 10 minutes behind the live feed is skipped and named,
+   rather than traded on a price that no longer exists. Outside the session
+   nothing is stale, so backtests and after-hours runs are unaffected.
+
+### Two bugs this uncovered
+
+Both were found by looking at what the data actually contained, and both
+produced exactly the symptom they look like — hours of information missing
+while the process appeared to be running fine.
+
+- **Finished candles were discarded on the tick path.** Replacing a bucket as
+  soon as a tick from the next minute arrived dropped the completed candle
+  unless the 5-second flush thread had already collected it. With ticks
+  arriving in milliseconds, that lost the candle for every symbol busy enough
+  to matter, so coverage was *inversely* correlated with liquidity: of one
+  session's captured minutes, low-volume names had ~230 candles and HDFCBANK
+  had 4. Completed minutes are now handed to a buffer the flusher drains.
+- **Live and historical rows had different timestamp identities.** The
+  backfill stored Kite's tz-aware `...+05:30` datetimes while the ticker wrote
+  naive ones, so the same minute existed under two primary keys — unfixable by
+  `INSERT OR REPLACE`, invisible to equality checks, and enough to make gap
+  detection report every backfilled minute as missing. Writes now normalise
+  through `core.freshness.candle_timestamp()`, and reads compare minute
+  prefixes, so rows written before the fix are still read correctly.
 
 ## Known gaps
 
 - Access-token refresh is manual daily (a TOTP auto-login would remove it).
+  The watchdog cannot recover from an expired token — it will retry every 30s
+  and never succeed, which is why `on_noreconnect` shouts.
+- There is no process supervisor: if the ticker process is killed, data stops
+  until you restart it. The scheduler's repair job keeps filling the hole
+  while that lasts, and the post-close sweep makes it whole, but a supervisor
+  that restarts the process would be strictly better.
+- Pre-existing databases keep their legacy `+05:30` candle rows. They read
+  correctly, but they are only rewritten to the canonical form for minutes the
+  healer repairs.
 - `risk/portfolio_risk.py`'s correlation lookback and thresholds are fixed
   constants, not validated the way the decision thresholds are.
 - No model versioning or drift detection — each training run overwrites
   `models/ml_model.joblib`.
 - `walk_forward_optimizer.py` tunes **entry thresholds only**; it cannot
   validate exit logic, which is where the largest measurable gain is.
-- `ingest/live_ticker.py` is the one module that can't be tested offline (it
-  opens a live WebSocket at import) — watch its terminal output during market
-  hours.
+- The ticker's socket layer can't be tested offline (it opens a live WebSocket
+  at import), but the aggregation logic now can: `on_ticks` and
+  `_collect_buckets` are pure enough to drive directly with synthetic ticks.
+  Still watch the terminal output during market hours.
 - SEBI algo-trading disclosure rules apply once this moves from personal signals
   to automated order placement. Out of scope for this POC.
 
@@ -297,6 +432,6 @@ trade-offs are in **[docs/DESIGN.md](docs/DESIGN.md)**.
 | Document | Contents |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, data flow, dependency rules, DB schema, threading and API boundaries |
-| [docs/DESIGN.md](docs/DESIGN.md) | Why the code is built this way — decisions, the bugs behind them, trade-offs |
+| [docs/DESIGN.md](docs/DESIGN.md) | Why the code is built this way — decisions, the bugs behind them, trade-offs (the liveness section covers the candle-loss and timestamp-identity bugs) |
 | [docs/EDGE_ANALYSIS.md](docs/EDGE_ANALYSIS.md) | Measured evidence that the signal has no edge, and what to change |
 | [docs/STRATEGIES.md](docs/STRATEGIES.md) | The candidate strategies, how they're measured, and the promotion rules |
