@@ -132,20 +132,22 @@ hopeless.
 
 ## 6. The exit logic traded live was never tested
 
-`research/backtest.py` always exits after a **fixed 6 candles**. The live agent
-uses a **1.5×ATR stop with a 2:1 target** (`core/position_sizing.py`). Those are
-different strategies, and only the untested one was running.
+`research/backtest.py` always exits after a **fixed 6 candles**. At the time of
+this analysis the live agent used a **1.5×ATR stop with a 2:1 target**
+(`core/position_sizing.py`). Those are different strategies, and only the
+untested one was running.
 
 Bar-by-bar walk-forward, stop winning intrabar ties (conservative):
 
 | exit variant | net EV / trade | t |
 |---|---|---|
 | fixed 6-candle (what the backtest measures) | −0.0546% | −32.5 |
-| 1.5×ATR stop + 2:1 target **(what runs live)** | −0.0451% | −29.3 |
+| 1.5×ATR stop + 2:1 target **(what ran live then)** | −0.0451% | −29.3 |
 | **1.5×ATR stop, no target** | **−0.0363%** | −18.7 |
 | 3.0×ATR stop + 2:1 target | −0.0519% | — |
 
-Outcome mix for the live variant: **stop 55.9% · target 23.4% · timeout 20.7%**.
+Outcome mix for the stop+target variant: **stop 55.9% · target 23.4% ·
+timeout 20.7%**.
 
 Removing the take-profit is the **single largest measured improvement in this
 entire analysis**: ~+0.009%/trade, roughly a 33% relative improvement, and it
@@ -153,18 +155,76 @@ costs nothing to implement. The target fires on fewer than a quarter of trades
 while the stop fires on more than half — the ratio is cutting winners short in a
 signal with no directional edge to begin with.
 
+> **Applied.** `core/position_sizing.py` now defaults to `USE_TAKE_PROFIT =
+> False`, and `research/strategy_lab.py` reproduces this gap independently on
+> every candidate it measures. Still a smaller loss, not a profitable strategy.
+
+---
+
+## 7. Wave 2: the session / regime / cost filter layer (added later)
+
+§6 established the exit as the dominant lever. The remaining open question was
+the one [STRATEGIES.md](STRATEGIES.md) names as the only untested direction left:
+*"if a real edge exists here, it is more likely in **when not to trade**
+(time-of-day, event filters, spread-aware cost models) than in another pattern
+gate."* Seven institutional-grade filters were built on top of the best
+measured entry (`trend_pullback` = ADX ≥ 20 **and** RSI < 45), measured one at a
+time against the same random-entry baseline, 60 symbols:
+
+| filter added to `trend_pullback` | trades | EV/trade | vs baseline (−0.0319%) | EV late20 |
+|---|---|---|---|---|
+| session window 09:45–14:30 | 31,423 | −0.0388% | **worse** | −0.0380% |
+| cost cover (≥3× round trip) | 43,924 | −0.0351% | worse (52 trades filtered) | −0.0505% |
+| ATR percentile band 20–80 | 31,751 | −0.0412% | **worse** | −0.0567% |
+| price above rising session VWAP | 3,192 | **+0.0166%** | **+0.049%** | −0.0415% |
+| 4-hour + one-day momentum > 0 | 5,895 | −0.0447% | **worse** | −0.0714% |
+| no ≥2% opening gap | 43,954 | −0.0354% | worse (22 trades filtered) | −0.0499% |
+| all seven stacked | 405 | +0.0092% | +0.041% | **−0.1787%** |
+
+**The layer did not produce an edge.** Three results are worth keeping:
+
+1. **The VWAP filter is the only candidate in the project to clear the cost
+   line** (+0.0166% net, a full round-trip cost above baseline) — and it fails
+   three ways: t = +1.0 against a promotion bar of t ≥ 2; its late-20% EV is
+   −0.0415% against +0.0323% in the early 80%, so the whole gain is in the older
+   half of the history; and at a 3.0×ATR stop instead of 1.5×ATR it collapses to
+   +0.0022% (t = +0.1). A result that exists at one stop width is a parameter
+   coincidence. Hypothesis, not strategy.
+
+2. **Cost-aware entry gating is arithmetically pointless at this cost level.**
+   The expected move over the hold is ATR-%-of-price × √6; measured across
+   369,751 candles on 20 symbols its median is **11.4× the round trip**
+   (p5 = 5.6×, p95 = 27.1×), and only 0.009% of candles fall below even 1× cost.
+   So the filter changed 52 trades out of 43,976. This closes off "trade only
+   when the move can cover costs" as a direction: the signal is wrong about
+   direction ~50% of the time, and no cost filter fixes a directional error.
+
+3. **Multi-timeframe confirmation backfires at a 5-minute horizon.** Requiring
+   the 4-hour *and* one-day trend to agree produced the worst result in the
+   table (−0.0447%). The continuation being harvested is short-horizon, and HTF
+   agreement filters precisely that away — a result worth having, because HTF
+   confirmation is close to universal advice and it is wrong *here*.
+
+The stacked variant shows the largest early-80 number of anything measured
+(+0.0438%) and −0.1787% in the last fifth on 405 trades. Seven filters on one
+history is seven degrees of freedom; that shape is what overfitting looks like,
+and it is why each filter was measured alone before being stacked.
+
+Full tables, admit-rates and the promotion rules are in
+[STRATEGIES.md](STRATEGIES.md).
+
 ---
 
 ## Ranked recommendations
 
 Ordered by measured evidence, best first.
 
-1. **Remove the fixed take-profit.** Change `REWARD_RISK_RATIO` in
-   `core/position_sizing.py` (set it to `None` / disable the target). Largest
-   measured gain, smallest change, no new logic. Keep the 1.5×ATR stop.
+1. **Remove the fixed take-profit.** Set `USE_TAKE_PROFIT = False` in
+   `core/position_sizing.py` (it is already the default). Largest measured
+   gain, smallest change, no new logic. Keep the 1.5×ATR stop. **Done.**
 2. **Drop the SELL / short leg.** SELL carries the loss (t = −4.9) while BUY is
    indistinguishable from random (t = −0.4). The short bias is imposed by the
-   pattern gate, not by evidence.
+   pattern gate, not by evidence. **Done** — every candidate is long-only.
 3. **Stop using double-top/bottom as a gate** until it requires a real
    intervening trough plus a minimum bar separation. As implemented it is on 98%
    of candles; §2 shows tightening the tolerance cannot rescue it.
@@ -176,6 +236,13 @@ Ordered by measured evidence, best first.
    treated as a warning, not a result.
 6. **No holding period works.** 1 bar is the only non-negative horizon and it is
    +0.0003% against 0.05% costs.
+7. **Do not expect entry filters to close the gap.** Seven of them were built
+   and measured (§7); one cleared the cost line and it failed its own time-split.
+   What remains untested, and is the only direction the evidence points at, is
+   **execution cost**: every number here assumes a flat 0.05% round trip, with no
+   spread, no impact, and no gap between signal and fill. Measuring realized cost
+   per signal and trading only the cheapest decile of names attacks the actual
+   binding constraint; nothing in the project does that yet.
 
 ## Caveats
 
@@ -190,6 +257,9 @@ Ordered by measured evidence, best first.
   recommendation 1 with real capital.
 - Every number here is **gross** in the signal-vs-baseline sections and **net**
   in the exit section; the tool labels which is which.
+- §7's filters are measured **in-sample** like everything else, on 60 symbols.
+  The candidates are logging live to `strategy_signals` so the out-of-sample
+  test the promotion rules require is accumulating independently.
 
 ## Reproducing
 
@@ -198,6 +268,11 @@ python -m research.diagnose_edge --n 120          # the tables above (default is
 python -m research.diagnose_edge --n 40 --exits   # adds the exit-variant section
 python -m research.diagnose_edge --all            # whole watchlist
 python -m research.diagnose_edge RELIANCE TCS     # specific symbols
+
+python -m strategy.session_features               # §7 features: causality proof
+python -m strategy.session_features --cost-cover  # §7: expected move vs the round trip
+python -m strategy.candidates                     # §7 candidates: admit-rate proof
+python -m research.strategy_lab --n 60            # §7 candidate EV table
 ```
 
 Sections: 1 baseline · 2 signal vs baseline · 3 component ablation · 4

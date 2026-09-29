@@ -34,15 +34,61 @@ present on **98.0%** of candles, so it filters almost nothing while structurally
 biasing the book ~76% short. Slippage is 0.05% per trade; the best edge found
 anywhere in the ablation is 0.009% — about 5× too small to survive costs.
 
-The single largest measured improvement is an exit-logic change: **removing the
-fixed take-profit** gains ~+0.009%/trade (~33% relative) versus the exit logic
-currently traded live, because the 2:1 target fires on 23.4% of trades while the
-1.5×ATR stop fires on 55.9%.
+### A second wave of institutional filters was built, measured, and did not help
+
+Seven "when not to trade" filters were added on top of the best measured entry —
+session time-of-day, cost cover, volatility regime, session VWAP, higher-timeframe
+agreement, opening-gap filter, and a stack of all of them — then measured against
+the same random-entry baseline over 60 symbols / 9.19M candles:
+
+| | EV/trade | vs baseline | EV in last 20% |
+|---|---|---|---|
+| baseline (every candle) | −0.0319% | — | −0.0564% |
+| `vwap_pullback` (price above a rising session VWAP) | **+0.0166%** | +0.049% | **−0.0415%** |
+| `session_quality_stack` (all seven) | +0.0092% | +0.041% | **−0.1787%** |
+| session window / volatility regime / HTF agreement | −0.039% to −0.045% | worse | negative |
+
+**The one filter that cleared the cost line fails its own honesty check** (t = +1.0
+against a bar of 2.0; the sign inverts in the most recent fifth of history; it
+collapses to +0.0022% at a 3.0×ATR stop instead of 1.5×ATR). It is logged for
+out-of-sample testing, not promoted.
+
+Three results worth keeping:
+
+- **Cost-aware entry gating is arithmetically pointless here.** The expected move
+  over the hold is ATR-%-of-price × √6. Measured over 369,751 candles on 20
+  symbols, its median is **11.4× the round trip** (p5 = 5.6×, p95 = 27.1×), and
+  only 0.009% of candles fall below even 1× cost. So the gate changed 52 trades
+  out of 43,976. The signal is wrong about *direction* ~50% of the time; no cost
+  filter fixes a directional error.
+- **Multi-timeframe confirmation backfires at a 5-minute horizon** — requiring 4-hour
+  *and* one-day trend agreement produced the worst result in the table.
+- **The remaining lever is execution cost, not signal generation.** Every number
+  here assumes a flat 0.05% round trip, with no spread, impact, or gap between
+  signal and fill. Nothing in the project measures realized cost yet.
+
+Full tables and promotion rules: **[docs/STRATEGIES.md](docs/STRATEGIES.md)**.
+
+### What did get fixed: the exit
+
+The single largest measured improvement in the project is an exit-logic change,
+and it is now applied. **Removing the fixed take-profit** gains ~+0.009%/trade
+(~33% relative) versus the exit logic previously traded live, because the 2:1
+target fires on 23.4% of trades while the 1.5×ATR stop fires on 55.9%. A 2:1
+target on a 1.5×ATR stop needs a ~3×ATR move inside the hold, which almost never
+happens — so the target caps small favourable drifts while the stop still takes
+the full loss on the rest. `research/strategy_lab.py` reproduces this
+independently on every candidate.
+
+`core/position_sizing.py` now defaults to `USE_TAKE_PROFIT = False`, and scales
+position size **down** when a name's ATR sits in the top of its own recent range
+(where a 1.5×ATR stop falls inside a single bar, so planned risk is not realisable
+risk). This is still a smaller loss, not a profitable strategy.
 
 **These numbers were measured on 5-minute candles — the old basis.** The
 pipeline now stores 1-minute bars end to end (see
 [Backfill](#backfill-one-time-or-an-occasional-top-up)), which changes what RSI,
-ADX and ATR are actually measuring. Re-run `research.diagnose_edge` and
+ADX and ATR are actually measuring. Re-run `research/diagnose_edge` and
 `research.backtest` on the new basis before reading anything below as current:
 the measurement harness is sound, but every number in this table was produced
 from a differently-sampled series.
@@ -76,7 +122,8 @@ trading-agent/
 │   ├── freshness.py                 Market-session + candle staleness — "is this data live?"
 │   ├── quant_indicators.py          RSI, ATR, ADX
 │   ├── pattern_detection.py         Candlestick + swing patterns
-│   └── position_sizing.py           ATR-based size, stop-loss, take-profit
+│   └── position_sizing.py           ATR-based size, stop-loss; no take-profit by default
+│                                    (measured), volatility-aware risk scaling
 │
 ├── ingest/                         Getting market data in
 │   ├── kite_auth.py                 Daily Zerodha login -> .access_token
@@ -105,7 +152,9 @@ trading-agent/
 │   ├── ml_decision_agent.py         Trained-model decisions, parallel comparison
 │   ├── ml_features.py               Feature engineering (no lookahead, verified)
 │   ├── train_ml_model.py            Chronological train/test split + trade simulation
-│   ├── candidates.py                Candidate entries (long-only, evidence-derived)
+│   ├── session_features.py          Session VWAP, ATR percentile, HTF momentum, gap,
+│   │                                cost cover — causal, memoized, --selftest
+│   ├── candidates.py                Candidate entries + session/regime gates, --selftest
 │   └── shadow.py                    Logs candidate votes to strategy_signals, live
 │
 ├── risk/
@@ -199,18 +248,35 @@ migrate to the minute basis.
 ## Validate before trusting anything
 
 ```bash
+python -m research.diagnose_edge --n 120        # is there an edge at all?  <- run this first
+python -m strategy.session_features             # candidate features cannot see the future
+python -m strategy.candidates                   # no candidate is mis-wired or a no-op
+python -m research.strategy_lab --n 60          # do the candidates beat random entry?
 python -m research.backtest --all
-python -m research.diagnose_edge --n 120        # is there an edge at all?
 python -m research.walk_forward_optimizer --all
 python -m research.backtest --selftest          # verify the fast path on YOUR data
 python -m strategy.train_ml_model --all         # optional: the ML comparison model
 ```
 
-`research/backtest.py` reports win rate, risk-reward and max drawdown at the
-default thresholds. `research/walk_forward_optimizer.py` re-fits RSI/ADX per
-stock on rolling windows and validates out-of-sample — the only number here that
-isn't in-sample. `research/diagnose_edge.py` is the one to run first: it tells
-you whether there is anything to tune, which the other two cannot answer.
+`research/diagnose_edge.py` is the one to run first: it tells you whether there
+is anything to tune, which the others cannot answer. `research/backtest.py`
+reports win rate, risk-reward and max drawdown at the default thresholds, and
+`research/walk_forward_optimizer.py` re-fits RSI/ADX per stock on rolling
+windows and validates out-of-sample — the only number there that isn't
+in-sample.
+
+The two strategy self-tests are cheap and catch a specific, dangerous class of
+bug: **a broken feature and a bad strategy look identical in a results table** —
+both just print a number.
+
+- `python -m strategy.session_features` rebuilds every session/regime feature
+  over a symbol's full history, then again over a truncated prefix, and requires
+  identical values. Any centered window, full-series normalization or backfill
+  changes its value once later candles exist, so a lookahead fails by
+  construction.
+- `python -m strategy.candidates` asserts each candidate's **admit-rate**. A
+  gate below 0.05% is usually a unit mistake; a gate above 60% is not filtering
+  anything — which is the same defect as the shipped 98%-always pattern gate.
 
 ## Daily routine (trading days, 9:15 AM – 3:30 PM IST)
 
@@ -251,12 +317,15 @@ opportunities every 60 s) and the top bar shows a `⟳ live` indicator while a
 request is in flight. FastAPI serves interactive endpoint docs at
 http://localhost:8000/docs.
 
-The scheduler also runs a **shadow cycle** every 5 minutes: the candidate
-strategies in `strategy/candidates.py` vote on the latest candle and their
-votes are logged to the `strategy_signals` table — alongside the rule agent's
-action on the same candle — without influencing any live decision. That table
-is the out-of-sample track record used by the promotion rules in
-[docs/STRATEGIES.md](docs/STRATEGIES.md).
+The scheduler also runs a **shadow cycle** every 5 minutes: the eleven candidate
+strategies in `strategy/candidates.py` vote on the latest candle and their votes
+are logged to the `strategy_signals` table — alongside the rule agent's action on
+the same candle — without influencing any live decision. That table is the
+out-of-sample track record used by the promotion rules in
+[docs/STRATEGIES.md](docs/STRATEGIES.md). The shadow logger evaluates the
+**same function objects** the lab backtests, so lab and live cannot disagree
+about what a strategy is; its cost is ~0.01 s/symbol, i.e. seconds for a
+500-symbol cycle.
 
 At close, Ctrl+C the ticker first: it flushes its in-flight candle and then
 runs an end-of-session repair sweep over every symbol, so anything lost during
@@ -286,7 +355,10 @@ Ctrl+C the rest whenever — no cleanup needed.
 | Backtest | `python -m research.backtest [SYMBOLS... \| --all \| --selftest]` |
 | Walk-forward validation | `python -m research.walk_forward_optimizer [SYMBOLS... \| --all \| --selftest]` |
 | Edge diagnostics | `python -m research.diagnose_edge [--n N \| --all \| SYMBOLS...] [--exits]` |
-| Strategy lab | `python -m research.strategy_lab [--n N \| --all] [--stop-mult 3.0]` |
+| Strategy lab | `python -m research.strategy_lab [--n N \| --all] [--stop-mult 3.0] [--max-bars 12]` |
+| Strategy feature causality check | `python -m strategy.session_features [SYMBOLS...]` |
+| Cost-cover distribution (evidence for the "cost gating is inert" claim) | `python -m strategy.session_features --cost-cover [N]` |
+| Candidate admit-rate check | `python -m strategy.candidates [SYMBOLS...]` |
 | Shadow log candidates | automatic via scheduler, or `python -m strategy.shadow` |
 | Train the ML model | `python -m strategy.train_ml_model [SYMBOLS... \| --all]` |
 | ML decision cycle | `python -m strategy.ml_decision_agent` |
@@ -308,8 +380,17 @@ Credentials live in `.env`:
 `.access_token` (gitignored, written by `ingest/kite_auth.py`) holds the daily
 Kite session. Everything else is a named constant at the top of the relevant
 module — the ones that change behaviour most are `SLIPPAGE` and `DEFAULT_PARAMS`
-in `research/backtest.py`, and `RISK_PER_TRADE_PCT`, `ATR_STOP_MULTIPLIER`,
-`REWARD_RISK_RATIO`, `MAX_POSITION_PCT_OF_CAPITAL` in `core/position_sizing.py`.
+in `research/backtest.py`, and the risk block in `core/position_sizing.py`:
+
+| Constant | Where | Meaning |
+|---|---|---|
+| `RISK_PER_TRADE_PCT` | `core/position_sizing.py` | % of capital risked per trade, before volatility scaling |
+| `ATR_STOP_MULTIPLIER` | `core/position_sizing.py` | stop distance = this × ATR |
+| `USE_TAKE_PROFIT` | `core/position_sizing.py` | **default `False`** — the 2:1 target measured *worse* than no target at all. Set `True` to restore the old behaviour |
+| `REWARD_RISK_RATIO` | `core/position_sizing.py` | only used when `USE_TAKE_PROFIT` is on |
+| `VOLATILITY_RISK_CUTOFF` / `VOLATILITY_RISK_FLOOR` | `core/position_sizing.py` | ATR percentile above which risk scales down, and the floor it scales to |
+| `MAX_POSITION_PCT_OF_CAPITAL` | `core/position_sizing.py` | hard cap on position value, whatever the sizing math suggests |
+| `SLIPPAGE` | `research/backtest.py` | round-trip cost every simulated trade pays. Imported (never re-declared) by the ML labels and the cost-cover gate so the three can never disagree |
 
 The liveness layer is tuned by constants in the same style:
 
@@ -452,7 +533,19 @@ abstention, shown but never counted as a disagreement.
 - No model versioning or drift detection — each training run overwrites
   `models/ml_model.joblib`.
 - `walk_forward_optimizer.py` tunes **entry thresholds only**; it cannot
-  validate exit logic, which is where the largest measurable gain is.
+  validate exit logic, which is where the largest measurable gain was. The
+  take-profit removal is supported by two independent in-sample measurements
+  (`diagnose_edge.py --exits` and `strategy_lab.py`) but has never been
+  walk-forward validated, because no tool here can.
+- **Realized execution cost is never measured.** Every number in this repo
+  assumes a flat 0.05% round trip, with no spread, no market impact, and no gap
+  between the signal candle and the fill. Given that entry filters cannot close
+  a 5× gap-to-costs and the exit change only recovers ~0.009%/trade, per-signal
+  cost measurement is the one direction the evidence actually points at, and it
+  is unbuilt.
+- The candidate strategies are measured **in-sample** by construction. The lab
+  numbers say which hypotheses are worth testing; only the `strategy_signals`
+  shadow table can decide whether one is real.
 - The ticker's socket layer can't be tested offline (it opens a live WebSocket
   at import), but the aggregation logic now can: `on_ticks` and
   `_collect_buckets` are pure enough to drive directly with synthetic ticks.
@@ -466,5 +559,5 @@ abstention, shown but never counted as a disagreement.
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, data flow, dependency rules, DB schema, threading and API boundaries |
 | [docs/DESIGN.md](docs/DESIGN.md) | Why the code is built this way — decisions, the bugs behind them, trade-offs (the liveness section covers the candle-loss and timestamp-identity bugs) |
-| [docs/EDGE_ANALYSIS.md](docs/EDGE_ANALYSIS.md) | Measured evidence that the signal has no edge, and what to change |
-| [docs/STRATEGIES.md](docs/STRATEGIES.md) | The candidate strategies, how they're measured, and the promotion rules |
+| [docs/EDGE_ANALYSIS.md](docs/EDGE_ANALYSIS.md) | Measured evidence that the signal has no edge, the exit-variant fix, the session/regime filter layer, and what to change |
+| [docs/STRATEGIES.md](docs/STRATEGIES.md) | The candidate strategies, how they're measured, their measured results, and the promotion rules |

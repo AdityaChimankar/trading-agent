@@ -50,10 +50,12 @@ layer may import the layers below it, never above.
 
 ## Known inversion: `strategy/` → `research/`
 
-Two strategy modules import shared helpers from `research/backtest.py`:
+Three strategy modules import shared helpers from `research/backtest.py`:
 
 - `strategy/ml_features.py` → `prepare_symbol_series`, `precompute_pattern_bias_codes`
 - `strategy/ml_decision_agent.py` → the same two
+- `strategy/candidates.py`, `strategy/session_features.py` → `prepare_symbol_series`
+  constants (`SWING_ORDER`, `DEFAULT_PARAMS`, `FORWARD_WINDOW`, `SLIPPAGE`)
 
 That is backwards: validation code should depend on the strategy, not the other
 way around. It is a deliberate, documented wart rather than a bug — these helpers
@@ -69,6 +71,28 @@ is to lift the shared pieces — `SLIPPAGE`, `DEFAULT_PARAMS`,
 `precompute_pattern_bias_codes`, `vectorized_evaluate`, `prepare_symbol_series`
 — into a new `core/signals.py`, leaving `research/backtest.py` as a caller. That
 makes `strategy → core` and `research → {core, strategy}`, with no inverted edge.
+
+Note the constraint that fix has to respect: `strategy/session_features.py` must
+keep importing `SLIPPAGE` and `FORWARD_WINDOW` from `research/backtest.py` (not
+copy them), because a second copy of a cost constant is exactly how a silent
+behavioural drift starts — see the same reasoning for `DEFAULT_PARAMS` in
+`research/backtest.py`.
+
+## Candidate strategies: pure, memoized, and self-verifying
+
+`strategy/session_features.py` builds every session/regime/cost array
+(session VWAP, ATR percentile, HTF momentum, opening gap, expected move) once
+per symbol and **memoizes them on the `prepared` dict**, because
+`research/strategy_lab.py` calls each candidate function once per candle per
+symbol. Every array it produces is causal — a trailing window or a within-day
+cumulative sum, never a centered window or a full-series normalization — and
+`python -m strategy.session_features` proves it by rebuilding every feature over
+a truncated prefix and requiring identical values. `python -m strategy.candidates`
+separately asserts each candidate's admit-rate, because a mis-scaled threshold
+admits either nothing or almost everything, and both look like a result in the
+lab's table. See [STRATEGIES.md](STRATEGIES.md) for why both checks exist and
+what they have already caught.
+
 
 ## Data flow, end to end
 
@@ -223,6 +247,8 @@ python -m py_compile paths.py storage/*.py core/*.py ingest/*.py analysis/*.py \
 
 python -m research.backtest --selftest             # vectorized fast path == slow reference
 python -m research.walk_forward_optimizer --selftest 360ONE   # 27/27 grid combos match
+python -m strategy.session_features                 # candidate features cannot see the future
+python -m strategy.candidates                       # candidate admit-rates are plausible
 python -m strategy.ml_features 360ONE              # feature build produces labelled rows
 cd frontend && npx tsc --noEmit                    # strict TS
 ```
@@ -232,6 +258,12 @@ cd frontend && npx tsc --noEmit                    # strict TS
 independently confirm that the vectorized fast paths reproduce the slow
 per-candle loops on *your* stored data, which is the assumption the entire
 validation story rests on.
+
+The two `strategy/` self-tests guard a different assumption. A feature that
+peeks at the future, or a gate whose thresholds are in the wrong units, does not
+raise — it prints a perfectly plausible number in the lab table. Prefix
+invariance and admit-rate assertions are what stop that from being read as a
+result.
 
 Because every command is a `python -m` invocation, **the working directory must
 be the repository root**. That is also what guarantees `paths.py` and `.env` are

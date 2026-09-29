@@ -206,9 +206,44 @@ future work.
 
 ### `position_sizing.py` only ever produces a plan
 
-Risk-per-trade, the ATR stop distance, the reward:risk ratio and a hard
-max-position-% cap are all tunable constants at the top of the file. Nothing in
-it places an order.
+Risk-per-trade, the ATR stop distance and a hard max-position-% cap are tunable
+constants at the top of the file. Nothing in it places an order.
+
+### The take-profit was removed, because it measured worse than nothing
+
+`USE_TAKE_PROFIT = False` is now the default, and `PositionPlan.take_profit` is
+`Optional`. A 1.5×ATR stop plus a 2:1 target returns −0.0451%/trade; the stop
+alone returns −0.0363%.
+
+**Why:** a 2:1 target on a 1.5×ATR stop requires a ~3×ATR move inside the
+holding window, which almost never happens. The target therefore fires on 23.4%
+of trades (capping small favourable drifts) while the stop still takes the full
+loss on the 55.9% that hit it — a strictly worse payoff distribution than
+letting the stop alone decide. `research/strategy_lab.py` reproduces the gap
+independently on every candidate, and on the VWAP candidate the target flips the
+sign outright (+0.0166% → −0.0167%).
+
+This is the **only** change made to live behaviour based on measurement, and it
+is still a smaller loss rather than a profitable strategy. The exit
+recommendation in [EDGE_ANALYSIS.md](EDGE_ANALYSIS.md) is unchanged; it has
+simply been acted on.
+
+`risk/position_monitor.py` already treated `take_profit` as optional (it falls
+through to the stop and the signal-reversal exit), and the `open_positions`
+column is nullable, so nothing downstream needed changing — but a new consumer
+that assumes a float must handle `None`.
+
+### Position size scales down with volatility, and can only scale down
+
+`current_volatility_percentile()` reuses the *same* `session_features` ATR
+percentile the candidate gates read, so sizing and entry cannot disagree about
+what "high volatility" means. Above the 80th percentile the multiplier falls
+linearly to a floor of 0.5.
+
+Two deliberate choices: the multiplier is capped at **1.0** (it can only reduce
+risk — sizing *up* in a quiet regime is the far worse failure mode), and an
+unavailable percentile returns 1.0 rather than a guess, so a failed feature can
+never quietly change position size.
 
 ### `portfolio_risk.py` sizes against what is already open — three checks
 
@@ -236,7 +271,9 @@ was individually tested with known price/level combinations first.
 
 > Note: `research/diagnose_edge.py` later showed the take-profit is actively
 > harmful here — the stop fires on 55.9% of trades and the 2:1 target on only
-> 23.4%. See [EDGE_ANALYSIS.md](EDGE_ANALYSIS.md).
+> 23.4%. See [EDGE_ANALYSIS.md](EDGE_ANALYSIS.md). The target is now off by
+> default, so the middle branch is normally inert and the effective order is
+> stop → signal reversal → HOLD.
 
 ---
 
@@ -277,6 +314,54 @@ deliberate cap rather than `os.cpu_count()`: spawning many processes that each
 reload scipy's compiled libraries at once can exceed Windows' default page file
 and crash with a DLL load error.
 
+### Candidate features are proven causal by prefix invariance, and gates by admit-rate
+
+A broken feature and a bad strategy look **identical** in a results table — both
+just print a number. Two self-tests exist so that class of bug cannot hide:
+
+```bash
+python -m strategy.session_features    # no feature depends on a future candle
+python -m strategy.candidates          # no candidate is mis-wired or a no-op
+```
+
+`session_features` builds every feature over a symbol's full history, builds it
+again over a truncated prefix, and requires the values to be identical. Any
+centered window, full-series normalization or backfill changes its value at
+index *i* once later candles exist, so a lookahead fails **by construction**
+rather than by inspection.
+
+`candidates` asserts each candidate's admit-rate: below 0.05% is almost always a
+unit mistake, above 60% means the gate is not filtering anything — the same
+defect `diagnose_edge.py` §5 found in the shipped pattern gate, which sat ON for
+98% of candles.
+
+Both have already earned their place. Prefix invariance caught
+`bars_left_in_day` counting the day's candles from a full-series group size — a
+genuine lookahead that knew the future of the session. The admit-rate check
+caught `vol_regime_pullback` comparing a 0–1 percentile against a 20–80 band:
+it admitted nothing, and in the lab table that reads as "this filter doesn't
+work" rather than as the unit bug it was. It also flagged the pre-existing
+`ma20_bounce` at 52–71% admit as a known finding rather than a regression, so
+the check stays a *regression* test instead of a permanently red one.
+
+### The candidate layer is measured one filter at a time, on purpose
+
+Each of the six single-filter candidates is `trend_pullback` **plus exactly one**
+gate. Bundling them would have produced one impressive-looking row and taught
+nothing about which filter did the work — and the stacked variant, measured
+separately, is the clearest curve-fit in the project (+0.0438% in the early 80%
+of history, −0.1787% in the last 20%, on 405 trades). That number only became
+readable *because* the parts had been measured alone first.
+
+### Session features are memoized on the `prepared` dict, which is not hidden state
+
+`research/strategy_lab.py` calls each candidate once per candle per symbol, so
+re-deriving a VWAP and a 250-bar rolling percentile rank inside every one of
+~209,000 calls per symbol would dominate the runtime. The bundle is built once
+per symbol and cached on the `prepared` dict that is already scoped to that
+symbol — memoization of a pure function, not state that can leak between
+symbols. The same `prepared` always yields the same features.
+
 ### `diagnose_edge.py` exists because the backtest couldn't answer the real question
 
 `backtest.py` tells you the strategy loses money. It cannot tell you whether
@@ -284,8 +369,11 @@ that is a cost problem (trade more selectively) or a no-edge problem (no
 threshold tuning can help) — and those demand opposite responses. The diagnostics
 tool measures the signal against a random-entry baseline and ablates each
 component. It also exposed that the exit logic traded live had never been tested
-at all: the backtest always exits at a fixed 6 candles, while the live agent uses
-a 1.5×ATR stop with a 2:1 target.
+at all: the backtest always exits at a fixed 6 candles, while the agent used a
+1.5×ATR stop with a 2:1 target. That is what turned "the strategy loses money"
+into "here is the one change that measurably helps", and it is why
+`research/strategy_lab.py` exists as a second, independently written
+implementation of the same trade-outcome walk.
 
 ---
 
@@ -303,7 +391,22 @@ a 1.5×ATR stop with a 2:1 target.
   the other two. No model versioning or drift detection: each training run
   overwrites `models/ml_model.joblib`.
 - `walk_forward_optimizer.py` tunes **entry thresholds only** and therefore
-  cannot validate the exit logic, which is where the largest measured gain is.
+  cannot validate the exit logic, which is where the largest measured gain was.
+  The take-profit removal is backed by two independent in-sample measurements
+  (`diagnose_edge.py --exits` and `strategy_lab.py`, agreeing to 0.0002%) but
+  has never been walk-forward validated, because no tool in the repo can do it.
+  Extending the optimizer to exits is the prerequisite for treating that change
+  as proven rather than merely well-measured.
+- **Realized execution cost is never measured.** Every number here assumes a flat
+  0.05% round trip — no spread, no market impact, no gap between the signal
+  candle and the fill. Since entry filters cannot close a 5× gap-to-costs (seven
+  of them were built and measured; see
+  [STRATEGIES.md](STRATEGIES.md)) and the exit change recovers ~0.009%/trade, the
+  cost model itself is now the binding constraint, and it is the one part of the
+  pipeline that has never been instrumented.
+- The candidate strategies are measured in-sample by construction. `strategy_lab`
+  numbers decide which hypotheses are worth carrying forward; only the
+  `strategy_signals` shadow table can decide whether one is real.
 - `ingest/live_ticker.py`'s socket layer cannot be exercised offline — it opens
   a live WebSocket at import — so it is compile-checked and reviewed only. Its
   aggregation logic can now be driven directly, though: `on_ticks` and
