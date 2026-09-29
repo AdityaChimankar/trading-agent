@@ -767,3 +767,90 @@ select:focus {
     gap: 12px;
   }
 }
+
+/* --- Strategy Status Panel ---------------------------------------------- */
+.strategy-status-panel {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: linear-gradient(135deg, var(--bg-panel), rgba(245, 158, 11, 0.04));
+}
+
+.strategy-status-panel .panel-title {
+  color: var(--warn);
+}
+
+/* --- Hourly Heatmap ------------------------------------------------------ */
+.hourly-heatmap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.hour-cell {
+  min-width: 90px;
+  padding: 10px 8px;
+  border-radius: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  text-align: center;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.hour-cell:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+  z-index: 1;
+}
+
+.hour-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.hour-pnl {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.hour-pnl.pos {
+  color: var(--pos);
+}
+
+.hour-pnl.neg {
+  color: var(--neg);
+}
+
+.hour-stats {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.hour-stats span.pos {
+  color: var(--pos);
+}
+
+.hour-stats span.neg {
+  color: var(--neg);
+}
+
+/* --- Equity Curve (future use) ------------------------------------------ */
+.equity-curve {
+  height: 120px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  position: relative;
+}
+
+.equity-curve canvas {
+  width: 100%;
+  height: 100%;
+}
