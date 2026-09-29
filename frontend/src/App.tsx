@@ -1,17 +1,22 @@
-import { useEffect, useState, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useIsFetching, useQueryClient } from '@tanstack/react-query'
 
-import { useWatchlist, useWallet } from './api/queries'
+import { useWatchlist } from './api/queries'
+import { useHashRoute } from './lib/router'
 import DigestPanel from './components/DigestPanel'
+import NavBar from './components/NavBar'
 import OpportunityPanel from './components/OpportunityPanel'
+import PipelinePage from './components/PipelinePage'
 import PositionMonitor from './components/PositionMonitor'
 import Sidebar from './components/Sidebar'
 import SymbolDetail from './components/SymbolDetail'
+import TransactionsPage from './components/TransactionsPage'
 import WalletPanel from './components/WalletPanel'
 
 export default function App() {
   const [capital, setCapital] = useState(100_000)
   const [symbol, setSymbol] = useState<string | null>(null)
+  const [route, navigate] = useHashRoute()
   const queryClient = useQueryClient()
   const { data: watchlist } = useWatchlist()
 
@@ -22,55 +27,50 @@ export default function App() {
 
   const inFlight = useIsFetching()
 
+  // Pages that name a symbol (the ledger, the pipeline table) hand you back to
+  // the dashboard WITH it selected rather than rendering a second chart in
+  // place: there is exactly one symbol view, so a symbol is always read in the
+  // same context whichever page you arrived from.
+  function openSymbol(next: string) {
+    setSymbol(next)
+    navigate('dashboard')
+  }
+
   return (
     <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-dot" />
-          Intraday Trading Agent
+      <NavBar
+        route={route}
+        onNavigate={navigate}
+        inFlight={inFlight}
+        onRefresh={() => queryClient.invalidateQueries()}
+        symbol={symbol}
+        symbols={watchlist?.symbols ?? []}
+        onSymbolChange={setSymbol}
+        showSymbolPicker={route === 'dashboard'}
+      />
+
+      {route === 'dashboard' ? (
+        <div className="layout">
+          <Sidebar
+            capital={capital}
+            onCapitalChange={setCapital}
+            selected={symbol}
+            onSelect={setSymbol}
+          />
+          <main className="main">
+            <OpportunityPanel capital={capital} onSelect={setSymbol} />
+            <DigestPanel />
+            <WalletPanel />
+            <PositionMonitor />
+            <SymbolDetail symbol={symbol} capital={capital} />
+          </main>
         </div>
-
-        <div className="topbar-right">
-          <label className="field inline">
-            <span>Symbol</span>
-            <select value={symbol ?? ''} onChange={(e) => setSymbol(e.target.value)}>
-              {(watchlist?.symbols ?? []).map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <span className={inFlight > 0 ? 'pulse is-active' : 'pulse'} title="Auto-refreshing">
-            {inFlight > 0 ? '⟳ live' : '● idle'}
-          </span>
-
-          <button
-            type="button"
-            className="btn"
-            onClick={() => queryClient.invalidateQueries()}
-          >
-            Refresh
-          </button>
-        </div>
-      </header>
-
-      <div className="layout">
-        <Sidebar
-          capital={capital}
-          onCapitalChange={setCapital}
-          selected={symbol}
-          onSelect={setSymbol}
-        />
-        <main className="main">
-          <OpportunityPanel capital={capital} onSelect={setSymbol} />
-          <DigestPanel />
-          <WalletPanel capital={capital} />
-          <PositionMonitor />
-          <SymbolDetail symbol={symbol} capital={capital} />
+      ) : (
+        <main className="main main-wide">
+          {route === 'history' && <TransactionsPage onSelectSymbol={openSymbol} />}
+          {route === 'pipeline' && <PipelinePage capital={capital} onSelectSymbol={openSymbol} />}
         </main>
-      </div>
+      )}
     </div>
   )
 }

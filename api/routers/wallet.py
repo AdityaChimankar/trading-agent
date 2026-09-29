@@ -20,17 +20,14 @@ differently:
 It is NOT a prediction. The edge analysis showed no measured forward edge to
 predict from, so these are clearly-labeled what-if numbers only.
 """
-from contextlib import contextmanager
-from datetime import datetime
-
-import pymemcache
+from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query
 
 from api.serializers import jsonable
 from risk.wallet import (
-    ensure_wallet_settings, wallet_snapshot, _latest_close_for_symbol,
-    _mark, _SLIPPAGE, _SLIPPAGE_RELATIVE,
+    ensure_wallet_settings, wallet_snapshot, record_deposit,
+    record_trade_close, record_withdrawal, _mark, _SLIPPAGE,
 )
 from storage.db import get_connection
 
@@ -41,7 +38,7 @@ MISSING_CAPITAL_MSG = "Paper capital not set. Initialize it with a deposit first
 
 
 def _today() -> str:
-    return datetime.date.today().isoformat()
+    return date.today().isoformat()
 
 
 @router.get("/wallet")
@@ -64,23 +61,23 @@ def wallet():
         open_positions = snap["open_positions"]
         positions_summary: list[dict] = []
         open_current_pnl = 0.0
-        for p in open_positions:
-            entry = p["position"]
+        for status in open_positions:
+            entry = status.position
             stop, target = entry.get("stop_loss"), entry.get("take_profit")
 
             # Scenarios at current price
-            cur_pnl = round(p["pnl"], 2)
-            cur_pnl_pct = round(p["pnl_pct"], 2)
+            cur_pnl = round(status.pnl, 2)
+            cur_pnl_pct = round(status.pnl_pct, 2)
 
             # Stop / target scenarios (what-if, labeled)
             stop_pnl = None
             target_pnl = None
             if stop is not None:
                 sp, _ = _mark(entry["action"], float(entry["entry_price"]), float(stop), int(entry["position_size"]))
-                stop_pnl = sp
+                stop_pnl = round(sp, 2)
             if target is not None:
                 tp, _ = _mark(entry["action"], float(entry["entry_price"]), float(target), int(entry["position_size"]))
-                target_pnl = tp
+                target_pnl = round(tp, 2)
 
             positions_summary.append({
                 "position_id": entry["id"],
@@ -88,8 +85,8 @@ def wallet():
                 "action": entry["action"],
                 "position_size": entry["position_size"],
                 "entry_price": entry["entry_price"],
-                "current_price": p["current_price"],
-                "current_value": round(p["current_value"], 2),
+                "current_price": status.current_price,
+                "current_value": round(status.current_value, 2),
                 "current_pnl": cur_pnl,
                 "current_pnl_pct": cur_pnl_pct,
                 "stop_loss": stop,
@@ -117,6 +114,18 @@ def wallet():
         })
     finally:
         conn.close()
+
+
+def _closed_pnl_today(conn) -> float:
+    """Realized P&L from trades closed today, signed. Uses the local date the
+    trades were written with (datetime.now()), not SQLite's UTC 'now', so the
+    day boundary matches the exit timestamps in the table."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(realized_pnl_rupees), 0) AS pnl "
+        "FROM trades WHERE date(exit_at) = ?",
+        (_today(),),
+    ).fetchone()
+    return round(float(row["pnl"]), 2)
 
 
 def _recent_trades_summary(conn, days: int) -> dict:
@@ -156,6 +165,8 @@ def close_position_wallet(position_id: int = Query(..., ge=1, description="open_
             "exit_price": result["exit_price"],
             "transaction_id": result["transaction_id"],
         })
+    except HTTPException:
+        raise
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=400, detail=f"Could not close position: {e}")

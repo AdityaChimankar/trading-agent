@@ -19,7 +19,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import digest, liveness, opportunities, positions, symbols, watchlist, wallet
+from api.routers import (
+    digest,
+    history,
+    liveness,
+    opportunities,
+    pipeline,
+    positions,
+    symbols,
+    wallet,
+    watchlist,
+)
 from storage.db import init_db
 
 
@@ -84,3 +94,5 @@ app.include_router(opportunities.router)
 app.include_router(digest.router)
 app.include_router(symbols.router)
 app.include_router(wallet.router)
+app.include_router(history.router)
+app.include_router(pipeline.router)

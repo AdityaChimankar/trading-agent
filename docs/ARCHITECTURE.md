@@ -188,9 +188,13 @@ implementation of every calculation.
 | `GET /api/opportunities` | `analysis.opportunity_finder` |
 | `GET /api/digest` | `analysis.digest` |
 | `GET /api/symbols/{symbol}/{chart,patterns,sizing,news,signals,llm-signals,ml-signals}` | `storage.db`, `core.quant_indicators`, `core.pattern_detection`, `risk.portfolio_risk` |
+| `GET /api/liveness`, `GET /api/liveness/gaps` | `core.freshness`, `ingest.gap_healer` |
+| `GET /api/wallet` | `risk.wallet`, `risk.position_monitor` |
+| `GET /api/transactions` | `storage.db` (`wallet_transactions`, `trades`) |
+| `GET /api/pipeline` | `analysis.rankings`, `storage.db` (`signals`, `ml_signals`, `llm_signals`) |
 
-Only the two position endpoints are mutations, and both write to the paper
-ledger — nothing reaches a broker.
+Only the position and wallet endpoints are mutations, and all of them write to
+the paper ledger — nothing reaches a broker.
 
 Two details worth knowing:
 
@@ -203,6 +207,10 @@ Two details worth knowing:
   never imports Python and never computes a signal — it renders what the API
   returns. That is why `npm run build` and `npx tsc --noEmit` are the only
   frontend gates that matter.
+- **Routing is hash-based and dependency-free.** `frontend/src/lib/router.ts` is
+  ~30 lines instead of a router inside the app, and three views do not justify a
+  dependency. Every unknown or missing hash resolves to the dashboard, so a bad
+  URL degrades to a working page rather than a blank screen.
 
 ## Verifying a change
 

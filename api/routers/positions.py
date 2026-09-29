@@ -56,31 +56,24 @@ def open_position(payload: OpenPositionRequest):
 
 @router.post("/positions/{position_id}/close")
 def close(position_id: int):
-    from risk.portfolio_risk import close_position
+    from risk.wallet import _SLIPPAGE, record_trade_close
+    from storage.db import get_connection
 
-    close_position(position_id)
-    from risk.wallet import record_trade_close
     conn = get_connection()
     try:
-        position = next((p for p in get_open_positions(conn) if p["id"] == position_id), None)
-        if position is None:
+        # The position is read BEFORE anything is written: record_trade_close()
+        # marks it closed and inserts the trade row in one transaction, so a
+        # close can never land in the wallet book without the position being
+        # recorded as closed, or the other way round.
+        row = _open_positions_for_close(conn, position_id)
+        if row is None:
             raise HTTPException(status_code=404, detail="Position not found.")
+        position = dict(row)
 
-        # Compute the realized P&L from entry vs the latest candle close, and
-        # flow it into the wallet book as a realized_pnl transaction. We stop
-        # here as the default exit reason because closes triggered by a live
-        # stop/target/signal are manual in this paper setup (the dashboard
-        # Close button is the only close path today).
-        from risk.position_monitor import get_position_status, _compute_pnl
-        status = get_position_status(position, None)
-        if status is None:
-            raise HTTPException(status_code=400, detail="Cannot read current price for this symbol.")
-
-        realized = round(status.pnl - _SLIPPAGE(), 2) if status.pnl else 0.0
         result = record_trade_close(
             conn, position,
             exit_reason="manually_closed",
-            slippage_deducted=round(status.pnl * _SLIPPAGE_RELATIVE(), 2) if status.pnl else 0.0,
+            slippage_deducted=round(float(position["position_value"]) * _SLIPPAGE(), 2),
         )
         return {"closed": position_id, "symbol": position["symbol"],
                 "realized_pnl_rupees": result["realized_pnl_rupees"],
@@ -90,12 +83,7 @@ def close(position_id: int):
 
 
 def _open_positions_for_close(conn, position_id: int):
-    return conn.execute("SELECT * FROM open_positions WHERE id = ?", (position_id,)).fetchone()
-
-
-def _SLIPPAGE():
-    return 0.0005
-
-
-def _SLIPPAGE_RELATIVE():
-    return 0.0005
+    return conn.execute(
+        "SELECT * FROM open_positions WHERE id = ? AND status = 'open'",
+        (position_id,),
+    ).fetchone()

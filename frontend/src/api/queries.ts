@@ -12,10 +12,12 @@ import type {
   MlSignalRow,
   NewsRow,
   OpportunitiesResponse,
+  PipelineResponse,
   PositionStatus,
   RankingsResponse,
   SignalRow,
   SizingResponse,
+  TransactionsResponse,
   WatchlistResponse,
   WalletResponse,
 } from './types'
@@ -32,6 +34,13 @@ export const REFRESH = {
   news: 120_000,
   digest: 300_000,
   wallet: 15_000,
+  // The book only changes when you deposit/withdraw/close something, so the
+  // History page is polled lazily - slow enough to stay out of the way,
+  // frequent enough that a close appears while you are still looking at it.
+  transactions: 30_000,
+  // Pipeline re-runs the watchlist-wide ranking server-side like /api/rankings
+  // does, so it is deliberately slower than the panels that poll every 15s.
+  pipeline: 120_000,
 } as const
 
 export function useWatchlist() {
@@ -69,6 +78,22 @@ export function useOpportunities(capital: number) {
     queryKey: ['opportunities', capital],
     queryFn: () => apiGet<OpportunitiesResponse>(`/api/opportunities?capital=${capital}`),
     refetchInterval: REFRESH.opportunities,
+  })
+}
+
+export function useTransactions() {
+  return useQuery({
+    queryKey: ['transactions'],
+    queryFn: () => apiGet<TransactionsResponse>('/api/transactions?limit=200'),
+    refetchInterval: REFRESH.transactions,
+  })
+}
+
+export function usePipeline(capital: number) {
+  return useQuery({
+    queryKey: ['pipeline', capital],
+    queryFn: () => apiGet<PipelineResponse>(`/api/pipeline?capital=${capital}`),
+    refetchInterval: REFRESH.pipeline,
   })
 }
 

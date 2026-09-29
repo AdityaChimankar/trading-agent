@@ -126,10 +126,11 @@ trading-agent/
 │   ├── main.py                      App, CORS, startup DB init, router registration
 │   ├── serializers.py               numpy/pandas/dataclass -> JSON-safe conversion
 │   └── routers/                     watchlist, positions, opportunities, digest, symbols,
-│                                    liveness
+│                                    wallet, liveness, history, pipeline
 │
 ├── frontend/                       React + TypeScript + Vite dashboard
-│   └── src/                         App shell, polling hooks, Plotly chart, panels
+│   └── src/                         Hash-router pages (dashboard, transactions,
+│                                    signal pipeline), polling hooks, Plotly chart, panels
 │
 ├── models/ml_model.joblib          Trained ML model artifact
 └── data/trading_agent.db           SQLite database (gitignored, created by storage/db.py)
@@ -279,6 +280,8 @@ Ctrl+C the rest whenever — no cleanup needed.
 | Repair missing candles | `python -m ingest.gap_healer [--recent 90]` |
 | Check feed liveness | `python -m core.freshness` |
 | Feed health over HTTP | `curl localhost:8000/api/liveness` |
+| Transaction history over HTTP | `curl localhost:8000/api/transactions` |
+| Signal-path wiring over HTTP | `curl localhost:8000/api/pipeline` |
 | Run the daily automation | `python -m scripts.scheduler` |
 | Backtest | `python -m research.backtest [SYMBOLS... \| --all \| --selftest]` |
 | Walk-forward validation | `python -m research.walk_forward_optimizer [SYMBOLS... \| --all \| --selftest]` |
@@ -355,6 +358,10 @@ trade-offs are in **[docs/DESIGN.md](docs/DESIGN.md)**.
   candle without `core/freshness.py` having a say in whether that candle is
   current. A dead feed and a quiet market produce the same absent rows, and only
   the clock can tell them apart.
+- **The three decision paths are compared, never merged.** The rule, ML and LLM
+  paths write to separate tables and the Pipeline page shows their calls side by
+  side with their agreement, because the whole point of that separation is to
+  earn trust with a track record before any of them is allowed to size a trade.
 
 ## Liveness and gap repair
 
@@ -401,6 +408,32 @@ while the process appeared to be running fine.
   detection report every backfilled minute as missing. Writes now normalise
   through `core.freshness.candle_timestamp()`, and reads compare minute
   prefixes, so rows written before the fix are still read correctly.
+
+## Dashboard
+
+`frontend/` is a hash-routed React app: the header is the navigation bar, and
+every page is a URL you can reload or bookmark (`#/dashboard`, `#/history`,
+`#/pipeline`). Hash routing instead of the History API on purpose — the same
+bundle then works from the Vite dev server, from any static host, and from
+`file://`, with no server rewrite rules.
+
+| Page | What it shows |
+|---|---|
+| `#/dashboard` | Everything that used to be one long scroll: Top Opportunity, digest, wallet, open positions, and the selected symbol's chart, patterns and signal history. The only page with the watchlist sidebar and the symbol picker. |
+| `#/history` | Every money movement in the paper book (`wallet_transactions`) with the closed trade behind it (`trades`), plus win rate, slippage paid, best/worst trade and P&L by day. Read-only. |
+| `#/pipeline` | The three decision paths side by side, per symbol: what the rules said, what the ML model said, what the LLM said, whether they agreed, and the rupee size the plan came out at. |
+
+Top Opportunity marks any candidate you already hold with a `📌 Open` chip
+carrying its live P&L; clicking the chip pops the position out with its stop,
+target and exit recommendation, so "should I still be in this?" is answerable
+without leaving the panel.
+
+The Pipeline page is the honest picture of the wiring: the ML and LLM paths are
+logged for comparison and never size or place anything, so position size comes
+solely from the rule-based action. A row can therefore show the ML model
+disagreeing while the plan is still sized — that is the connection, not a
+contradiction. Agreement is measured over directional calls only: a HOLD is an
+abstention, shown but never counted as a disagreement.
 
 ## Known gaps
 

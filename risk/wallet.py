@@ -112,6 +112,29 @@ def _latest_close_for_symbol(conn, symbol: str) -> float | None:
     return float(r["close"]) if r and r["close"] is not None else None
 
 
+def _SLIPPAGE() -> float:
+    """Paper slippage model, as a fraction of the position's value (5 bps).
+
+    Lives here rather than in the API layer so every close path - the
+    positions endpoint and the wallet endpoint - deducts the same cost.
+    """
+    return 0.0005
+
+
+def _mark(action: str, entry_price: float, mark_price: float, position_size: int) -> tuple:
+    """Mark a position to an arbitrary price -> (pnl_rupees, pnl_pct).
+
+    This is the same P&L math a real close uses, but evaluated against the
+    position's stop or target instead of a live candle - it answers "what
+    would this pay if the stop/target were hit?". It is a labeled scenario,
+    not a prediction. position_monitor is imported locally to keep the module
+    load order free of cycles.
+    """
+    from risk.position_monitor import _compute_pnl
+
+    return _compute_pnl(action, entry_price, mark_price, position_size)
+
+
 def record_trade_close(
     conn,
     position: dict,
