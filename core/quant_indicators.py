@@ -124,6 +124,13 @@ def indicators_from_df(df: pd.DataFrame) -> dict:
 
     return {
         "close": last["close"],
+        # The bar's own extremes, unrounded. A stop is a resting order: it
+        # fills on the first trade through the level, not on the bar's close,
+        # so anything judging a stop (risk/position_monitor.py) has to read
+        # low/high rather than close. Kept raw (not rounded) so the comparison
+        # is against the price that actually traded.
+        "high": last["high"],
+        "low": last["low"],
         "rsi": round(last["rsi"], 2) if pd.notna(last["rsi"]) else None,
         "atr": round(last["atr"], 2) if pd.notna(last["atr"]) else None,
         "adx": round(last["adx"], 2) if pd.notna(last["adx"]) else None,

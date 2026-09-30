@@ -115,6 +115,29 @@ CREATE TABLE IF NOT EXISTS open_positions (
     status TEXT NOT NULL DEFAULT 'open'   -- 'open' or 'closed'
 );
 
+-- Every exit the monitor has found on an open position, and when. The monitor
+-- only ever RECOMMENDS - nothing here closes anything - so this table is what
+-- makes a breach survive the moment it was found: without it, a stop that was
+-- pierced at 11:42 left no trace the instant the dashboard was closed, and
+-- "the position is still open" was the only evidence anything had happened.
+-- Written by risk.position_monitor.run_monitor_cycle() on a schedule (and by
+-- nothing else), one row per (position, kind, candle): a breach that keeps
+-- re-firing on the same bar is recorded once rather than every pass.
+CREATE TABLE IF NOT EXISTS position_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id INTEGER NOT NULL REFERENCES open_positions(id),
+    symbol TEXT NOT NULL,
+    kind TEXT NOT NULL,              -- stop | target | reversal | stale | no_data
+    recommendation TEXT NOT NULL,    -- SELL | STALE | NO_DATA
+    candle_timestamp TEXT,           -- the bar the verdict came from (null = no usable candle)
+    price REAL,                      -- bar close at detection (null when no mark could be vouched for)
+    reason TEXT NOT NULL,
+    detected_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_position_alerts_once
+    ON position_alerts(position_id, kind, COALESCE(candle_timestamp, ''));
+CREATE INDEX IF NOT EXISTS idx_position_alerts_recent ON position_alerts(detected_at);
+
 -- ------- wallet ----------
 
 -- Paper capital you seed yourself: the starting balance the wallet builds

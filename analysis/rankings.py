@@ -223,7 +223,12 @@ def annotate_contradictions(scored: list, position_statuses: list) -> list:
         entry["contradiction"] = None
 
         status = positions_by_symbol.get(entry["symbol"])
-        if status is None:
+        if status is None or status.pnl is None:
+            # No open position, or one the monitor could not mark (a stalled
+            # feed, or no candle to read). Either way "is it profitable?" is
+            # not a fact we have, so there is no contradiction to report -
+            # and reading a withheld mark as a number would raise here rather
+            # than merely mislead.
             continue
 
         is_long = status.position["action"] == "BUY"

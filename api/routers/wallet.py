@@ -62,6 +62,13 @@ def wallet():
         positions_summary: list[dict] = []
         open_current_pnl = 0.0
         for status in open_positions:
+            # The monitor withholds a mark (pnl is None) when it cannot vouch for
+            # one - a stale feed, or no usable candle. The wallet's numbers are
+            # deliberately unchanged by that: before the monitor returned such a
+            # position at all it simply dropped it, so this row contributed
+            # nothing here either way. /api/positions is where it becomes visible.
+            if status.pnl is None:
+                continue
             entry = status.position
             stop, target = entry.get("stop_loss"), entry.get("take_profit")
 
@@ -105,7 +112,12 @@ def wallet():
             "fixed": fixed,
             "today": {
                 "open_pnl": round(open_current_pnl, 2),
-                "open_positions_count": len(open_positions),
+                # Counted from the rows actually summarised, so a position the
+                # monitor could not mark changes nothing here: the wallet's
+                # numbers are exactly what they were before the monitor started
+                # returning such a position instead of dropping it. It is
+                # /api/positions - the exit surface - that shows it.
+                "open_positions_count": len(positions_summary),
                 "closed_pnl": today_realized_pnl,
                 "total_today_pnl": round(open_current_pnl + today_realized_pnl, 2),
             },
