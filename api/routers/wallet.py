@@ -25,6 +25,7 @@ from datetime import date
 from fastapi import APIRouter, HTTPException, Query
 
 from api.serializers import jsonable
+from risk.portfolio_risk import exposure_summary
 from risk.wallet import (
     ensure_wallet_settings, wallet_snapshot, record_deposit,
     record_trade_close, record_withdrawal, _mark, _SLIPPAGE,
@@ -48,13 +49,17 @@ def wallet():
         ensure_wallet_settings(conn)
         snap = wallet_snapshot(conn)
 
-        # Fixed book summary
+        # Fixed book summary. Exposure is measured against the same capital the
+        # sizing gate uses (the book balance) and the same position_value sum
+        # the total-exposure cap enforces (risk.portfolio_risk.exposure_summary),
+        # so this view cannot disagree with what sizing will actually allow.
         fixed = {
             "capital": snap["capital"],
             "total_deposits": snap["total_deposits"],
             "total_withdrawals": snap["total_withdrawals"],
             "realized_pnl_total": snap["realized_pnl_total"],
             "book_balance": snap["book_balance"],
+            **exposure_summary(snap["book_balance"]),
         }
 
         # Today's open P&L (live float) and scenario exposure per open position

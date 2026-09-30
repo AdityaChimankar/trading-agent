@@ -191,12 +191,20 @@ def find_opportunities(capital: float | None = None, n: int = 10) -> dict:
     # tradeable, so request more raw candidates than needed: held symbols
     # get filtered out below, and we want the final list to still be full
     # of fresh picks rather than shrinking by however many are held.
-    sized = rank_watchlist_with_sizing(capital, n=n * 2)
+    #
+    # reserve_prior=True: this IS the "what should I do with my capital"
+    # list, so consecutive rows must be sized against what the earlier rows
+    # already promise - otherwise the panel offers ten independently-approved
+    # positions that cannot all be opened, and their sizes sum to several
+    # times the book. A row that no longer fits comes back blocked with the
+    # reason named, rather than silently full-sized.
+    sized = rank_watchlist_with_sizing(capital, n=n * 2, reserve_prior=True)
 
-    # Top opportunity now surfaces ONLY symbols with an OPEN paper position.
-    # portfolio_risk blocks new positions in symbols already open; this filter
-    # mirrors that by restricting the opportunity panel to add-to/exit-management
-    # candidates for symbols you're already in.
+    # A held symbol is not an opportunity - it is a position you already have.
+    # portfolio_risk hard-blocks any new position in a symbol that is already
+    # open (Check 0), so offering one here would be advice the sizing gate
+    # immediately refuses. Excluded symbols are still named below, so the
+    # panel reads as "you own some of these" rather than as a quiet market.
     held_symbols = get_open_position_symbols()
 
     results = {"bullish": [], "bearish": []}

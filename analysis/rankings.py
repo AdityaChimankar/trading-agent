@@ -149,7 +149,7 @@ def top_bearish(scored: list, n: int = 10) -> list:
     return sorted(candidates, key=lambda s: s["bearish_score"], reverse=True)[:n]
 
 
-def rank_watchlist_with_sizing(capital: float, n: int = 10) -> dict:
+def rank_watchlist_with_sizing(capital: float, n: int = 10, reserve_prior: bool = False) -> dict:
     """
     Combines the accumulated bullish/bearish score (rank_watchlist) with
     an actual portfolio-adjusted position-sizing suggestion for the top
@@ -162,10 +162,20 @@ def rank_watchlist_with_sizing(capital: float, n: int = 10) -> dict:
     as a SELL (short) - the direction the accumulated score implies.
     Sizing goes through calculate_portfolio_adjusted_position(), so a
     symbol that scores strongly bullish but is already at your
-    same-symbol/correlation-cluster/total-risk-budget cap will
-    correctly come back blocked or reduced here, not just full-sized -
-    the accumulated score and your actual portfolio state are combined,
-    not shown side by side as two disconnected numbers.
+    same-symbol/correlation-cluster/total-risk-budget/total-exposure cap
+    will correctly come back blocked or reduced here, not just
+    full-sized - the accumulated score and your actual portfolio state
+    are combined, not shown side by side as two disconnected numbers.
+
+    reserve_prior: OPT-IN. When True, each accepted candidate reserves its
+    approved risk AND notional before the next one is sized, so the later
+    rows in the SAME direction are measured against what the earlier rows
+    already promised. The list is then a set of positions that can actually
+    coexist under the portfolio caps, instead of N rows each independently
+    approved against an empty book - which, summed, can promise several
+    times the book's value. The default (False) keeps the historical
+    per-row behaviour: a diagnostic view (the sidebar, /api/pipeline) WANTS
+    each row shown standalone, judged only against what is genuinely open.
     """
     from risk.portfolio_risk import calculate_portfolio_adjusted_position
 
@@ -173,8 +183,12 @@ def rank_watchlist_with_sizing(capital: float, n: int = 10) -> dict:
 
     def _with_sizing(entries: list, action: str) -> list:
         enriched = []
+        reserved_risk, reserved_value = 0.0, 0.0
         for entry in entries:
-            adjusted = calculate_portfolio_adjusted_position(entry["symbol"], action, capital)
+            adjusted = calculate_portfolio_adjusted_position(
+                entry["symbol"], action, capital,
+                reserved_risk_amount=reserved_risk, reserved_value=reserved_value,
+            )
             plan = adjusted.base_plan
             enriched.append({
                 **entry,
@@ -189,6 +203,11 @@ def rank_watchlist_with_sizing(capital: float, n: int = 10) -> dict:
                 "total_risk_used_pct": adjusted.total_risk_used_pct,
                 "correlated_with": adjusted.correlated_with,
             })
+            # Only a row that actually got capital reserves any: a blocked row
+            # promised nothing, so it must not shrink the rows after it.
+            if reserve_prior and plan is not None and adjusted.approved_size > 0:
+                reserved_risk += adjusted.approved_size * plan.stop_distance
+                reserved_value += adjusted.approved_value
         return enriched
 
     return {
