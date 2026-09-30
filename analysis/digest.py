@@ -6,15 +6,10 @@ only summarizes what already happened, it never influences a decision.
 
 Run after market close: python -m analysis.digest
 """
-import os
 from datetime import datetime, date
-import google.generativeai as genai
-from dotenv import load_dotenv
-from storage.db import get_connection
 
-load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-flash-lite-latest")
+from core.llm_client import complete
+from storage.db import get_connection
 
 PROMPT_TEMPLATE = """Write a concise end-of-day intraday trading summary for {trade_date}
 based on this raw data. Plain English, 3-4 short paragraphs, no fluff.
@@ -82,8 +77,7 @@ def generate_digest(trade_date: str = None) -> str:
         sentiment_summary=gather_sentiment_summary(conn, trade_date),
     )
 
-    response = model.generate_content(prompt)
-    summary = response.text.strip()
+    summary = complete(prompt, temperature=0.3)
 
     conn.execute(
         "INSERT OR REPLACE INTO digests (date, summary, generated_at) VALUES (?, ?, ?)",

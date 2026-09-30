@@ -143,7 +143,7 @@ created/migrated by `storage/db.py`:
 | `ingest_status` | `ingest/live_ticker.py` | heartbeat singleton: connected, last tick, buffer depth, repairs queued |
 | `candle_gaps` | `ingest/gap_healer.py` | every hole detected, and whether it was repaired (including repairs that recovered 0 candles) |
 | `news` | `ingest/fetch_news.py` | RSS items keyword-tagged to symbols |
-| `sentiment` | `analysis/sentiment.py` | Gemini score per news item |
+| `sentiment` | `analysis/sentiment.py` | OpenRouter score per news item |
 | `signals` | `strategy/decision_agent.py` | Rule-based BUY/SELL/HOLD (the tested path) |
 | `llm_signals` | `strategy/llm_decision_agent.py` | LLM calls, for comparison only |
 | `ml_signals` | `strategy/ml_decision_agent.py` | Model calls, for comparison only |

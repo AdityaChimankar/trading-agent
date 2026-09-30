@@ -39,43 +39,13 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from core.config import get_config
 from core.quant_indicators import latest_indicators
 
-# --- Tunable risk parameters - these are YOUR risk tolerance, not a
-# recommendation. Read the module docstring below before changing them. ---
-RISK_PER_TRADE_PCT = 1.0     # % of total capital risked on a single trade
-ATR_STOP_MULTIPLIER = 1.5    # stop-loss = entry -/+ (this x ATR)
-REWARD_RISK_RATIO = 2.0      # take-profit distance = stop distance x this
-MAX_POSITION_PCT_OF_CAPITAL = 20.0  # hard cap - no single position over this % of capital,
-                                      # regardless of what ATR-based sizing would otherwise allow
 
-# Whether to place a take-profit at all. THIS IS THE LARGEST MEASURED
-# IMPROVEMENT AVAILABLE IN THE PROJECT, and it is a subtraction, not an
-# addition.
-#
-# research/diagnose_edge.py --exits walked every signal forward bar-by-bar to
-# whichever level was touched first, and found the fixed 2:1 take-profit
-# DESTROYS the stop-only result:
-#
-#     1.5xATR stop + 2:1 target   -0.0451% net per trade   <- what this module used to do
-#     1.5xATR stop, no target     -0.0363% net per trade   <- +0.0088%/trade better
-#     3.0xATR stop + 2:1 target   (no better than stop-only)
-#
-# research/strategy_lab.py reproduces the same gap independently on every
-# candidate it measures - e.g. the VWAP candidate returns +0.0166% net
-# stop-only and -0.0167% net WITH the target. The target is not merely
-# unhelpful, it flips a positive number negative.
-#
-# Why: a 6-bar hold on a 1.5xATR stop reaches a 2:1 target only when the
-# move is ~3x the stop distance, which almost never happens inside the hold
-# window. So the target mostly converts small favourable drifts into
-# capped exits while the stop still takes the full loss on the rest -
-# a worse payoff distribution than letting the stop alone decide. (The
-# numbers above are still NET NEGATIVE. Removing the target is a smaller
-# loss, not a profitable strategy.)
-#
-# Set to True to restore the old stop+target behaviour, e.g. to re-measure it.
-USE_TAKE_PROFIT = False
+def _get_risk_config():
+    return get_config().risk
+
 
 # Volatility-aware risk scaling. In the top of a name's own recent
 # volatility range, a 1.5xATR stop is inside a single bar's range: the fill
@@ -85,9 +55,6 @@ USE_TAKE_PROFIT = False
 # This can only ever reduce risk (the multiplier is capped at 1.0), because
 # the failure mode of "sizing up in a quiet regime" is far worse than the
 # failure mode of "sizing down in a violent one".
-VOLATILITY_RISK_CUTOFF = 0.80   # ATR percentile above which risk starts scaling down
-VOLATILITY_RISK_FLOOR = 0.50    # never scale below half the base risk
-VOLATILITY_WINDOW_CANDLES = 500  # candles loaded to compute the percentile (see below)
 
 
 @dataclass
@@ -119,13 +86,14 @@ def volatility_risk_multiplier(atr_pctile: float | None) -> float:
     percentile is unknown - sizing must never silently change because a
     feature failed to compute.
     """
+    config = _get_risk_config()
     if atr_pctile is None or atr_pctile != atr_pctile:  # None or NaN
         return 1.0
-    if atr_pctile <= VOLATILITY_RISK_CUTOFF:
+    if atr_pctile <= config.volatility_risk_cutoff:
         return 1.0
-    span = 1.0 - VOLATILITY_RISK_CUTOFF
-    falloff = (atr_pctile - VOLATILITY_RISK_CUTOFF) / span
-    return max(VOLATILITY_RISK_FLOOR, 1.0 - falloff * (1.0 - VOLATILITY_RISK_FLOOR))
+    span = 1.0 - config.volatility_risk_cutoff
+    falloff = (atr_pctile - config.volatility_risk_cutoff) / span
+    return max(config.volatility_risk_floor, 1.0 - falloff * (1.0 - config.volatility_risk_floor))
 
 
 def current_volatility_percentile(symbol: str) -> float | None:
@@ -143,8 +111,9 @@ def current_volatility_percentile(symbol: str) -> float | None:
     """
     from core.quant_indicators import compute_atr, load_candles
 
+    config = _get_risk_config()
     try:
-        df = load_candles(symbol, limit=VOLATILITY_WINDOW_CANDLES)
+        df = load_candles(symbol, limit=config.volatility_window_candles)
     except Exception:
         return None
     if len(df) < 100:
@@ -167,6 +136,7 @@ def calculate_position(symbol: str, action: str, capital: float,
              module never assumes or looks up an account balance.
     use_take_profit: override the module-level USE_TAKE_PROFIT for one call.
     """
+    config = _get_risk_config()
     if action not in ("BUY", "SELL"):
         return None  # no position sizing for HOLD
 
@@ -176,12 +146,12 @@ def calculate_position(symbol: str, action: str, capital: float,
 
     entry_price = indicators["close"]
     atr = indicators["atr"]
-    stop_distance = ATR_STOP_MULTIPLIER * atr
+    stop_distance = config.atr_stop_multiplier * atr
 
-    want_target = USE_TAKE_PROFIT if use_take_profit is None else use_take_profit
+    want_target = config.use_take_profit if use_take_profit is None else use_take_profit
     take_profit = None
     if want_target:
-        target_distance = stop_distance * REWARD_RISK_RATIO
+        target_distance = stop_distance * config.reward_risk_ratio
         take_profit = entry_price + target_distance if action == "BUY" else entry_price - target_distance
 
     stop_loss = entry_price - stop_distance if action == "BUY" else entry_price + stop_distance
@@ -191,7 +161,7 @@ def calculate_position(symbol: str, action: str, capital: float,
     # size and not just a reported number.
     atr_pctile = current_volatility_percentile(symbol)
     multiplier = volatility_risk_multiplier(atr_pctile)
-    risk_amount = capital * (RISK_PER_TRADE_PCT / 100) * multiplier
+    risk_amount = capital * (config.risk_per_trade_pct / 100) * multiplier
     raw_size = int(risk_amount / stop_distance) if stop_distance > 0 else 0
 
     # Hard cap: never let position value exceed MAX_POSITION_PCT_OF_CAPITAL,
@@ -199,8 +169,11 @@ def calculate_position(symbol: str, action: str, capital: float,
     # position. This protects against the case where ATR is unusually
     # small (e.g. a quiet pre-open period) and would otherwise size up
     # aggressively.
-    max_position_value = capital * (MAX_POSITION_PCT_OF_CAPITAL / 100)
+    max_position_value = capital * (config.max_position_pct_of_capital / 100)
     max_size_by_cap = int(max_position_value / entry_price) if entry_price > 0 else 0
+    # Ensure at least 1 share if raw_size > 0 and we have enough capital for 1 share
+    if raw_size > 0 and max_size_by_cap == 0 and entry_price <= capital:
+        max_size_by_cap = 1
     capped = raw_size > max_size_by_cap
     position_size = min(raw_size, max_size_by_cap)
 

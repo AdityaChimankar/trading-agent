@@ -21,13 +21,13 @@ import numpy as np
 from core.freshness import split_stale, warn_stale
 from core.pattern_detection import detect_patterns
 from core.quant_indicators import latest_indicators
-from storage.db import get_connection, get_watchlist_symbols, init_db
-from strategy.candidates import CANDIDATES, _swing_arrays
-from strategy.decision_agent import evaluate_signals
-from research.backtest import (
+from core.signals import (
     prepare_symbol_series, precompute_pattern_bias_codes, vectorized_evaluate,
     LOOKBACK_MIN, SWING_ORDER,
 )
+from storage.db import get_connection, get_watchlist_symbols, init_db
+from strategy.candidates import CANDIDATES, _swing_arrays
+from strategy.decision_agent import evaluate_signals
 
 # How many candles of history the live feature builder needs. Matches the
 # lab's minimum so live and lab evaluate the same window shape.

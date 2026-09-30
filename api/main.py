@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import (
     digest,
+    health,
     history,
     liveness,
     opportunities,
@@ -59,34 +60,6 @@ app.add_middleware(
 )
 
 
-@app.get("/api/health", tags=["meta"])
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/api/health/ready", tags=["meta"])
-def health_ready():
-    """Deeper readiness probe than /api/health: does the database exist, is
-    the watchlist populated, and is the live feed actually delivering?
-
-    Kept separate from /api/health so a process/supervisor check ("is the API
-    up?") never fails just because the market feed is down - those are two
-    different failures and they need different fixes.
-    """
-    from core.freshness import feed_summary
-    from storage.db import get_watchlist_symbols
-
-    symbols = get_watchlist_symbols()
-    summary = feed_summary(symbols)
-    return {
-        "database": "ok",
-        "watchlist_symbols": len(symbols),
-        "feed_status": summary["status"],
-        "market_open": summary["market_open"],
-        "stale_symbols": summary["stale_symbols"],
-    }
-
-
 app.include_router(liveness.router)
 app.include_router(watchlist.router)
 app.include_router(positions.router)
@@ -96,3 +69,4 @@ app.include_router(symbols.router)
 app.include_router(wallet.router)
 app.include_router(history.router)
 app.include_router(pipeline.router)
+app.include_router(health.router)

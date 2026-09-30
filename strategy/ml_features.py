@@ -13,7 +13,7 @@ forward, and it's kept completely separate from the feature columns.
 """
 import numpy as np
 import pandas as pd
-from research.backtest import (
+from core.signals import (
     prepare_symbol_series, precompute_pattern_bias_codes, FORWARD_WINDOW, SLIPPAGE,
 )
 

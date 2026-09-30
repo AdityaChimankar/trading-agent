@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react'
 import { ROUTES, type Route } from '../lib/router'
 import { cx } from '../lib/format'
 
@@ -5,11 +6,9 @@ export const ROUTE_LABELS: Record<Route, string> = {
   dashboard: 'Dashboard',
   history: 'Transactions',
   pipeline: 'Signal Pipeline',
+  news: 'News',
 }
 
-// The header IS the navigation bar - one sticky bar rather than a nav row
-// stacked above it, so the sidebar's `top` offset and the page's scroll
-// origin stay a single number instead of two that can drift apart.
 export default function NavBar({
   route,
   onNavigate,
@@ -54,16 +53,11 @@ export default function NavBar({
 
       <div className="topbar-right">
         {showSymbolPicker && (
-          <label className="field inline">
-            <span>Symbol</span>
-            <select value={symbol ?? ''} onChange={(e) => onSymbolChange(e.target.value)}>
-              {symbols.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </label>
+          <SearchableSymbolSelect
+            symbol={symbol}
+            symbols={symbols}
+            onChange={onSymbolChange}
+          />
         )}
 
         <span className={inFlight > 0 ? 'pulse is-active' : 'pulse'} title="Auto-refreshing">
@@ -75,5 +69,86 @@ export default function NavBar({
         </button>
       </div>
     </header>
+  )
+}
+
+function SearchableSymbolSelect({
+  symbol,
+  symbols,
+  onChange,
+}: {
+  symbol: string | null
+  symbols: string[]
+  onChange: (symbol: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+
+  const filtered = useMemo(() => {
+    if (!search) return symbols
+    const q = search.toLowerCase()
+    return symbols.filter((s) => s.toLowerCase().includes(q))
+  }, [symbols, search])
+
+  const selectedLabel = symbol ?? 'Select symbol'
+
+  return (
+    <div className="symbol-selector">
+      <button
+        type="button"
+        className="symbol-selector-trigger"
+        onClick={() => setOpen(!open)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span>{selectedLabel}</span>
+        <span className="symbol-selector-chevron">{open ? '▴' : '▾'}</span>
+      </button>
+
+      {open && (
+        <div className="symbol-selector-dropdown">
+          <input
+            type="text"
+            className="symbol-search"
+            placeholder="Search symbols..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setOpen(false)
+            }}
+            autoFocus
+          />
+          <ul className="symbol-list" role="listbox">
+            {filtered.length === 0 ? (
+              <li className="symbol-empty">No matching symbol</li>
+            ) : (
+              filtered.map((s) => (
+                <li key={s}>
+                  <button
+                    type="button"
+                    className={cx('symbol-item', s === symbol && 'is-active')}
+                    onClick={() => {
+                      onChange(s)
+                      setOpen(false)
+                      setSearch('')
+                    }}
+                  >
+                    {s}
+                  </button>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
+      )}
+
+      {open && (
+        <div
+          className="symbol-selector-backdrop"
+          onClick={() => setOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+    </div>
   )
 }

@@ -204,6 +204,24 @@ def record_trade_close(
             "exit_price": exit_price, "transaction_id": tx_id}
 
 
+def available_capital(conn) -> float:
+    """The paper balance available for NEW position sizing:
+    capital + deposits - withdrawals + realized P&L (the fixed book balance).
+    Open-position P&L is NOT included - it is already committed to those
+    positions, so counting it here would double-book money that is at work.
+    Callers use this as the default `capital` for position_sizing /
+    portfolio_risk instead of a hardcoded number, so sizing tracks the
+    wallet book as it changes with deposits, withdrawals and closed trades.
+    """
+    ensure_wallet_settings(conn)
+    r = conn.execute("SELECT capital FROM wallet_settings WHERE id = 1").fetchone()
+    capital = float(r["capital"]) if r else 500000.0
+    dep = conn.execute("SELECT COALESCE(SUM(amount), 0) AS v FROM wallet_transactions WHERE type='deposit'").fetchone()
+    wd = conn.execute("SELECT COALESCE(SUM(amount), 0) AS v FROM wallet_transactions WHERE type='withdrawal'").fetchone()
+    realized = conn.execute("SELECT COALESCE(SUM(amount), 0) AS v FROM wallet_transactions WHERE type='realized_pnl'").fetchone()
+    return round(capital + float(dep["v"]) - float(wd["v"]) + float(realized["v"]), 2)
+
+
 def wallet_snapshot(conn) -> dict:
     """Everything the live wallet endpoint needs, in one query pass.
 

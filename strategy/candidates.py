@@ -55,7 +55,7 @@ which one worked, which is how a stack of curve-fit gets mistaken for an edge.
 """
 import numpy as np
 
-from research.backtest import DEFAULT_PARAMS, SWING_ORDER
+from core.signals import DEFAULT_PARAMS, SWING_ORDER
 from strategy.session_features import features as session_features
 
 # A swing high/low is only "confirmed" SWING_ORDER bars after it happens -
@@ -189,7 +189,7 @@ def gate_cost_cover(prepared: dict, i: int, min_multiple: float = 3.0) -> bool:
     worth before the trade is worth considering. Set to the SLIPPAGE constant
     (imported lazily to avoid a circular import at module load) so the cost
     model can never drift from the one the backtest actually charges."""
-    from research.backtest import SLIPPAGE
+    from core.signals import SLIPPAGE
 
     expected = _sf(prepared, i, "expected_move")
     return bool(np.isfinite(expected) and expected >= min_multiple * SLIPPAGE)
@@ -520,7 +520,7 @@ def verify_gate_coverage(candles: dict, min_admit: float = 0.0005,
 if __name__ == "__main__":
     import sys
 
-    from research.backtest import prepare_symbol_series
+    from core.signals import prepare_symbol_series
     from storage.db import get_watchlist_symbols
 
     args = sys.argv[1:]

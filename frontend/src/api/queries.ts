@@ -141,6 +141,14 @@ export function useNews(symbol: string | null) {
   })
 }
 
+export function useAllNews() {
+  return useQuery({
+    queryKey: ['all-news'],
+    queryFn: () => apiGet<NewsRow[]>(`/api/symbols/news?limit=100`),
+    refetchInterval: REFRESH.news,
+  })
+}
+
 export function useSignals(symbol: string | null) {
   return useQuery({
     queryKey: ['signals', symbol],

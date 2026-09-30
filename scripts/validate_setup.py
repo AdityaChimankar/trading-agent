@@ -1,7 +1,7 @@
 """
 Pre-flight check - run this BEFORE ingest.live_ticker / scripts.scheduler /
 the dashboard API every trading day. Verifies Kite auth + API, news feeds,
-Gemini API, and the DB/watchlist are all actually working - so a dead
+OpenRouter API, and the DB/watchlist are all actually working - so a dead
 API key or an expired token surfaces here, not 5 minutes into market
 hours with a silent failure buried in a scheduler log.
 
@@ -23,7 +23,7 @@ WARN_MARK = "[WARN]"
 
 def check_env_vars() -> bool:
     print("Checking environment variables...")
-    required = ["KITE_API_KEY", "KITE_API_SECRET", "GEMINI_API_KEY"]
+    required = ["KITE_API_KEY", "KITE_API_SECRET", "OPENROUTER_API_KEY"]
     missing = [k for k in required if not os.getenv(k) or "your_" in os.getenv(k, "")]
     if missing:
         print(f"  {FAIL_MARK} Missing or placeholder values in .env: {missing}")
@@ -102,21 +102,16 @@ def check_news_feeds() -> bool:
     return all_ok
 
 
-def check_gemini_api() -> bool:
-    print("Checking Gemini API...")
+def check_openrouter_api() -> bool:
+    print("Checking OpenRouter API...")
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        model = genai.GenerativeModel("gemini-flash-lite-latest")
-        response = model.generate_content("Reply with exactly one word: OK")
-        if response.text.strip():
-            print(f"  {CHECK_MARK} Gemini API responding (got: '{response.text.strip()[:30]}')")
-            return True
-        print(f"  {FAIL_MARK} Gemini API returned an empty response")
-        return False
+        from core.llm_client import complete, get_model
+        reply = complete("Reply with exactly one word: OK")
+        print(f"  {CHECK_MARK} OpenRouter responding (model: {get_model()}, got: '{reply[:30]}')")
+        return True
     except Exception as e:
-        print(f"  {FAIL_MARK} Gemini API call failed: {e}")
-        print(f"        Check GEMINI_API_KEY is valid at https://ai.google.dev")
+        print(f"  {FAIL_MARK} OpenRouter API call failed: {e}")
+        print(f"        Check OPENROUTER_API_KEY is valid at https://openrouter.ai/keys")
         return False
 
 
@@ -138,7 +133,7 @@ def main():
     print()
     results["News feeds"] = check_news_feeds()
     print()
-    results["Gemini API"] = check_gemini_api()
+    results["OpenRouter API"] = check_openrouter_api()
 
     print()
     print("=" * 60)

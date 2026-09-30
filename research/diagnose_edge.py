@@ -32,7 +32,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from research.backtest import (
+from core.signals import (
     prepare_symbol_series, precompute_pattern_bias_codes, vectorized_evaluate,
     FORWARD_WINDOW, LOOKBACK_MIN, SLIPPAGE,
 )

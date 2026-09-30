@@ -112,7 +112,7 @@ trading-agent/
 ├── paths.py                        Every file location in the project, in one place
 ├── symbols.txt                     Your watchlist seed (one NSE symbol per line)
 ├── requirements.txt
-├── .env.example                    Credential template (Kite + Gemini keys)
+├── .env.example                    Credential template (Kite + OpenRouter keys)
 │
 ├── storage/                        SQLite persistence
 │   ├── db.py                        Connection (WAL), schema init, migrations, watchlist reads
@@ -140,7 +140,7 @@ trading-agent/
 │                                    stall watchdog, heal-on-reconnect
 │
 ├── analysis/                       Read-only intelligence over stored data
-│   ├── sentiment.py                 Gemini sentiment scoring on tagged news
+│   ├── sentiment.py                 OpenRouter sentiment scoring on tagged news
 │   ├── rankings.py                  Watchlist-wide bullish/bearish scoring
 │   ├── opportunity_finder.py        Conviction-ranked top picks
 │   ├── technical_summary.py         Human-readable indicator read
@@ -148,7 +148,7 @@ trading-agent/
 │
 ├── strategy/                       The three decision paths + experimental candidates
 │   ├── decision_agent.py            Rule-based — THE tested path
-│   ├── llm_decision_agent.py        Gemini decisions, parallel comparison
+│   ├── llm_decision_agent.py        OpenRouter decisions, parallel comparison
 │   ├── ml_decision_agent.py         Trained-model decisions, parallel comparison
 │   ├── ml_features.py               Feature engineering (no lookahead, verified)
 │   ├── train_ml_model.py            Chronological train/test split + trade simulation
@@ -200,9 +200,9 @@ pip install -r requirements.txt
 
 1. Sign up at https://developers.kite.trade/signup and subscribe to the paid
    Kite Connect plan (required for live *and* historical data).
-2. Get a free Gemini API key at https://ai.google.dev.
+2. Get a free OpenRouter API key at https://openrouter.ai/keys.
 3. Copy `.env.example` to `.env` and fill in `KITE_API_KEY`, `KITE_API_SECRET`,
-   and `GEMINI_API_KEY`.
+   and `OPENROUTER_API_KEY`.
 4. Build the watchlist and create the database:
 
 ```bash
@@ -282,7 +282,7 @@ both just print a number.
 
 ```bash
 python -m ingest.kite_auth        # 1. refresh today's access token (required daily, ~1 min)
-python -m scripts.validate_setup  # 2. pre-flight: Kite, news feeds, Gemini, DB all working
+python -m scripts.validate_setup  # 2. pre-flight: Kite, news feeds, OpenRouter, DB all working
 ```
 
 `scripts/validate_setup.py` exits 0 on success and 1 on failure, so you can
@@ -375,7 +375,8 @@ Credentials live in `.env`:
 |---|---|
 | `KITE_API_KEY` | Kite Connect API key |
 | `KITE_API_SECRET` | Kite Connect API secret |
-| `GEMINI_API_KEY` | Gemini API key (sentiment + LLM decisions) |
+| `OPENROUTER_API_KEY` | OpenRouter API key (sentiment + LLM decisions) |
+| `OPENROUTER_MODEL` | Optional model override, defaults to a free `:free` model |
 
 `.access_token` (gitignored, written by `ingest/kite_auth.py`) holds the daily
 Kite session. Everything else is a named constant at the top of the relevant

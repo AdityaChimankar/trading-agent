@@ -30,12 +30,16 @@ from apscheduler.triggers.cron import CronTrigger
 from analysis.digest import generate_digest
 from analysis.sentiment import run_sentiment_pass
 from core.freshness import in_market_hours, ingest_heartbeat
+from core.logging_config import get_logger
 from ingest.fetch_news import fetch_and_store_news
+from risk.position_monitor import run_monitor_cycle
 from storage.db import get_watchlist_symbols
 from strategy.decision_agent import run_decision_cycle
 from strategy.llm_decision_agent import run_llm_decision_cycle
 from strategy.ml_decision_agent import run_ml_decision_cycle
 from strategy.shadow import run_shadow_cycle
+
+logger = get_logger(__name__)
 
 # If the ticker's heartbeat is older than this, treat the live feed as down.
 HEARTBEAT_TRUST_SEC = 90
@@ -70,7 +74,7 @@ def market_hours_only(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         if not in_market_hours():
-            print(f"[skip] {fn.__name__}: outside the 9:15-15:30 session")
+            logger.debug(f"skip {fn.__name__}: outside the 9:15-15:30 session")
             return None
         return fn(*args, **kwargs)
     return wrapper
@@ -89,12 +93,24 @@ def ml_decision_cycle():
     try:
         run_ml_decision_cycle(get_watchlist_symbols())
     except FileNotFoundError as e:
-        print(f"ML decision cycle skipped: {e}")
+        logger.info(f"ML decision cycle skipped: {e}")
 
 
 @market_hours_only
 def llm_decision_cycle():
     run_llm_decision_cycle(get_watchlist_symbols())
+
+
+@market_hours_only
+def monitor_cycle():
+    """Exit watch over every open position, once a minute.
+
+    Exists so a stop breach is found with no dashboard open - the verdict
+    used to be computed only while a browser was polling /api/positions, so
+    a closed tab meant nothing was watching at all. It records to
+    position_alerts and logs; it closes nothing, and closes stay manual.
+    """
+    run_monitor_cycle()
 
 
 @market_hours_only
@@ -117,13 +133,17 @@ def heal_if_feed_down():
     if heartbeat and heartbeat["alive"]:
         return  # the ticker is alive; it repairs its own outages
     age = heartbeat["heartbeat_age_sec"] if heartbeat else None
-    print(f"[heal] live feed is down (heartbeat age: {age}s) - "
-          f"repairing the last {FEED_DOWN_LOOKBACK_MIN} minutes from Kite history")
+    logger.warning(
+        f"live feed is down (heartbeat age: {age}s) - "
+        f"repairing the last {FEED_DOWN_LOOKBACK_MIN} minutes from Kite history",
+        extra={"heartbeat_age_sec": age, "lookback_min": FEED_DOWN_LOOKBACK_MIN},
+    )
     from ingest.gap_healer import heal_recent  # lazy - only this path needs a REST client
     try:
-        print(f"[heal] {heal_recent(FEED_DOWN_LOOKBACK_MIN)}")
+        result = heal_recent(FEED_DOWN_LOOKBACK_MIN)
+        logger.info(f"heal {result}")
     except Exception as e:
-        print(f"[heal] repair sweep failed: {e}")
+        logger.error("heal repair sweep failed", extra={"error": str(e)})
 
 
 def end_of_session_heal():
@@ -131,9 +151,10 @@ def end_of_session_heal():
     session and refill any hole, whatever caused it."""
     from ingest.gap_healer import heal_day
     try:
-        print(f"[heal] end-of-session sweep: {heal_day()}")
+        result = heal_day()
+        logger.info(f"heal end-of-session sweep: {result}")
     except Exception as e:
-        print(f"[heal] end-of-session sweep failed: {e}")
+        logger.error("heal end-of-session sweep failed", extra={"error": str(e)})
 
 
 scheduler.add_job(
@@ -173,6 +194,15 @@ scheduler.add_job(
     CronTrigger(day_of_week="mon-fri", hour="9-15", minute="4-59/5"),
     id="shadow_candidates",
 )
+# Exit watch - every minute, because a stop is the one signal that is
+# worthless late, and the decision cycles only run every 5. It reads candles
+# and writes at most a handful of alert rows, so it does not need the
+# off-cadence staggering the decision jobs use to avoid the write lock.
+scheduler.add_job(
+    monitor_cycle,
+    CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*"),
+    id="monitor_positions",
+)
 # Feed watchdog - off-cadence from every decision job so it never competes
 # with them for the write lock.
 scheduler.add_job(
@@ -198,7 +228,10 @@ def _on_job_event(event):
     to log and carry on, which is how a session loses cycles without anyone
     finding out until the results look thin."""
     detail = getattr(event, "exception", None) or getattr(event, "code", "")
-    print(f"[scheduler] job '{event.job_id}' event={event.code}: {detail}")
+    logger.warning(
+        f"scheduler job event: {event.job_id} code={event.code}",
+        extra={"job_id": event.job_id, "event_code": event.code, "detail": str(detail)},
+    )
 
 
 scheduler.add_listener(
@@ -215,10 +248,28 @@ def run_once_now():
     shadow_cycle()
 
 
+def _shutdown() -> None:
+    """Graceful shutdown handler for the scheduler."""
+    logger.info("Shutdown initiated - stopping scheduler")
+    try:
+        scheduler.shutdown(wait=True)
+    except Exception as e:
+        logger.error("Error stopping scheduler", extra={"error": str(e)})
+
+
 if __name__ == "__main__":
-    print("Running startup pass...")
+    from core.logging_config import setup_logging
+    from core.shutdown import register_shutdown_handler
+    setup_logging()
+
+    # Register shutdown handler
+    register_shutdown_handler(_shutdown)
+
+    logger.info("Running startup pass...")
     run_once_now()
-    print("Scheduler started - news/sentiment/decisions/ML compare every 5 min, "
-          "LLM comparison every 15 min, feed watchdog every 10 min, "
-          "repair sweep at 3:32 PM, digest at 3:35 PM...")
+    logger.info(
+        "Scheduler started - news/sentiment/decisions/ML compare every 5 min, "
+        "LLM comparison every 15 min, feed watchdog every 10 min, "
+        "repair sweep at 3:32 PM, digest at 3:35 PM..."
+    )
     scheduler.start()

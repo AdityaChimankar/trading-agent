@@ -13,8 +13,6 @@ import {
 import { actionClass, cx, inr, num, shortTime } from '../lib/format'
 import { DataTable, Metric, Panel, StateMessage, type Column } from './ui'
 
-// Plotly is ~1.5 MB gzipped. Loading it lazily keeps it out of the initial
-// bundle so the rankings/opportunities panels paint immediately.
 const PriceChart = lazy(() => import('./PriceChart'))
 import type { Action, LlmSignalRow, MlSignalRow, NewsRow, SignalRow } from '../api/types'
 
@@ -72,7 +70,10 @@ export default function SymbolDetail({
         )}
       </Panel>
 
-      <Panel title="Position Sizing" subtitle="ATR-based, portfolio-adjusted for correlation and total risk budget.">
+      <Panel
+        title="Position Sizing"
+        subtitle="ATR-based, portfolio-adjusted for correlation and total risk budget."
+      >
         <StateMessage
           loading={sizing.isLoading}
           error={sizing.error}
@@ -118,9 +119,9 @@ export default function SymbolDetail({
                 {num(adjusted.total_risk_used_pct, 1)}% used
                 {adjusted.correlated_with.length > 0
                   ? `, correlated with ${adjusted.correlated_with.join(', ')} (cluster at ${num(
-                      adjusted.cluster_exposure_pct,
-                      1,
-                    )}%)`
+                    adjusted.cluster_exposure_pct,
+                    1,
+                  )}%)`
                   : ''}
               </p>
             ) : (
@@ -146,7 +147,15 @@ export default function SymbolDetail({
       </Panel>
 
       <div className="two-col">
-        <Panel title="Detected Chart Patterns">
+        <Panel
+          title="Detected Chart Patterns"
+          subtitle="Pattern-based bias detected on the current candle window."
+          actions={patterns.data?.bias ? (
+            <span className={cx('tag', patterns.data.bias === 'bullish' ? 'tag-buy' : patterns.data.bias === 'bearish' ? 'tag-sell' : '')}>
+              {patterns.data.bias.toUpperCase()}
+            </span>
+          ) : undefined}
+        >
           <StateMessage
             loading={patterns.isLoading}
             error={patterns.error}
@@ -154,9 +163,13 @@ export default function SymbolDetail({
             isEmpty={!patterns.data || patterns.data.patterns.length === 0}
           />
           {patterns.data && patterns.data.patterns.length > 0 && (
-            <p className="small">
-              <strong>Bias: {patterns.data.bias.toUpperCase()}</strong> — {patterns.data.patterns.join(', ')}
-            </p>
+            <ul className="pattern-list">
+              {patterns.data.patterns.map((p) => (
+                <li key={p} className={cx('small', patterns.data!.bias === 'bullish' ? 'pnl-pos' : patterns.data!.bias === 'bearish' ? 'pnl-neg' : 'muted')}>
+                  {patterns.data!.bias === 'bullish' ? '🟢 ' : patterns.data!.bias === 'bearish' ? '🔴 ' : '⚪ '}{p}
+                </li>
+              ))}
+            </ul>
           )}
         </Panel>
 
@@ -174,14 +187,14 @@ export default function SymbolDetail({
         </Panel>
       </div>
 
-      <Panel title="Signal History (Rule-Based)">
+      <Panel title="Signal History (Rule-Based)" collapsible>
         <StateMessage
           loading={signals.isLoading}
           error={signals.error}
           empty="The decision agent hasn't logged any signals yet."
           isEmpty={(signals.data ?? []).length === 0}
         />
-        <DataTable<SignalRow> rows={signals.data ?? []} columns={SIGNAL_COLUMNS} />
+        <DataTable<SignalRow> rows={signals.data ?? []} columns={SIGNAL_COLUMNS} maxRows={10} maxHeight={300} />
       </Panel>
 
       <div className="two-col">
@@ -195,6 +208,9 @@ export default function SymbolDetail({
           actionHeader="LLM"
           getAction={(r) => r.llm_action}
           getRationale={(r) => r.rationale}
+          defaultCollapsed={false}
+          maxRows={10}
+          maxHeight={300}
         />
         <AgentPanel<MlSignalRow>
           title="ML Model vs Rule-Based"
@@ -205,6 +221,9 @@ export default function SymbolDetail({
           empty="ML decision agent hasn't run yet (train a model with train_ml_model.py)."
           actionHeader="ML"
           getAction={(r) => r.ml_action}
+          defaultCollapsed={true}
+          maxRows={10}
+          maxHeight={300}
         />
       </div>
     </>
@@ -217,8 +236,6 @@ const NEWS_COLUMNS: Column<NewsRow>[] = [
   {
     header: 'Score',
     align: 'right',
-    // Unscored headlines must not be coloured as a loss - only apply a
-    // green/red class once there is an actual score.
     cell: (r) => (
       <span className={cx('mono', r.score == null ? undefined : r.score >= 0 ? 'pnl-pos' : 'pnl-neg')}>
         {num(r.score, 2)}
@@ -237,9 +254,6 @@ const SIGNAL_COLUMNS: Column<SignalRow>[] = [
   { header: 'Rationale', cell: (r) => <span className="muted">{r.rationale}</span> },
 ]
 
-// The LLM and ML comparison tables are identical apart from which column
-// holds the agent's action, so the panel is generic over the row type and
-// takes accessors rather than doing dynamic key lookups.
 interface AgentRow {
   timestamp: string
   rule_based_action: Action | null
@@ -256,6 +270,9 @@ function AgentPanel<T extends AgentRow>({
   actionHeader,
   getAction,
   getRationale,
+  defaultCollapsed = false,
+  maxRows = 10,
+  maxHeight = 300,
 }: {
   title: string
   agreement: number | null
@@ -266,6 +283,9 @@ function AgentPanel<T extends AgentRow>({
   actionHeader: string
   getAction: (row: T) => Action
   getRationale?: (row: T) => string | null
+  defaultCollapsed?: boolean
+  maxRows?: number
+  maxHeight?: number
 }) {
   const columns: Column<T>[] = [
     { header: 'Time', cell: (r) => shortTime(r.timestamp) },
@@ -289,10 +309,10 @@ function AgentPanel<T extends AgentRow>({
   ]
 
   return (
-    <Panel title={title}>
+    <Panel title={title} collapsible defaultCollapsed={defaultCollapsed}>
       {agreement !== null && <Metric label="Agreement rate (last 20)" value={`${agreement}%`} />}
       <StateMessage loading={loading} error={error} empty={empty} isEmpty={rows.length === 0} />
-      <DataTable<T> rows={rows} columns={columns} />
+      <DataTable<T> rows={rows} columns={columns} maxRows={maxRows} maxHeight={maxHeight} />
     </Panel>
   )
 }

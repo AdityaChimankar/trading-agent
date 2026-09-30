@@ -1,21 +1,14 @@
 """
-Scores unscored news headlines using Gemini Flash-Lite. Only scores
+Scores unscored news headlines using OpenRouter. Only scores
 headlines already matched to a watchlist symbol, to keep API calls
 (and cost) down - unmatched general market news is skipped here.
 
-Setup: pip install google-generativeai, then set GEMINI_API_KEY in .env
+Setup: pip install openai, then set OPENROUTER_API_KEY in .env
 """
-import os
-import json
 from datetime import datetime
-import google.generativeai as genai
-from dotenv import load_dotenv
+
+from core.llm_client import complete, extract_json
 from storage.db import get_connection
-
-load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-flash-lite-latest")
-
 PROMPT_TEMPLATE = """You are scoring financial news sentiment for {symbol}.
 Headline: "{headline}"
 
@@ -43,9 +36,7 @@ def fetch_unscored_news(conn, limit: int = 40):
 
 def score_headline(symbol: str, headline: str) -> dict:
     prompt = PROMPT_TEMPLATE.format(symbol=symbol, headline=headline)
-    response = model.generate_content(prompt)
-    text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
-    return json.loads(text)
+    return extract_json(complete(prompt, temperature=0.0))
 
 
 def run_sentiment_pass():

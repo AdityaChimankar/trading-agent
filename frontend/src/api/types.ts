@@ -54,12 +54,21 @@ export interface Position {
 
 export interface PositionStatus {
   position: Position
-  current_price: number
-  current_value: number
-  pnl: number
-  pnl_pct: number
-  recommendation: 'HOLD' | 'SELL'
+  // Null - never 0 - when the monitor cannot vouch for a mark: the newest
+  // candle is stale during the session, or the symbol has no usable candle at
+  // all. Null means "unknown", which is a different claim from "flat".
+  current_price: number | null
+  current_value: number | null
+  pnl: number | null
+  pnl_pct: number | null
+  // HOLD = no exit condition on fresh data. SELL = an exit condition fired.
+  // STALE = no exit condition, but the candle is behind the feed, so HOLD
+  // cannot be confirmed. NO_DATA = no usable candle to judge against.
+  recommendation: 'HOLD' | 'SELL' | 'STALE' | 'NO_DATA'
   reason: string
+  stale: boolean
+  candle_age_minutes: number | null
+  candle_timestamp: string | null
 }
 
 export interface Opportunity {
@@ -157,6 +166,7 @@ export type ChartResponse =
     }
 
 export interface NewsRow {
+  symbol: string
   headline: string
   published_at: string
   source: string | null

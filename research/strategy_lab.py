@@ -45,7 +45,7 @@ import time as _time
 import numpy as np
 
 from core.quant_indicators import load_candles  # noqa: F401  (parity with diagnose_edge imports)
-from research.backtest import (
+from core.signals import (
     prepare_symbol_series, precompute_pattern_bias_codes, vectorized_evaluate,
     LOOKBACK_MIN, SLIPPAGE,
 )

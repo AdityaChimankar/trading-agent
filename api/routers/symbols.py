@@ -14,6 +14,20 @@ from storage.db import get_connection, get_watchlist_symbols
 router = APIRouter(prefix="/api/symbols", tags=["symbols"])
 
 
+@router.get("/news")
+def all_news(limit: int = Query(100, ge=1, le=500)):
+    """All news across all symbols with sentiment scores, sorted by published_at desc."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT n.symbol, n.headline, n.published_at, n.source, s.score, s.rationale
+           FROM news n LEFT JOIN sentiment s ON n.id = s.news_id
+           ORDER BY n.published_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return jsonable([dict(r) for r in rows])
+
+
 def _require_symbol(symbol: str) -> None:
     if symbol not in set(get_watchlist_symbols()):
         raise HTTPException(status_code=404, detail=f"{symbol} is not in the watchlist.")

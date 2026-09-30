@@ -31,11 +31,11 @@ import itertools
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
-# precompute_pattern_bias_codes and vectorized_evaluate live in backtest.py
+# precompute_pattern_bias_codes and vectorized_evaluate live in core/signals.py
 # and are re-used here rather than redefined. They were previously
 # duplicated verbatim in both files, which meant any fix to one could
 # silently leave the other (and the optimizer's results) wrong.
-from research.backtest import (
+from core.signals import (
     prepare_symbol_series, simulate_trades, summarize,
     precompute_pattern_bias_codes, vectorized_evaluate,
     DEFAULT_PARAMS, FORWARD_WINDOW, LOOKBACK_MIN, SLIPPAGE,

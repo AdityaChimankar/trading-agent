@@ -121,7 +121,7 @@ forms and still uses the `(symbol, timestamp)` index.
 CNBC-TV18, Livemint ×2, Business Standard ×2, NDTV Profit, and BSE's
 `announcements.xml`) and
 keyword-matches items to watchlist symbols. `analysis/sentiment.py` then scores
-them with Gemini.
+them with OpenRouter.
 
 ### `fetch_historical.py` is resumable by design
 

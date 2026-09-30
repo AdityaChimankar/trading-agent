@@ -14,8 +14,8 @@ from datetime import datetime
 
 from core.freshness import split_stale, warn_stale
 from core.quant_indicators import compute_atr, load_candles
+from core.signals import prepare_symbol_series, precompute_pattern_bias_codes
 from paths import ML_MODEL_PATH
-from research.backtest import prepare_symbol_series, precompute_pattern_bias_codes
 from storage.db import get_connection, get_watchlist_symbols
 from strategy.decision_agent import decide as rule_based_decide
 

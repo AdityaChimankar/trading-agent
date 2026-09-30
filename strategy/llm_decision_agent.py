@@ -16,21 +16,16 @@ Only consider using this as your ONLY decision-maker once you've
 compared its calls against the rule-based agent (and its real
 outcomes) for a meaningful stretch of time.
 """
-import os
 import json
 from datetime import datetime
-import google.generativeai as genai
-from dotenv import load_dotenv
+
 from core.freshness import split_stale, warn_stale
 from core.pattern_detection import detect_patterns
 from core.quant_indicators import latest_indicators
+from core.llm_client import complete, extract_json
 from storage.db import get_connection
 from strategy.decision_agent import decide as rule_based_decide
 import concurrent.futures
-
-load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-flash-lite-latest")
 
 PROMPT_TEMPLATE = """You are an intraday trading signal assistant analyzing {symbol}.
 
@@ -77,9 +72,7 @@ def llm_decide(symbol: str) -> dict:
     )
 
     try:
-        response = model.generate_content(prompt)
-        text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
-        result = json.loads(text)
+        result = extract_json(complete(prompt, temperature=0.0))
     except Exception as e:
         return {"symbol": symbol, "action": "HOLD", "confidence": 0.0, "rationale": f"LLM call failed: {e}"}
 
@@ -91,7 +84,7 @@ def run_llm_decision_cycle(symbols: list):
     """
     IMPORTANT: opens a fresh connection and commits for EACH symbol,
     not once at the end of the loop. The old version held one
-    connection open across the entire loop - with real Gemini API
+    connection open across the entire loop - with real LLM API
     calls per symbol (network latency x hundreds of symbols can add
     up to several minutes), that held a write lock far longer than
     any reasonable busy_timeout, causing 'database is locked' errors

@@ -50,11 +50,17 @@ from datetime import datetime, timedelta
 
 from kiteconnect import KiteTicker
 
+from core.config import get_config
 from core.freshness import MARKET_CLOSE, in_market_hours, session_start
+from core.logging_config import get_logger
+from core.shutdown import GracefulShutdown, register_shutdown_handler
 from ingest.gap_healer import MINUTE_FMT, heal_window, last_completed_minute
 from ingest.kite_auth import API_KEY
 from paths import ACCESS_TOKEN_PATH
 from storage.db import get_connection, get_watchlist
+
+
+logger = get_logger(__name__)
 
 
 FLUSH_INTERVAL_SEC = 5
@@ -255,7 +261,10 @@ def _enqueue_heal(start: datetime, end: datetime) -> None:
     if start is None or end is None or end < start:
         return
     _heal_queue.put((start, end))
-    print(f"[heal] queued outage {start.strftime(MINUTE_FMT)} .. {end.strftime(MINUTE_FMT)}")
+    logger.info(
+        f"heal queued outage {start.strftime(MINUTE_FMT)} .. {end.strftime(MINUTE_FMT)}",
+        extra={"heal_start": start.isoformat(), "heal_end": end.isoformat()},
+    )
 
 
 def _discard_ended_buffered(suspect_minute: str) -> int:
@@ -296,11 +305,11 @@ def _force_reconnect(reason: str) -> None:
     if _reconnecting:
         return
     _reconnecting = True
-    print(f"[watchdog] {reason} - forcing a reconnect")
+    logger.warning(f"watchdog forcing reconnect: {reason}", extra={"reason": reason})
     try:
         _close_socket()
     except Exception as e:  # never let the watchdog kill the process
-        print(f"[watchdog] could not force reconnect: {e}")
+        logger.error(f"watchdog could not force reconnect: {e}", extra={"error": str(e)})
         _reconnecting = False
 
 
@@ -330,7 +339,7 @@ def flush_loop():
         try:
             _flush_once(conn)
         except Exception as e:
-            print(f"[flush] iteration failed (continuing): {e}")
+            logger.error("flush iteration failed (continuing)", extra={"error": str(e)})
 
 
 def _flush_once(conn):
@@ -358,8 +367,10 @@ def _flush_once(conn):
     with _buckets_lock:
         backlog = len(_completed)
     if backlog > 5000:
-        print(f"[flush] WARNING: {backlog} completed candles are waiting to be "
-              f"written - the flush thread is falling behind")
+        logger.warning(
+            f"flush backlog: {backlog} completed candles waiting to be written",
+            extra={"backlog": backlog},
+        )
 
     # --- liveness watchdog ----------------------------------------------
     if stalled and _stall_from is None and latest_minute:
@@ -369,8 +380,11 @@ def _flush_once(conn):
         _stall_from = _parse_minute(latest_minute)
         with _buckets_lock:
             dropped = _discard_ended_buffered(latest_minute)
-        print(f"[watchdog] no tick for {int(silent_for)}s (last was {latest_minute}) - "
-              f"discarded {dropped} partial candle(s) for repair")
+        logger.warning(
+            f"watchdog: no tick for {int(silent_for)}s (last was {latest_minute}) - "
+            f"discarded {dropped} partial candle(s) for repair",
+            extra={"silent_for_sec": int(silent_for), "last_minute": latest_minute, "dropped": dropped},
+        )
 
     if open_now and silent_for is not None and silent_for > FORCE_RECONNECT_SEC:
         _force_reconnect(f"no tick for {int(silent_for)}s")
@@ -382,7 +396,7 @@ def _flush_once(conn):
         _enqueue_heal(_stall_from, last_completed_minute(now))
         _stall_from = None
         if _reconnecting:
-            print("[watchdog] feed is delivering again")
+            logger.info("watchdog: feed is delivering again")
 
     # --- heartbeat ------------------------------------------------------
     _write_heartbeat(conn)
@@ -398,10 +412,14 @@ def heal_loop():
         try:
             from ingest.kite_auth import get_kite_client  # lazy: needs a live token, not an import-time one
             kite = get_kite_client()
-            print(f"[heal] refetching {start.strftime(MINUTE_FMT)} .. {end.strftime(MINUTE_FMT)}")
-            print(f"[heal] {heal_window(kite, conn, start, end)}")
+            logger.info(
+                f"heal refetching {start.strftime(MINUTE_FMT)} .. {end.strftime(MINUTE_FMT)}",
+                extra={"heal_start": start.isoformat(), "heal_end": end.isoformat()},
+            )
+            result = heal_window(kite, conn, start, end)
+            logger.info(f"heal {result}")
         except Exception as e:
-            print(f"[heal] sweep failed: {e}")
+            logger.error("heal sweep failed", extra={"error": str(e)})
         finally:
             conn.close()
             _heal_queue.task_done()
@@ -430,9 +448,12 @@ def on_connect(ws, response):
     if was_reconnect:
         _reconnects += 1
     _reconnecting = False
-    print(f"Subscribed to {len(tokens)} instruments in "
-          f"{'MODE_QUOTE' if mode == ws.MODE_QUOTE else 'MODE_FULL'}"
-          f"{f' (reconnect #{_reconnects}, {dropped} partial candle(s) held for repair)' if was_reconnect else ''}")
+    logger.info(
+        f"Subscribed to {len(tokens)} instruments in "
+        f"{'MODE_QUOTE' if mode == ws.MODE_QUOTE else 'MODE_FULL'}"
+        f"{f' (reconnect #{_reconnects}, {dropped} partial candle(s) held for repair)' if was_reconnect else ''}",
+        extra={"tokens": len(tokens), "mode": "QUOTE" if mode == ws.MODE_QUOTE else "FULL", "reconnect": was_reconnect, "dropped": dropped},
+    )
 
     if was_reconnect and suspect:
         # A drop shorter than the 90s watchdog threshold never gets flagged as
@@ -445,11 +466,11 @@ def on_close(ws, code, reason):
     global _connected, _disconnected_at
     _connected = False
     _disconnected_at = datetime.now().isoformat()
-    print(f"Connection closed: {code} {reason}")
+    logger.warning(f"Connection closed: {code} {reason}", extra={"code": code, "reason": reason})
 
 
 def on_reconnect(ws, attempts_count):
-    print(f"Reconnecting (attempt {attempts_count}/{RECONNECT_MAX_TRIES})...")
+    logger.info(f"Reconnecting (attempt {attempts_count}/{RECONNECT_MAX_TRIES})", extra={"attempt": attempts_count})
 
 
 def on_noreconnect(ws):
@@ -457,13 +478,16 @@ def on_noreconnect(ws):
     _connected = False
     # Loud on purpose: this is the end of live data for the day unless someone
     # acts, and it is exactly the failure that used to pass unnoticed.
-    print(f"[ALERT] gave up reconnecting after {RECONNECT_MAX_TRIES} attempts. "
-          f"Live data has stopped. Fix the connection and re-run "
-          f"`python -m ingest.gap_healer` to fill the hole.")
+    logger.critical(
+        f"gave up reconnecting after {RECONNECT_MAX_TRIES} attempts. "
+        f"Live data has stopped. Fix the connection and re-run "
+        f"`python -m ingest.gap_healer` to fill the hole.",
+        extra={"max_tries": RECONNECT_MAX_TRIES},
+    )
 
 
 def on_error(ws, code, reason):
-    print(f"Connection error: {code} {reason}")
+    logger.error(f"Connection error: {code} {reason}", extra={"code": code, "reason": reason})
 
 
 kws.on_ticks = on_ticks
@@ -481,13 +505,40 @@ def _closing_sweep() -> None:
     try:
         from ingest.gap_healer import heal_day
         from ingest.kite_auth import get_kite_client
-        print("[heal] end-of-session sweep...")
-        print(f"[heal] {heal_day(get_kite_client(), get_connection())}")
+        logger.info("heal end-of-session sweep starting")
+        result = heal_day(get_kite_client(), get_connection())
+        logger.info(f"heal {result}")
     except Exception as e:
-        print(f"[heal] end-of-session sweep failed: {e}")
+        logger.error("heal end-of-session sweep failed", extra={"error": str(e)})
+
+
+def _shutdown() -> None:
+    """Graceful shutdown handler for the live ticker."""
+    logger.info("Shutdown initiated - flushing in-flight candle and running end-of-session sweep")
+    with _buckets_lock:
+        leftover = _collect_buckets(force=True)
+    try:
+        _write_candles(get_connection(), leftover)
+        if leftover:
+            logger.info(f"Wrote {len(leftover)} buffered candle(s)", extra={"count": len(leftover)})
+    except Exception as e:
+        logger.error("Final flush failed", extra={"error": str(e)})
+    if datetime.now().time() > MARKET_CLOSE:
+        _closing_sweep()
+    # Close the WebSocket connection
+    try:
+        kws.close()
+    except Exception as e:
+        logger.error("Error closing WebSocket", extra={"error": str(e)})
 
 
 if __name__ == "__main__":
+    from core.logging_config import setup_logging
+    setup_logging()
+
+    # Register shutdown handler
+    register_shutdown_handler(_shutdown)
+
     threading.Thread(target=flush_loop, daemon=True).start()
     threading.Thread(target=heal_loop, daemon=True).start()
 
@@ -498,19 +549,13 @@ if __name__ == "__main__":
     if now.time() > MARKET_CLOSE or in_market_hours(now):
         _enqueue_heal(session_start(now), last_completed_minute(now))
 
-    print("Live ticker starting - Ctrl+C at close (the buffer and the day's gaps are flushed on exit).")
+    logger.info("Live ticker starting - Ctrl+C at close (the buffer and the day's gaps are flushed on exit).")
     try:
-        kws.connect(threaded=False)
+        with GracefulShutdown() as shutdown:
+            kws.connect(threaded=False)
+            while not shutdown.is_shutting_down():
+                shutdown.wait(1.0)
     except KeyboardInterrupt:
-        print("Interrupted - flushing the in-flight candle...")
-    finally:
-        with _buckets_lock:
-            leftover = _collect_buckets(force=True)
-        try:
-            _write_candles(get_connection(), leftover)
-            if leftover:
-                print(f"Wrote {len(leftover)} buffered candle(s).")
-        except Exception as e:
-            print(f"Final flush failed: {e}")
-        if datetime.now().time() > MARKET_CLOSE:
-            _closing_sweep()
+        logger.info("Interrupted - graceful shutdown in progress...")
+    except Exception as e:
+        logger.error("Live ticker error", extra={"error": str(e)}, exc_info=True)

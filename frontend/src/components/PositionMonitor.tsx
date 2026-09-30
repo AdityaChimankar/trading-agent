@@ -1,15 +1,31 @@
 import { useClosePosition, usePositions } from '../api/queries'
+import type { PositionStatus } from '../api/types'
 import { cx, inr, num, pnlClass, signedInr, timeAgo } from '../lib/format'
 import { Metric, Panel, StateMessage } from './ui'
+
+// The exit verdict is not two-valued: a stale feed cannot confirm HOLD, and a
+// symbol with no candle cannot be judged at all. Rendering either of those as
+// SELL (or as a green P&L) is worse than rendering nothing - one is a false
+// exit signal, the other a profit that was never measured.
+const VERDICT_LABEL: Record<PositionStatus['recommendation'], string> = {
+  HOLD: '🟡 HOLD',
+  SELL: '🔴 SELL',
+  STALE: '⚪ STALE',
+  NO_DATA: '⚪ NO DATA',
+}
 
 export default function PositionMonitor() {
   const { data, isLoading, error } = usePositions()
   const closePosition = useClosePosition()
 
   const positions = data ?? []
+  // Totals only over rows that actually have a mark. The monitor returns null
+  // (not 0) for the rest, so summing them would silently report a flat position.
+  const marked = positions.filter((s) => s.pnl !== null)
+  const unmarked = positions.length - marked.length
   const totalPlaced = positions.reduce((sum, s) => sum + s.position.position_value, 0)
-  const totalCurrent = positions.reduce((sum, s) => sum + s.current_value, 0)
-  const totalPnl = positions.reduce((sum, s) => sum + s.pnl, 0)
+  const totalCurrent = marked.reduce((sum, s) => sum + (s.current_value ?? 0), 0)
+  const totalPnl = marked.reduce((sum, s) => sum + (s.pnl ?? 0), 0)
 
   return (
     <Panel title="📊 Position Monitor" subtitle="Paper ledger — nothing here places a real order.">
@@ -39,6 +55,13 @@ export default function PositionMonitor() {
             />
           </div>
 
+          {unmarked > 0 && (
+            <p className="muted small">
+              {unmarked} position{unmarked > 1 ? 's have' : ' has'} no usable mark right now (stale
+              feed, or no candle) — left out of the totals above and flagged below.
+            </p>
+          )}
+
           <ul className="position-list">
             {positions.map((status) => {
               const p = status.position
@@ -67,15 +90,17 @@ export default function PositionMonitor() {
                       {num(status.current_price, 2)}
                     </div>
                     <div className={pnlClass(status.pnl)}>
-                      {status.pnl >= 0 ? '🟢' : '🔴'} {signedInr(status.pnl)} ({num(status.pnl_pct, 2)}%)
+                      {status.pnl === null
+                        ? '⚪ no mark'
+                        : `${status.pnl >= 0 ? '🟢' : '🔴'} ${signedInr(status.pnl)} (${num(status.pnl_pct, 2)}%)`}
                     </div>
                     <div className="muted">
                       {p.position_size} sh · stop {num(p.stop_loss, 2)} · target {num(p.take_profit, 2)}
                     </div>
                   </div>
 
-                  <p className={cx('small', status.recommendation === 'HOLD' ? 'muted' : 'warn-text')}>
-                    {status.recommendation === 'HOLD' ? '🟡 HOLD' : '🔴 SELL'} — {status.reason}
+                  <p className={cx('small', status.recommendation === 'SELL' ? 'warn-text' : 'muted')}>
+                    {VERDICT_LABEL[status.recommendation]} — {status.reason}
                   </p>
                   <p className="muted small">Opened {timeAgo(p.opened_at)}</p>
                 </li>

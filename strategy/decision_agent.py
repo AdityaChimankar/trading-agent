@@ -12,7 +12,11 @@ from datetime import datetime
 from core.freshness import split_stale, warn_stale
 from core.pattern_detection import detect_patterns
 from core.quant_indicators import latest_indicators
+from core.logging_config import get_logger
 from storage.db import get_connection, get_watchlist_symbols
+
+
+logger = get_logger(__name__)
 
 
 def evaluate_signals(
@@ -47,7 +51,7 @@ def evaluate_signals(
 
 
 def decide(symbol: str) -> dict:
-    from analysis.sentiment import latest_sentiment  # lazy import - only live trading needs the Gemini SDK
+    from analysis.sentiment import latest_sentiment  # lazy import - only live trading needs the LLM sentiment path
 
     indicators = latest_indicators(symbol)
     if "error" in indicators:
@@ -103,8 +107,13 @@ def run_decision_cycle():
         )
         conn.commit()
         conn.close()
-        print(f"{symbol}: {result['action']} - {result['rationale']}")
+        logger.info(
+            f"{symbol}: {result['action']} - {result['rationale']}",
+            extra={"symbol": symbol, "action": result["action"], "rsi": result.get("rsi"), "adx": result.get("adx")},
+        )
 
 
 if __name__ == "__main__":
+    from core.logging_config import setup_logging
+    setup_logging()
     run_decision_cycle()

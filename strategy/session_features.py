@@ -61,7 +61,7 @@ import numpy as np
 import pandas as pd
 
 from core.freshness import IST, MARKET_CLOSE, MARKET_OPEN
-from research.backtest import FORWARD_WINDOW
+from core.signals import FORWARD_WINDOW
 
 # Key the memoized feature bundle is stored under on the `prepared` dict.
 CACHE_KEY = "_session_features"
@@ -415,7 +415,7 @@ def report_cost_cover(candles_list: list) -> dict:
     (a data artefact), not a tradable calm state, and including them makes
     the minimum meaningless.
     """
-    from research.backtest import SLIPPAGE
+    from core.signals import SLIPPAGE
 
     collected = []
     for candles in candles_list:
@@ -438,7 +438,7 @@ def report_cost_cover(candles_list: list) -> dict:
 if __name__ == "__main__":
     import sys
 
-    from research.backtest import prepare_symbol_series
+    from core.signals import prepare_symbol_series
     from storage.db import get_watchlist_symbols
 
     args = sys.argv[1:]

@@ -10,27 +10,34 @@ export default function Sidebar({
   onCapitalChange,
   selected,
   onSelect,
+  watchlistSymbols,
 }: {
   capital: number
   onCapitalChange: (value: number) => void
   selected: string | null
   onSelect: (symbol: string) => void
+  watchlistSymbols: string[]
 }) {
+  const [search, setSearch] = useState('')
   const [view, setView] = useState<'Bullish' | 'Bearish'>('Bullish')
-  // Local text state so the field can be cleared/retyped. Binding the input
-  // straight to the numeric `capital` makes clearing it snap back to the
-  // last valid number, because an empty string parses to 0.
   const [capitalText, setCapitalText] = useState(String(capital))
   const { data, isLoading, error } = useRankings(capital)
 
-  // The sized lists come from a separate rank_watchlist() pass than
-  // `scored`, so contradiction flags are joined back by symbol - same
-  // lookup the Streamlit sidebar did with scored_by_symbol.
+  // Local text state so the field can be cleared/retyped. Binding the input
+  // straight to the numeric `capital` makes clearing it snap back to the
+  // last valid number, because an empty string parses to 0.
   const scoredBySymbol = useMemo(() => {
     const map = new Map<string, RankedEntry>()
     for (const entry of data?.scored ?? []) map.set(entry.symbol, entry)
     return map
   }, [data])
+
+  // Symbol search within the watchlist
+  const filteredSymbols = useMemo(() => {
+    if (!search) return watchlistSymbols
+    const q = search.toLowerCase()
+    return watchlistSymbols.filter((s) => s.toLowerCase().includes(q))
+  }, [watchlistSymbols, search])
 
   const ranked: RankedEntry[] = view === 'Bullish' ? (data?.bullish ?? []) : (data?.bearish ?? [])
   const scoreKey = view === 'Bullish' ? 'bullish_score' : 'bearish_score'
@@ -38,7 +45,9 @@ export default function Sidebar({
   return (
     <aside className="sidebar">
       <div className="side-block">
-        <h2 className="panel-title">Watchlist Bias</h2>
+        <div className="panel-head-symmetric">
+          <h2 className="panel-title">Watchlist Bias</h2>
+        </div>
         <label className="field">
           <span>Available capital (₹)</span>
           <input
@@ -49,9 +58,6 @@ export default function Sidebar({
             onChange={(e) => {
               setCapitalText(e.target.value)
               const parsed = Number(e.target.value)
-              // Only push up values that are actually usable - typing an
-              // intermediate state shouldn't silently become a different
-              // capital figure.
               if (Number.isFinite(parsed) && parsed > 0) onCapitalChange(parsed)
             }}
           />
@@ -59,6 +65,35 @@ export default function Sidebar({
         <p className="hint small">
           Sizes every suggested BUY/SELL on this page. Risk 1% of capital per trade, stop at 1.5×ATR.
         </p>
+      </div>
+
+      <div className="side-block">
+        <div className="panel-head-symmetric">
+          <h3 className="panel-title-small">Symbol Search</h3>
+        </div>
+        <input
+          type="text"
+          className="symbol-search sidebar-search"
+          placeholder="Search symbols..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <ul className="symbol-quick-list">
+          {filteredSymbols.slice(0, 6).map((s) => (
+            <li key={s}>
+              <button
+                type="button"
+                className={cx('symbol-quick-item', selected === s && 'is-active')}
+                onClick={() => onSelect(s)}
+              >
+                {s}
+              </button>
+            </li>
+          ))}
+          {filteredSymbols.length === 0 && search && (
+            <li className="muted small">No matching symbol</li>
+          )}
+        </ul>
       </div>
 
       {data && data.contradictions.length > 0 && (

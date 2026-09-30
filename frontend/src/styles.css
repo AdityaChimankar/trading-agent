@@ -16,6 +16,14 @@
 
 * {
   box-sizing: border-box;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+/* smooth transitions on interactive elements */
+button,
+input,
+select {
+  transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
 }
 
 body {
@@ -143,6 +151,16 @@ h3 {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.panel:hover {
+  border-color: var(--border-soft);
+}
+
+.panel.symmetric,
+.panel.panel-symmetric {
+  --panel-padding: 16px;
 }
 
 .panel-head {
@@ -152,6 +170,12 @@ h3 {
   gap: 16px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+}
+
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .panel-title {
@@ -164,6 +188,57 @@ h3 {
   font-size: 12px;
   max-width: 760px;
   line-height: 1.5;
+}
+
+.panel-head-symmetric {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-title-small {
+  font-size: 13px;
+}
+
+/* Collapse button */
+.collapse-btn {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+}
+
+.collapse-btn:hover:not(:disabled) {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--border-soft);
+}
+
+.panel-content {
+  transition: max-height 0.2s ease, opacity 0.2s ease;
+  overflow: hidden;
+}
+
+.panel-content.is-collapsed {
+  max-height: 0;
+  opacity: 0;
+  padding: 0 16px;
+}
+
+.panel-collapse-handle {
+  height: 0;
+  overflow: hidden;
 }
 
 .side-block {
@@ -205,6 +280,12 @@ input:focus,
 select:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
 }
 
 .btn {
@@ -303,10 +384,16 @@ select:focus {
   border-radius: 8px;
   padding: 8px;
   background: var(--bg-elev);
+  transition: border-color 0.2s, transform 0.15s;
 }
 
 .rank-item.is-selected {
   border-color: var(--accent);
+  transform: translateX(2px);
+}
+
+.rank-item:hover {
+  border-color: var(--border);
 }
 
 .rank-btn {
@@ -407,6 +494,12 @@ select:focus {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  transition: border-color 0.2s, transform 0.15s;
+}
+
+.pick:hover {
+  border-color: var(--border-soft);
+  transform: translateY(-2px);
 }
 
 .pick-head {
@@ -460,6 +553,11 @@ select:focus {
   border-radius: 8px;
   padding: 12px;
   background: var(--bg-elev);
+  transition: border-color 0.2s, transform 0.15s;
+}
+
+.position:hover {
+  border-color: var(--border);
 }
 
 .position-head {
@@ -516,6 +614,27 @@ select:focus {
 
 .table tbody tr:hover {
   background: rgba(59, 130, 246, 0.05);
+}
+
+/* --- Table expand ------------------------------------------------------ */
+.table-expand {
+  padding: 8px 0 0;
+  text-align: center;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 8px;
+  text-decoration: underline;
+}
+
+.btn-link:hover {
+  color: #60a5fa;
 }
 
 /* --- Misc -------------------------------------------------------------- */
@@ -618,6 +737,83 @@ select:focus {
 }
 
 /* --- Page width --------------------------------------------------------- */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.page-header h1 {
+  font-size: 20px;
+}
+
+.page-loading,
+.page-error {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.page-error {
+  color: var(--neg);
+}
+
+.table-empty {
+  padding: 40px !important;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+/* --- NewsPage specific -------------------------------------------------- */
+.headline-cell {
+  max-width: 500px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.symbol-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.symbol-link:hover {
+  color: #60a5fa;
+}
+
+.sentiment-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0b0f14;
+}
+
+.sentiment-label {
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.8;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
 /* The dashboard fills the viewport because the sidebar is part of it. The
    standalone pages have no sidebar, so they are centred at a readable width
    instead of stretching a 4-column table across an ultrawide monitor. */
@@ -642,7 +838,14 @@ select:focus {
   border-top: 2px solid var(--accent);
   border-radius: var(--radius);
   background: var(--bg-elev);
-  padding: 10px 12px;
+  padding: 12px;
+  transition: transform 0.15s, box-shadow 0.15s, border-color 0.2s;
+}
+
+.flow-node:hover {
+  border-top-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .flow-title {
@@ -673,6 +876,27 @@ select:focus {
     flex-wrap: wrap;
     gap: 12px;
   }
+}
+
+.wallet-panel {
+  --panel-padding: 14px;
+}
+
+.wallet-panel .panel-head {
+  margin-bottom: 10px;
+}
+
+.wallet-panel .metric-row {
+  gap: 14px;
+  margin-bottom: 8px;
+}
+
+.wallet-panel .position-list {
+  gap: 8px;
+}
+
+.wallet-panel .position {
+  padding: 10px;
 }
 
 /* --- Strategy Status Panel ---------------------------------------------- */
@@ -748,7 +972,177 @@ select:focus {
   color: var(--neg);
 }
 
-/* --- Equity Curve (future use) ------------------------------------------ */
+/* --- Searchable Symbol Selector ---------------------------------------- */
+.symbol-selector {
+  position: relative;
+  display: inline-block;
+}
+
+.symbol-selector-trigger {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 140px;
+  transition: all 0.15s;
+}
+
+.symbol-selector-trigger:hover {
+  background: #1d2735;
+  border-color: var(--border-soft);
+}
+
+.symbol-selector-trigger:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.symbol-selector-chevron {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: auto;
+}
+
+.symbol-selector-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 220px;
+  max-height: 280px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  margin-top: 4px;
+}
+
+.symbol-search {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-panel);
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.symbol-search:focus {
+  border-color: var(--accent);
+}
+
+.symbol-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.symbol-item {
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+.symbol-item:hover {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.symbol-item.is-active {
+  background: rgba(59, 130, 246, 0.16);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.symbol-empty {
+  padding: 8px 10px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.symbol-selector-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+
+/* --- Sidebar symbol quick-search --------------------------------------- */
+.sidebar .symbol-search {
+  width: 100%;
+  margin-bottom: 8px;
+  font-size: 13px;
+  border-color: var(--border);
+}
+
+.symbol-quick-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.symbol-quick-item {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.symbol-quick-item:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.symbol-quick-item.is-active {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* --- Pattern list ------------------------------------------------------ */
+.pattern-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pattern-list li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.pattern-list li:last-child {
+  border-bottom: none;
+}
 .equity-curve {
   height: 120px;
   background: var(--bg-elev);
