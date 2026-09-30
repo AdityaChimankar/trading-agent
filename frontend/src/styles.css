@@ -409,45 +409,6 @@ select:focus {
   gap: 6px;
 }
 
-.pick-has-position {
-  border-color: rgba(59, 130, 246, 0.5);
-}
-
-/* Lands with a short pop so a position you already hold is noticed on the
-   card rather than being one more muted line of text. */
-.position-chip {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: rgba(59, 130, 246, 0.12);
-  border: 1px solid rgba(59, 130, 246, 0.45);
-  border-radius: 8px;
-  color: var(--text);
-  font: inherit;
-  font-size: 12.5px;
-  padding: 6px 10px;
-  cursor: pointer;
-  animation: chip-pop 0.35s ease-out;
-}
-
-.position-chip:hover {
-  background: rgba(59, 130, 246, 0.2);
-}
-
-@keyframes chip-pop {
-  0% {
-    transform: scale(0.94);
-    opacity: 0;
-  }
-  60% {
-    transform: scale(1.02);
-    opacity: 1;
-  }
-  100% {
-    transform: scale(1);
-  }
-}
-
 .pick-head {
   display: flex;
   align-items: center;
@@ -693,60 +654,6 @@ select:focus {
   color: var(--accent);
   margin: 2px 0 4px;
   word-break: break-word;
-}
-
-/* --- Modal (position pop-out) ------------------------------------------ */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(4, 7, 10, 0.72);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  z-index: 50;
-}
-
-.modal {
-  width: min(560px, 100%);
-  max-height: 85vh;
-  overflow-y: auto;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
-  animation: modal-pop 0.18s ease-out;
-}
-
-.modal-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.modal-head h3 {
-  font-size: 16px;
-}
-
-.modal-actions {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-
-@keyframes modal-pop {
-  from {
-    transform: translateY(8px) scale(0.98);
-    opacity: 0;
-  }
-  to {
-    transform: none;
-    opacity: 1;
-  }
 }
 
 @media (max-width: 900px) {

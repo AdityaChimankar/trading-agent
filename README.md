@@ -504,10 +504,11 @@ bundle then works from the Vite dev server, from any static host, and from
 | `#/history` | Every money movement in the paper book (`wallet_transactions`) with the closed trade behind it (`trades`), plus win rate, slippage paid, best/worst trade and P&L by day. Read-only. |
 | `#/pipeline` | The three decision paths side by side, per symbol: what the rules said, what the ML model said, what the LLM said, whether they agreed, and the rupee size the plan came out at. |
 
-Top Opportunity marks any candidate you already hold with a `📌 Open` chip
-carrying its live P&L; clicking the chip pops the position out with its stop,
-target and exit recommendation, so "should I still be in this?" is answerable
-without leaving the panel.
+Top Opportunity excludes any symbol you already hold, because a second position
+in it is blocked in either direction (`risk/portfolio_risk`) — so listing it
+would be listing a trade that cannot be taken. The excluded symbols are named
+under the panel's header, so a list shorter than `n` reads as "you own some of
+these" rather than as a quiet market. Manage those from Position Monitor.
 
 The Pipeline page is the honest picture of the wiring: the ML and LLM paths are
 logged for comparison and never size or place anything, so position size comes

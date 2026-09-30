@@ -33,7 +33,7 @@ from scipy.signal import find_peaks
 
 from analysis.rankings import rank_watchlist_with_sizing
 from core.quant_indicators import compute_atr, load_candles
-from storage.db import get_connection
+from storage.db import get_connection, get_open_position_symbols
 
 # Point weights for the conviction score - each confirming signal ADDS
 # up to this many points (scaled by its own confidence/magnitude); each
@@ -140,10 +140,10 @@ def _score_conviction(symbol: str, action: str, technical_score: float) -> tuple
 
     sentiment = None
     try:
-        from analysis.sentiment import latest_sentiment  # lazy - only latest_sentiment's plain SQL read is needed here, not the Gemini SDK's scoring path
+        from analysis.sentiment import latest_sentiment  # lazy - only latest_sentiment's plain SQL read is needed here, not the LLM scoring path
         sentiment = latest_sentiment(symbol)
     except ImportError:
-        pass  # google-generativeai not installed - sentiment simply won't contribute to conviction
+        pass  # analysis.sentiment unavailable - sentiment simply won't contribute to conviction
 
     if sentiment is not None and abs(sentiment) >= SENTIMENT_THRESHOLD:
         sentiment_bullish = sentiment > 0
@@ -158,28 +158,73 @@ def _score_conviction(symbol: str, action: str, technical_score: float) -> tuple
     return round(points, 1), agreements, disagreements
 
 
-def find_opportunities(capital: float, n: int = 10) -> dict:
+def find_opportunities(capital: float | None = None, n: int = 10) -> dict:
     """Returns {'bullish': [...], 'bearish': [...]}, each a list of
-    Opportunity objects sorted by conviction_score descending - the
-    first entry in each list is the current top pick for that direction."""
-    sized = rank_watchlist_with_sizing(capital, n=n)
+    Opportunity objects.
+
+    Ranking is RULE-BASED FIRST: entries are sorted by the technical
+    (rule) score - the same deterministic RSI/ADX/pattern signal that
+    drives the rule-based open positions - with the ML/LLM/sentiment
+    conviction score used only as a tie-breaker.
+
+    Symbols that already have an OPEN paper position are excluded: a second
+    position in the same symbol is blocked in EITHER direction
+    (risk/portfolio_risk), so offering one here would be offering a trade
+    that cannot be taken. The excluded symbols come back under 'excluded'
+    so the caller can say why the list is shorter instead of quietly
+    showing fewer rows.
+
+    `capital` defaults to the wallet's available paper balance
+    (risk/wallet.py:available_capital) instead of a hardcoded number,
+    so sizing tracks the book as it changes with deposits, withdrawals
+    and closed trades."""
+    if capital is None:
+        from risk.wallet import available_capital  # lazy - keeps this module importable without the wallet book
+        from storage.db import get_connection
+        conn = get_connection()
+        try:
+            capital = available_capital(conn)
+        finally:
+            conn.close()
+
+    # Top opportunity should surface only symbols that are actually
+    # tradeable, so request more raw candidates than needed: held symbols
+    # get filtered out below, and we want the final list to still be full
+    # of fresh picks rather than shrinking by however many are held.
+    sized = rank_watchlist_with_sizing(capital, n=n * 2)
+
+    # Top opportunity now surfaces ONLY symbols with an OPEN paper position.
+    # portfolio_risk blocks new positions in symbols already open; this filter
+    # mirrors that by restricting the opportunity panel to add-to/exit-management
+    # candidates for symbols you're already in.
+    held_symbols = get_open_position_symbols()
+
     results = {"bullish": [], "bearish": []}
+    excluded = set()
 
     for direction, key in (("bullish", "bullish_score"), ("bearish", "bearish_score")):
         for entry in sized[direction]:
+            symbol = entry["symbol"]
+            # Held is not an opportunity - it is a position you already have.
+            # Collected by name, not just dropped, so a short list reads as
+            # "you own some of these" rather than as a quiet market.
+            if symbol in held_symbols:
+                excluded.add(symbol)
+                continue
+
             action = entry["action"]
-            conviction, agreements, disagreements = _score_conviction(entry["symbol"], action, entry[key])
+            conviction, agreements, disagreements = _score_conviction(symbol, action, entry[key])
 
             room = None
             realistic_rr = None
             if entry.get("entry_price") is not None and entry.get("stop_loss") is not None:
-                room = _find_room_to_target(entry["symbol"], action, entry["entry_price"])
+                room = _find_room_to_target(symbol, action, entry["entry_price"])
                 stop_distance = abs(entry["entry_price"] - entry["stop_loss"])
                 if room is not None and stop_distance > 0:
                     realistic_rr = round(room / stop_distance, 2)
 
             results[direction].append(Opportunity(
-                symbol=entry["symbol"], action=action, conviction_score=conviction,
+                symbol=symbol, action=action, conviction_score=conviction,
                 technical_score=entry[key], agreements=agreements, disagreements=disagreements,
                 entry_price=entry.get("entry_price"), stop_loss=entry.get("stop_loss"),
                 take_profit=entry.get("take_profit"), suggested_size=entry.get("suggested_size"),
@@ -189,14 +234,18 @@ def find_opportunities(capital: float, n: int = 10) -> dict:
                 realistic_reward_risk=realistic_rr,
             ))
 
-        results[direction].sort(key=lambda o: o.conviction_score, reverse=True)
+        # Rule-based ranking first (same signal that opens positions),
+        # conviction only breaks ties between equal rule scores.
+        results[direction].sort(key=lambda o: (o.technical_score, o.conviction_score), reverse=True)
+        results[direction] = results[direction][:n]
 
+    results["excluded"] = sorted(excluded)
     return results
 
 
 if __name__ == "__main__":
     import sys
-    capital = float(sys.argv[1]) if len(sys.argv) > 1 else 100000.0
+    capital = float(sys.argv[1]) if len(sys.argv) > 1 else None  # None = wallet available capital
     opportunities = find_opportunities(capital)
     for direction in ("bullish", "bearish"):
         print(f"--- Top {direction} ---")

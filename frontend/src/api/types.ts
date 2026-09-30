@@ -83,6 +83,12 @@ export interface Opportunity {
 export interface OpportunitiesResponse {
   bullish: Opportunity[]
   bearish: Opportunity[]
+  // Symbols left out of the lists above because an open position already
+  // exists in them - lets the panel explain a list shorter than `n`.
+  excluded: string[]
+  // Effective capital used for sizing - the wallet's available balance when
+  // the caller didn't pass one. Lets the panel show what money it sized with.
+  available_capital?: number
 }
 
 export interface BasePlan {
