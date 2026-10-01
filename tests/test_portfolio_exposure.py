@@ -212,7 +212,7 @@ def test_wallet_endpoint_exposes_the_notional_split(monkeypatch):
     monkeypatch.setattr(wallet_router, "ensure_wallet_settings", lambda conn: 1.0)
     monkeypatch.setattr(wallet_router, "wallet_snapshot", lambda conn: {
         "capital": 500000.0, "total_deposits": 0.0, "total_withdrawals": 0.0,
-        "realized_pnl_total": 1791.0, "book_balance": 501791.0, "open_positions": [],
+        "realized_pnl_total": 1791.0, "book_balance": 501791.0, "unified_equity": 501791.0, "open_positions": [],
     })
     monkeypatch.setattr(wallet_router, "_closed_pnl_today", lambda conn: 0.0)
     monkeypatch.setattr(wallet_router, "_recent_trades_summary", lambda conn, days: {})

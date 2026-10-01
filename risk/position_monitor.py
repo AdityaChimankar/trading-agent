@@ -191,14 +191,19 @@ def get_position_status(position: dict, current_rule_action: str = None,
 
 
 def get_all_position_statuses(fetch_current_signals: bool = True,
-                              now: datetime | None = None) -> list:
+                               now: datetime | None = None) -> list:
     """Statuses for every open position - never fewer rows than
     get_open_positions() returned; anything unreadable comes back as
     NO_DATA rather than being dropped (see get_position_status).
 
     Signal-reversal checking is optional (fetch_current_signals=False skips
     decision_agent's live computation, e.g. for a quick check that doesn't
-    need it)."""
+    need it).
+    
+    Positions are sorted by priority: SELL recommendations (stop/target/reversal)
+    first, then STALE/NO_DATA, then HOLD. This ensures actively monitored
+    positions requiring attention appear at the top.
+    """
     positions = get_open_positions()
     statuses = []
     for position in positions:
@@ -210,6 +215,17 @@ def get_all_position_statuses(fetch_current_signals: bool = True,
             except Exception:
                 current_action = None  # don't let a signal-fetch failure hide the P&L info
         statuses.append(get_position_status(position, current_rule_action=current_action, now=now))
+    
+    # Sort by priority: SELL (alert) > STALE/NO_DATA > HOLD
+    def sort_key(status):
+        if status.recommendation == "SELL":
+            return (0, status.alert_kind or "")
+        elif status.recommendation in ("STALE", "NO_DATA"):
+            return (1, status.recommendation)
+        else:  # HOLD
+            return (2, "")
+    
+    statuses.sort(key=sort_key)
     return statuses
 
 

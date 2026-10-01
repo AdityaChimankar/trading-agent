@@ -174,16 +174,16 @@ def find_opportunities(capital: float | None = None, n: int = 10) -> dict:
     so the caller can say why the list is shorter instead of quietly
     showing fewer rows.
 
-    `capital` defaults to the wallet's available paper balance
-    (risk/wallet.py:available_capital) instead of a hardcoded number,
+    `capital` defaults to the wallet's unified equity (fixed book + float)
+    (risk/wallet.py:available_equity) instead of a hardcoded number,
     so sizing tracks the book as it changes with deposits, withdrawals
     and closed trades."""
     if capital is None:
-        from risk.wallet import available_capital  # lazy - keeps this module importable without the wallet book
+        from risk.wallet import available_equity  # lazy - keeps this module importable without the wallet book
         from storage.db import get_connection
         conn = get_connection()
         try:
-            capital = available_capital(conn)
+            capital = available_equity(conn)
         finally:
             conn.close()
 

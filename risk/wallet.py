@@ -222,6 +222,25 @@ def available_capital(conn) -> float:
     return round(capital + float(dep["v"]) - float(wd["v"]) + float(realized["v"]), 2)
 
 
+def available_equity(conn) -> float:
+    """Unified equity: fixed book balance + live open-position P&L (float).
+    
+    This represents the total paper account value if all positions were
+    closed at current marks. Use this for position sizing when you want
+    sizing to reflect the full account equity including unrealized gains/losses.
+    
+    The fixed book (available_capital) is still the conservative choice for
+    risk budgeting; this is the aggressive/real-time choice for sizing that
+    tracks the live account value.
+    """
+    book = available_capital(conn)
+    from risk.position_monitor import get_all_position_statuses
+    
+    statuses = get_all_position_statuses(fetch_current_signals=False)
+    float_pnl = sum(s.pnl for s in statuses if s.pnl is not None)
+    return round(book + float_pnl, 2)
+
+
 def wallet_snapshot(conn) -> dict:
     """Everything the live wallet endpoint needs, in one query pass.
 
@@ -246,11 +265,17 @@ def wallet_snapshot(conn) -> dict:
     total_deposits = round(float(dep["COALESCE(SUM(amount), 0)"]), 2)
     total_withdrawals = round(float(withdrawals["COALESCE(SUM(amount), 0)"]), 2)
 
+    open_positions = get_all_position_statuses(fetch_current_signals=True)
+    float_pnl = sum(s.pnl for s in open_positions if s.pnl is not None)
+    book_balance = round(capital + total_deposits - total_withdrawals + realized_pnl_total, 2)
+    unified_equity = round(book_balance + float_pnl, 2)
+
     return {
         "capital": capital,
         "total_deposits": total_deposits,
         "total_withdrawals": total_withdrawals,
         "realized_pnl_total": realized_pnl_total,
-        "book_balance": round(capital + total_deposits - total_withdrawals + realized_pnl_total, 2),
-        "open_positions": get_all_position_statuses(fetch_current_signals=True),
+        "book_balance": book_balance,
+        "unified_equity": unified_equity,
+        "open_positions": open_positions,
     }

@@ -59,6 +59,7 @@ def wallet():
             "total_withdrawals": snap["total_withdrawals"],
             "realized_pnl_total": snap["realized_pnl_total"],
             "book_balance": snap["book_balance"],
+            "unified_equity": snap["unified_equity"],
             **exposure_summary(snap["book_balance"]),
         }
 
