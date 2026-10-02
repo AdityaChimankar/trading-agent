@@ -1,46 +1,29 @@
 """
-Replays stored historical candles through evaluate_signals() - the
-same rule function the live agent uses - using only data available up
-to each point (no lookahead). For each BUY/SELL signal, checks what
-price actually did over the next N candles and scores the outcome.
+Replays stored historical candles through the trend-following strategy
+using simulate_trades() with ATR-based dynamic exits (stop loss, take profit,
+trailing stop). Uses only data available up to each point (no lookahead).
 
-PERFORMANCE NOTE: indicators and patterns are precomputed ONCE per
-symbol (vectorized), not recomputed at every step. Recomputing RSI/
-ATR/ADX/patterns from scratch at each of n steps is O(n) work done n
-times = O(n^2) - fine for one stock, but crawls at 500 symbols x ~19k
-candles/year each. Precomputing is O(n) total per symbol because RSI/
-ATR/ADX/patterns only ever look backward, so a value computed once
-over the full series is identical to recomputing it on a window ending
-at that same point - just far cheaper.
-
-To reach a statistically meaningful sample (500+ trades) or to scale
-to hundreds of symbols, run across your full watchlist:
+To run across your full watchlist:
   python -m research.backtest RELIANCE TCS INFY ...
   python -m research.backtest --all
 
-KNOWN LIMITATION: historical sentiment is set to neutral (0.0) here,
-since news isn't reliably backfilled candle-by-candle the way price
-is. This backtest validates the RSI/ADX/pattern logic in isolation.
+Run self-test to verify fast path matches reference:
+  python -m research.backtest --selftest [symbols]
 """
 import sys
 import time
 import pandas as pd
 from core.signals import (
-    LOOKBACK_MIN, FORWARD_WINDOW, SWING_ORDER, NEUTRAL_SENTIMENT,
-    SLIPPAGE, PATTERN_COLS_BULLISH, PATTERN_COLS_BEARISH, DEFAULT_PARAMS,
-    prepare_symbol_series, precompute_pattern_bias_codes, vectorized_evaluate,
-    _simulate_trades_reference, simulate_trades, verify_fast_path_matches_reference,
+    LOOKBACK_MIN, MAX_HOLD_CANDLES, SLIPPAGE,
+    prepare_symbol_series, simulate_trades, verify_fast_path_matches_reference,
     MAX_WORKERS,
 )
 from storage.db import get_connection
-from strategy.decision_agent import evaluate_signals
 
 
 def collect_trades(symbol: str, candle_limit: int = 20000) -> list:
     """Runs the backtest loop for one symbol with DEFAULT parameters
-    over its FULL history - kept for backward compatibility with
-    existing single/multi-symbol backtest.py usage. Internally now
-    just prepare + simulate with no param overrides and no range limit."""
+    over its FULL history."""
     prepared = prepare_symbol_series(symbol, candle_limit)
     if prepared is None:
         return []
@@ -54,15 +37,6 @@ def summarize(label: str, trades: list) -> dict:
     IMPORTANT about total_return_pct: this is the SUM of individual
     trade returns (as if each trade used a fixed, separate, non-
     reinvested amount of capital), NOT a compounded portfolio return.
-    Sequential 100%-reinvestment compounding only makes sense if trades
-    never overlap in time and never span more than one symbol - neither
-    holds for run_multi_backtest's pooled, multi-symbol trade lists.
-    Naive compounding at trade counts in the hundreds of thousands
-    produces absurd numbers (e.g. 10^23%) that look like a miracle
-    strategy but are actually a broken metric, not a good one - this
-    was caught exactly that way during development. The additive sum
-    stays honest and bounded at any trade count or overlap pattern;
-    read it as "expectancy x number of trades", not portfolio growth.
     """
     if not trades:
         print(f"{label}: no signals fired - thresholds may be too strict, or too little history.")
@@ -78,11 +52,16 @@ def summarize(label: str, trades: list) -> dict:
     sharpe = returns.mean() / returns.std() if returns.std() > 0 else 0.0
 
     # Additive cumulative curve for drawdown - stable and interpretable
-    # at any trade count, unlike a compounded (cumprod) curve.
     cumulative_additive = returns.cumsum()
     running_max = cumulative_additive.cummax()
     drawdown = cumulative_additive - running_max
     max_drawdown = drawdown.min()
+
+    # Exit reason breakdown
+    exit_reasons = {}
+    for t in trades:
+        reason = t.get("exit_reason", "UNKNOWN")
+        exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
 
     result = {
         "label": label, "trades": len(trades),
@@ -93,6 +72,7 @@ def summarize(label: str, trades: list) -> dict:
         "sharpe_like_ratio": round(sharpe, 3),
         "max_drawdown_pct": round(max_drawdown * 100, 2),
         "total_return_pct": round(returns.sum() * 100, 2),
+        "exit_reasons": exit_reasons,
     }
 
     print(f"\n--- Backtest results: {label} ---")
@@ -150,8 +130,7 @@ def get_all_watchlist_symbols() -> list:
 def run_selftest(symbols: list) -> None:
     """Runs verify_fast_path_matches_reference() across real symbols -
     lets you independently confirm the vectorized fast path matches
-    the slow per-candle reference on YOUR actual market data, not just
-    the synthetic data this was checked against during development."""
+    the slow per-candle reference on YOUR actual market data."""
     all_passed = True
     for symbol in symbols:
         matches = verify_fast_path_matches_reference(symbol)

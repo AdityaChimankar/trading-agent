@@ -1,9 +1,8 @@
 """
-Walk-forward optimizer - re-fits evaluate_signals()'s thresholds
-(RSI oversold/overbought, ADX trend gate) per stock on a rolling
-TRAIN window, then tests the chosen parameters on the immediately
-FOLLOWING window it has never seen (out-of-sample). Slides forward
-and repeats.
+Walk-forward optimizer - re-fits trend-following strategy thresholds
+per stock on a rolling TRAIN window, then tests the chosen parameters
+on the immediately FOLLOWING window it has never seen (out-of-sample).
+Slides forward and repeats.
 
 WHY THIS MATTERS: picking the single best-performing parameters on
 your WHOLE historical dataset and reporting that performance is not
@@ -11,19 +10,6 @@ a real backtest - it's curve-fitting, because you're allowed to see
 the future when choosing parameters. Walk-forward avoids this: every
 out-of-sample result was scored using parameters chosen ONLY from
 data before that window started.
-
-PERFORMANCE: a naive version of this (looping evaluate_signals() once
-per candle, per parameter combo, per fold, per symbol) measured
-~7 hours projected for 500 symbols. This version precomputes pattern
-bias ONCE per symbol (independent of parameters) and evaluates each
-parameter combo as vectorized NumPy array operations instead of a
-Python loop - correctness verified against the original per-candle
-loop function before shipping (see verify_vectorized_matches_loop()).
-
-Usage:
-  python -m research.walk_forward_optimizer RELIANCE              # single symbol, verbose
-  python -m research.walk_forward_optimizer RELIANCE TCS INFY      # multiple symbols
-  python -m research.walk_forward_optimizer --all                  # everything in your watchlist, parallelized
 """
 import sys
 import time
@@ -31,38 +17,29 @@ import itertools
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
-# precompute_pattern_bias_codes and vectorized_evaluate live in core/signals.py
-# and are re-used here rather than redefined. They were previously
-# duplicated verbatim in both files, which meant any fix to one could
-# silently leave the other (and the optimizer's results) wrong.
+
 from core.signals import (
-    prepare_symbol_series, simulate_trades, summarize,
-    precompute_pattern_bias_codes, vectorized_evaluate,
-    DEFAULT_PARAMS, FORWARD_WINDOW, LOOKBACK_MIN, SLIPPAGE,
+    prepare_symbol_series, simulate_trades,
+    DEFAULT_PARAMS, MAX_HOLD_CANDLES, LOOKBACK_MIN, SLIPPAGE,
 )
+from research.backtest import summarize
 from storage.db import get_watchlist_symbols
 
 TRAIN_CANDLES = 3750   # ~50 trading days of 5-min candles
 TEST_CANDLES = 750     # ~10 trading days - out-of-sample window per fold
-MIN_TRAIN_TRADES = 15  # skip a parameter combo on train if it fires too few trades to trust
+MIN_TRAIN_TRADES = 10  # skip a parameter combo on train if it fires too few trades to trust
 
-# Capped rather than defaulting to os.cpu_count(): each worker process
-# has to reload scipy's compiled linear algebra libraries from scratch
-# on startup, and spawning many of these at once can exceed Windows'
-# default page file size ("DLL load failed... paging file is too
-# small"), especially with scipy/numpy/sklearn all loading together.
-# Since this runs vectorized and already completes 500 symbols in well
-# under a minute serially, a small worker count costs little speed
-# while avoiding that failure mode. Raise this only if you've also
-# increased your system's virtual memory / page file size.
 MAX_WORKERS = 4
 
 # Grid kept intentionally modest - a huge grid on a small train window
 # risks picking noise, not a real pattern.
 PARAM_GRID = {
-    "rsi_oversold": [25, 30, 35],
-    "rsi_overbought": [65, 70, 75],
-    "adx_threshold": [15, 20, 25],
+    "adx_threshold": [20, 25, 30],
+    "atr_sl_mult": [1.5, 2.0, 2.5],
+    "atr_tp_mult": [3.0, 4.0, 5.0, 6.0],
+    "trail_mult": [1.0, 1.5, 2.0, 3.0],
+    "use_trailing": [True, False],
+    "min_atr_pct": [0.0003, 0.0005, 0.0008],
 }
 
 def _grid_combinations() -> list:
@@ -70,93 +47,25 @@ def _grid_combinations() -> list:
     return [dict(zip(keys, values)) for values in itertools.product(*PARAM_GRID.values())]
 
 
-def vectorized_trades(prepared: dict, pattern_codes: np.ndarray, params: dict, index_range: tuple) -> list:
-    """Vectorized equivalent of simulate_trades() - computes actions for
-    a whole range as arrays, then builds trade dicts only for the
-    (much smaller) set of actual BUY/SELL indices."""
-    start, end = index_range
-    start = max(LOOKBACK_MIN, start)
-    end = min(prepared["length"] - FORWARD_WINDOW, end)
-    if start >= end:
-        return []
-
-    rsi_slice = prepared["rsis"][start:end]
-    adx_slice = prepared["adxs"][start:end]
-    pattern_slice = pattern_codes[start:end]
-    actions = vectorized_evaluate(rsi_slice, adx_slice, pattern_slice, params)
-
-    trade_idx = np.nonzero(actions != 0)[0]
-    if len(trade_idx) == 0:
-        return []
-
-    closes, opens, timestamps = prepared["closes"], prepared["opens"], prepared["timestamps"]
-    trades = []
-    for local_i in trade_idx:
-        i = start + local_i
-        # Same entry/exit/slippage convention as backtest.simulate_trades()
-        entry_price, exit_price = opens[i + 1], closes[i + FORWARD_WINDOW]
-        pct_return = (exit_price - entry_price) / entry_price
-        if actions[local_i] == 2:
-            pct_return = -pct_return
-        pct_return -= SLIPPAGE
-        trades.append({
-            "symbol": prepared["symbol"], "timestamp": timestamps[i],
-            "action": "BUY" if actions[local_i] == 1 else "SELL",
-            "entry": entry_price, "exit": exit_price, "return_pct": pct_return,
-        })
-    return trades
-
-
-def vectorized_score(prepared: dict, pattern_codes: np.ndarray, params: dict, index_range: tuple) -> tuple:
-    """Fast path for grid search - returns (total_return, trade_count)
-    without building trade dicts. Used only to RANK combos on train;
-    the winning combo's real trades are built once via vectorized_trades()."""
-    start, end = index_range
-    start = max(LOOKBACK_MIN, start)
-    end = min(prepared["length"] - FORWARD_WINDOW, end)
-    if start >= end:
+def score_trades(prepared: dict, params: dict, index_range: tuple) -> tuple:
+    """Returns (total_return, trade_count) for a parameter combo on a range.
+    Uses the full simulate_trades with dynamic exits for accurate scoring."""
+    trades = simulate_trades(prepared, params=params, index_range=index_range)
+    if not trades:
         return float("-inf"), 0
-
-    rsi_slice = prepared["rsis"][start:end]
-    adx_slice = prepared["adxs"][start:end]
-    pattern_slice = pattern_codes[start:end]
-    actions = vectorized_evaluate(rsi_slice, adx_slice, pattern_slice, params)
-
-    # Entry at the NEXT candle's open, exit FORWARD_WINDOW candles later,
-    # minus slippage - identical convention to simulate_trades(), so the
-    # combo this ranks as "best" is scored on the same returns the
-    # backtest would report for it.
-    opens_entry = prepared["opens"][start + 1:end + 1]
-    closes_exit = prepared["closes"][start + FORWARD_WINDOW:end + FORWARD_WINDOW]
-    pct_returns = (closes_exit - opens_entry) / opens_entry
-    pct_returns = np.where(actions == 2, -pct_returns, pct_returns) - SLIPPAGE
-
-    mask = actions != 0
-    count = int(mask.sum())
+    returns = np.array([t["return_pct"] for t in trades])
+    count = len(returns)
     if count < MIN_TRAIN_TRADES:
         return float("-inf"), count
-    return float(pct_returns[mask].sum()), count
+    return float(returns.sum()), count
 
 
-def verify_vectorized_matches_loop(prepared: dict, pattern_codes: np.ndarray, index_range: tuple, params: dict = None) -> bool:
-    """Correctness check: vectorized_trades() must produce IDENTICAL
-    trades to the original per-candle simulate_trades() loop. Run this
-    before trusting the fast path on real data - see the test in the
-    conversation history for how this was validated during development."""
-    vec = vectorized_trades(prepared, pattern_codes, params, index_range)
-    loop = simulate_trades(prepared, params=params, index_range=index_range)
-    vec_key = [(t["timestamp"], t["action"], round(t["return_pct"], 10)) for t in vec]
-    loop_key = [(t["timestamp"], t["action"], round(t["return_pct"], 10)) for t in loop]
-    return vec_key == loop_key
-
-
-def optimize_fold(prepared: dict, pattern_codes: np.ndarray, train_range: tuple) -> dict:
-    """Grid search on the TRAIN range only, using the fast vectorized
-    scorer. Returns the best params found, or None if nothing cleared
-    MIN_TRAIN_TRADES."""
+def optimize_fold(prepared: dict, train_range: tuple) -> dict:
+    """Grid search on the TRAIN range only. Returns the best params found,
+    or None if nothing cleared MIN_TRAIN_TRADES."""
     best_params, best_score = None, float("-inf")
     for params in _grid_combinations():
-        score, _ = vectorized_score(prepared, pattern_codes, params, train_range)
+        score, _ = score_trades(prepared, params, train_range)
         if score > best_score:
             best_score, best_params = score, params
     return best_params
@@ -174,15 +83,13 @@ def run_walk_forward(symbol: str, verbose: bool = True) -> dict:
             print(f"{symbol}: only {n} candles - need at least {fold_size} for one walk-forward fold.")
         return {}
 
-    pattern_codes = precompute_pattern_bias_codes(prepared)
-
     optimized_oos_trades, default_oos_trades, fold_params_log = [], [], []
     start = 0
     while start + fold_size <= n:
         train_range = (start, start + TRAIN_CANDLES)
         test_range = (start + TRAIN_CANDLES, start + TRAIN_CANDLES + TEST_CANDLES)
 
-        best_params = optimize_fold(prepared, pattern_codes, train_range)
+        best_params = optimize_fold(prepared, train_range)
         if best_params is None:
             if verbose:
                 print(f"  Fold {len(fold_params_log)+1}: no combo cleared {MIN_TRAIN_TRADES} min "
@@ -190,8 +97,8 @@ def run_walk_forward(symbol: str, verbose: bool = True) -> dict:
             start += TEST_CANDLES
             continue
 
-        oos_optimized = vectorized_trades(prepared, pattern_codes, best_params, test_range)
-        oos_default = vectorized_trades(prepared, pattern_codes, None, test_range)
+        oos_optimized = simulate_trades(prepared, params=best_params, index_range=test_range)
+        oos_default = simulate_trades(prepared, params=None, index_range=test_range)
 
         optimized_oos_trades.extend(oos_optimized)
         default_oos_trades.extend(oos_default)
@@ -230,7 +137,7 @@ def _summarize_quiet(trades: list) -> dict:
     return {
         "trades": len(trades),
         "win_rate": round(len(wins) / len(returns) * 100, 1),
-        "total_return_pct": round(((1 + returns).cumprod().iloc[-1] - 1) * 100, 2),
+        "total_return_pct": round(returns.sum() * 100, 2),
     }
 
 
@@ -270,7 +177,6 @@ def run_walk_forward_multi(symbols: list, parallel: bool = True) -> dict:
     elapsed = time.time() - start_time
     print(f"\nCompleted {len(per_symbol_results)}/{len(symbols)} symbols in {elapsed:.1f}s")
 
-    all_optimized_trades, all_default_trades = [], []
     helped_count, hurt_count = 0, 0
     for symbol, result in per_symbol_results.items():
         opt_trades = result["optimized"].get("trades", 0)
@@ -291,22 +197,22 @@ def run_walk_forward_multi(symbols: list, parallel: bool = True) -> dict:
 
 
 def run_selftest(symbols: list):
-    """Runs verify_vectorized_matches_loop() across real symbols and
+    """Runs verify_fast_path_matches_loop() across real symbols and
     several parameter combos - lets you independently confirm the fast
     vectorized path matches the original per-candle loop on YOUR
     actual market data, not just the synthetic data this was
     originally verified against during development."""
+    from core.signals import verify_fast_path_matches_reference
     all_passed = True
     for symbol in symbols:
         prepared = prepare_symbol_series(symbol)
         if prepared is None:
             continue
-        pattern_codes = precompute_pattern_bias_codes(prepared)
-        test_range = (0, prepared["length"] - FORWARD_WINDOW)
+        test_range = (LOOKBACK_MIN, prepared["length"] - 2)
 
         symbol_passed = True
         for params in _grid_combinations():
-            if not verify_vectorized_matches_loop(prepared, pattern_codes, test_range, params):
+            if not verify_fast_path_matches_reference(symbol, params):
                 print(f"  {symbol}: MISMATCH with params={params}")
                 symbol_passed = False
                 all_passed = False

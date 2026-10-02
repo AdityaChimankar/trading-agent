@@ -173,7 +173,19 @@ def _collect(symbol: str, max_bars: int, stop_mult: float = STOP_MULT) -> dict |
     # --- shipped signal reference (same exits, non-overlapping) ------------
     pcode = precompute_pattern_bias_codes(prepared)
     lo, hi = LOOKBACK_MIN, n - 2
-    actions = vectorized_evaluate(prepared["rsis"][lo:hi], prepared["adxs"][lo:hi], pcode[lo:hi], None)
+    actions = vectorized_evaluate(
+        prepared["ema_fast"][lo:hi],
+        prepared["ema_slow"][lo:hi],
+        prepared["ema_pullback"][lo:hi],
+        prepared["htf_trend_up"][lo:hi],
+        prepared["htf_trend_down"][lo:hi],
+        prepared["adxs"][lo:hi],
+        prepared["atrs"][lo:hi],
+        prepared["closes"][lo:hi],
+        prepared["rsis"][lo:hi],
+        prepared["volume_ratio"][lo:hi],
+        None
+    )
     shipped_next = LOOKBACK_MIN
     for local_i in np.nonzero(actions != 0)[0]:
         i = lo + int(local_i)

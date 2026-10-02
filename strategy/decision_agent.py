@@ -1,6 +1,6 @@
 """
 Combines three independent signals into a single gated decision:
-  1. Quant (RSI/ADX) - deterministic momentum + trend strength
+  1. Quant (RSI/ADX/MACD) - deterministic momentum + trend strength + trend direction
   2. Sentiment (LLM) - news-driven bias
   3. Chart patterns - deterministic candlestick/swing patterns
 
@@ -9,9 +9,10 @@ evaluate_signals() is the pure rule function - both live trading
 results actually reflect what the live agent would have done.
 """
 from datetime import datetime
+import pandas as pd
 from core.freshness import split_stale, warn_stale
 from core.pattern_detection import detect_patterns
-from core.quant_indicators import latest_indicators
+from core.quant_indicators import latest_indicators, compute_macd
 from core.logging_config import get_logger
 from storage.db import get_connection, get_watchlist_symbols
 
@@ -21,8 +22,11 @@ logger = get_logger(__name__)
 
 def evaluate_signals(
     rsi: float, adx: float, sentiment: float, pattern_bias: str, patterns_found: list,
+    macd_hist: float = 0.0, volume_ratio: float = 1.0,
     rsi_oversold: float = 30, rsi_overbought: float = 70, adx_threshold: float = 20,
-    pattern_confirm_buy_rsi: float = 45, pattern_confirm_sell_rsi: float = 55,
+    pattern_confirm_buy_rsi: float = 50, pattern_confirm_sell_rsi: float = 50,
+    macd_trend_filter: bool = False, volume_confirm: bool = False,
+    min_volume_ratio: float = 1.0,
 ) -> tuple:
     """Pure decision logic - no DB or I/O. Returns (action, rationale).
 
@@ -34,20 +38,40 @@ def evaluate_signals(
     """
     pattern_note = f", patterns: {patterns_found}" if patterns_found else ""
 
-    # Gate: only trade when there's an actual trend (ADX) to avoid
+    # Gate 1: only trade when there's an actual trend (ADX) to avoid
     # chasing signals in a choppy, directionless market
     if adx < adx_threshold:
-        return "HOLD", f"ADX {adx} - no clear trend, sitting out{pattern_note}"
-    elif rsi < rsi_oversold and sentiment > 0.3 and pattern_bias != "bearish":
-        return "BUY", f"RSI {rsi} oversold + positive sentiment ({sentiment:.2f}) + {pattern_bias} pattern bias{pattern_note}"
+        return "HOLD", f"ADX {adx:.1f} < {adx_threshold} - no clear trend, sitting out{pattern_note}"
+
+    # Gate 2: MACD trend direction filter - only trade WITH the trend
+    if macd_trend_filter:
+        if macd_hist > 0 and pattern_bias == "bearish":
+            return "HOLD", f"MACD bullish ({macd_hist:.3f}) conflicts with bearish pattern{pattern_note}"
+        if macd_hist < 0 and pattern_bias == "bullish":
+            return "HOLD", f"MACD bearish ({macd_hist:.3f}) conflicts with bullish pattern{pattern_note}"
+
+    # Gate 3: Volume confirmation - require above-average volume
+    if volume_confirm and volume_ratio < min_volume_ratio:
+        return "HOLD", f"Volume ratio {volume_ratio:.2f} < {min_volume_ratio} - weak conviction{pattern_note}"
+
+    # Strategy 1: RSI oversold/overbought with sentiment confirmation (live only)
+    if rsi < rsi_oversold and sentiment > 0.3 and pattern_bias != "bearish":
+        return "BUY", f"RSI {rsi:.1f} oversold + positive sentiment ({sentiment:.2f}) + {pattern_bias} pattern{pattern_note}"
     elif rsi > rsi_overbought and sentiment < -0.3 and pattern_bias != "bullish":
-        return "SELL", f"RSI {rsi} overbought + negative sentiment ({sentiment:.2f}) + {pattern_bias} pattern bias{pattern_note}"
-    elif pattern_bias == "bullish" and rsi < pattern_confirm_buy_rsi and sentiment >= 0:
-        return "BUY", f"Bullish pattern ({patterns_found}) confirmed by RSI {rsi} and non-negative sentiment"
-    elif pattern_bias == "bearish" and rsi > pattern_confirm_sell_rsi and sentiment <= 0:
-        return "SELL", f"Bearish pattern ({patterns_found}) confirmed by RSI {rsi} and non-positive sentiment"
-    else:
-        return "HOLD", f"RSI {rsi}, sentiment {sentiment:.2f}, pattern bias {pattern_bias} - no agreement"
+        return "SELL", f"RSI {rsi:.1f} overbought + negative sentiment ({sentiment:.2f}) + {pattern_bias} pattern{pattern_note}"
+
+    # Strategy 2: Pattern-confirmed entries with tighter RSI confluence
+    # BUY: bullish pattern + RSI not overbought + MACD bullish or neutral
+    if pattern_bias == "bullish" and rsi < pattern_confirm_buy_rsi and sentiment >= 0:
+        if not macd_trend_filter or macd_hist >= 0:
+            return "BUY", f"Bullish pattern ({patterns_found}) + RSI {rsi:.1f} < {pattern_confirm_buy_rsi} + MACD {macd_hist:.3f}{pattern_note}"
+
+    # SELL: bearish pattern + RSI not oversold + MACD bearish or neutral
+    if pattern_bias == "bearish" and rsi > pattern_confirm_sell_rsi and sentiment <= 0:
+        if not macd_trend_filter or macd_hist <= 0:
+            return "SELL", f"Bearish pattern ({patterns_found}) + RSI {rsi:.1f} > {pattern_confirm_sell_rsi} + MACD {macd_hist:.3f}{pattern_note}"
+
+    return "HOLD", f"RSI {rsi:.1f}, ADX {adx:.1f}, MACD {macd_hist:.3f}, vol {volume_ratio:.2f}, sentiment {sentiment:.2f}, pattern {pattern_bias} - no agreement"
 
 
 def decide(symbol: str) -> dict:
@@ -63,15 +87,34 @@ def decide(symbol: str) -> dict:
     pattern_result = detect_patterns(symbol)
     pattern_bias = pattern_result["bias"]
     patterns_found = pattern_result["patterns"]
-    rsi, adx = indicators["rsi"], indicators["adx"]
+    rsi, adx, atr = indicators["rsi"], indicators["adx"], indicators["atr"]
 
-    action, rationale = evaluate_signals(rsi, adx, sentiment, pattern_bias, patterns_found)
+    # Compute MACD histogram for trend direction filter
+    from core.quant_indicators import load_candles, compute_macd
+    df = load_candles(symbol, limit=50)
+    _, _, macd_hist = compute_macd(df)
+    macd_hist_val = float(macd_hist.iloc[-1]) if len(macd_hist) > 0 and not pd.isna(macd_hist.iloc[-1]) else 0.0
+
+    # Compute volume ratio (current vs 20-period average)
+    vol_ratio = 1.0
+    if len(df) >= 20:
+        avg_vol = df["volume"].rolling(20).mean().iloc[-1]
+        curr_vol = df["volume"].iloc[-1]
+        if avg_vol > 0:
+            vol_ratio = float(curr_vol / avg_vol)
+
+    action, rationale = evaluate_signals(
+        rsi, adx, sentiment, pattern_bias, patterns_found,
+        macd_hist=macd_hist_val, volume_ratio=vol_ratio
+    )
 
     return {
         "symbol": symbol, "action": action, "rationale": rationale,
-        "rsi": rsi, "adx": adx, "atr": indicators["atr"],
+        "rsi": rsi, "adx": adx, "atr": atr,
         "sentiment_score": sentiment,
         "patterns": ",".join(patterns_found) if patterns_found else None,
+        "macd_hist": macd_hist_val,
+        "volume_ratio": vol_ratio,
         # Timestamp of the candle this decision was made on (None if the
         # indicator read failed) - see run_decision_cycle().
         "signal_timestamp": indicators.get("timestamp"),
