@@ -155,6 +155,22 @@ the rule-based call at the same moment, and write to *separate* `llm_signals` /
 candidate replacement until its agreement rate and real outcomes justify it.
 Separate tables make that comparison impossible to contaminate.
 
+`ml_decision_agent_v2.py` is the enhanced ML path using walk-forward validated
+model with session/regime features and confidence thresholding. It logs to the
+same `ml_signals` table for comparison.
+
+### Fixed: `strategy/` → `research/` inversion (now via `core/signals.py`)
+
+Previously three strategy modules imported shared helpers from `research/backtest.py`:
+- `strategy/ml_features.py` → `prepare_symbol_series`, `precompute_pattern_bias_codes`
+- `strategy/ml_decision_agent.py` → the same two
+- `strategy/candidates.py`, `strategy/session_features.py` → `prepare_symbol_series` constants (`SWING_ORDER`, `DEFAULT_PARAMS`, `FORWARD_WINDOW`, `SLIPPAGE`)
+
+This was backwards — validation code should depend on the strategy. **Fixed by
+lifting the shared pieces into `core/signals.py`** — now both `strategy/` and
+`research/` import from `core/`, with no inverted edge. See
+[ARCHITECTURE.md](ARCHITECTURE.md#fixed-inversion-strategy--research-now-resolved-via-coresignalspy).
+
 ### Thresholds are parameters with the tested values as defaults
 
 `evaluate_signals(rsi_oversold=30, rsi_overbought=70, adx_threshold=20, ...)` —
@@ -281,7 +297,7 @@ was individually tested with known price/level combinations first.
 
 ### Transaction costs live in exactly one place
 
-`research/backtest.SLIPPAGE` (0.05%) is deducted from every simulated trade, and
+`core/signals.SLIPPAGE` (0.05%) is deducted from every simulated trade, and
 `strategy/ml_features.py`'s labels use the same constant so training and
 backtesting agree.
 
@@ -289,7 +305,7 @@ backtesting agree.
 entry-price convention (next candle's open + slippage) had already silently
 drifted between `backtest.py` and `walk_forward_optimizer.py` — the two
 implementations disagreed about what a fill was. Both now import the shared
-definition from `research/backtest.py`. Live P&L in `position_monitor.py` still
+definition from `core/signals.py`. Live P&L in `position_monitor.py` still
 values open positions at the raw last price, so its numbers remain slightly
 optimistic versus a real fill.
 
@@ -388,8 +404,9 @@ implementation of the same trade-outcome walk.
 - The ML model uses scikit-learn's `HistGradientBoostingClassifier`, not
   LightGBM/XGBoost — a deliberate substitution (same histogram-based gradient
   boosting family) made because the development environment could not install
-  the other two. No model versioning or drift detection: each training run
-  overwrites `models/ml_model.joblib`.
+  the other two.
+- `core/ml_versioning.py` now provides model registry and drift detection — each
+  training run versions the artifact instead of overwriting `models/ml_model.joblib`.
 - `walk_forward_optimizer.py` tunes **entry thresholds only** and therefore
   cannot validate the exit logic, which is where the largest measured gain was.
   The take-profit removal is backed by two independent in-sample measurements
@@ -412,11 +429,8 @@ implementation of the same trade-outcome walk.
   aggregation logic can now be driven directly, though: `on_ticks` and
   `_collect_buckets` take synthetic tick dicts, which is how the candle-loss
   regression above was confirmed. Watch the terminal output during market hours.
-- No process supervisor. `ingest/live_ticker.py` is a long-lived process that
-  nothing restarts: if it is killed, data stops until it is run again. The
-  scheduler's repair job fills the hole meanwhile and the post-close sweep
-  makes the session whole, but supervision is still the missing piece. The
-  watchdog also cannot recover from an expired access token — it retries and
-  fails forever, which is why `on_noreconnect` shouts.
+- `scripts/supervisor.py` exists but is experimental — if the ticker process is
+  killed, data stops until it restarts. The scheduler's repair job fills the hole
+  meanwhile and the post-close sweep makes the session whole.
 - SEBI algo-trading disclosure rules apply once this moves from personal signals
   to automated order placement. Out of scope for this POC.

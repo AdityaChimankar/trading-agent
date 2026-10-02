@@ -122,8 +122,16 @@ trading-agent/
 │   ├── freshness.py                 Market-session + candle staleness — "is this data live?"
 │   ├── quant_indicators.py          RSI, ATR, ADX
 │   ├── pattern_detection.py         Candlestick + swing patterns
-│   └── position_sizing.py           ATR-based size, stop-loss; no take-profit by default
+│   ├── position_sizing.py           ATR-based size, stop-loss; no take-profit by default
 │                                    (measured), volatility-aware risk scaling
+│   ├── signals.py                   Shared signal/backtest primitives (SLIPPAGE, DEFAULT_PARAMS,
+│                                    prepare_symbol_series, vectorized_evaluate, simulate_trades)
+│   ├── ml_versioning.py             Model registry & drift detection
+│   ├── llm_client.py                OpenRouter client with circuit breaker
+│   ├── circuit_breaker.py           Circuit breaker pattern for external APIs
+│   ├── logging_config.py            Structured logging setup
+│   ├── shutdown.py                  Graceful shutdown handling
+│   └── config.py                    Centralized configuration (pydantic-settings)
 │
 ├── ingest/                         Getting market data in
 │   ├── kite_auth.py                 Daily Zerodha login -> .access_token
@@ -142,40 +150,48 @@ trading-agent/
 ├── analysis/                       Read-only intelligence over stored data
 │   ├── sentiment.py                 OpenRouter sentiment scoring on tagged news
 │   ├── rankings.py                  Watchlist-wide bullish/bearish scoring
-│   ├── opportunity_finder.py        Conviction-ranked top picks
+│   ├── opportunity_finder.py        Conviction-ranked top picks (uses HybridStrategy)
 │   ├── technical_summary.py         Human-readable indicator read
 │   └── digest.py                    End-of-day narrative summary
 │
 ├── strategy/                       The three decision paths + experimental candidates
 │   ├── decision_agent.py            Rule-based — THE tested path
 │   ├── llm_decision_agent.py        OpenRouter decisions, parallel comparison
-│   ├── ml_decision_agent.py         Trained-model decisions, parallel comparison
+│   ├── ml_decision_agent.py         Trained-model decisions (original), parallel comparison
+│   ├── ml_decision_agent_v2.py      Enhanced ML decisions with session/regime features
 │   ├── ml_features.py               Feature engineering (no lookahead, verified)
 │   ├── train_ml_model.py            Chronological train/test split + trade simulation
+│   ├── train_ml_model_v2.py         Walk-forward training + confidence thresholding
 │   ├── session_features.py          Session VWAP, ATR percentile, HTF momentum, gap,
 │   │                                cost cover — causal, memoized, --selftest
 │   ├── candidates.py                Candidate entries + session/regime gates, --selftest
+│   ├── hybrid_strategy.py           Rule/ML combination modes with backtest selection
+│   ├── fast_hybrid_strategy.py      Cached, low-latency hybrid for real-time use
 │   └── shadow.py                    Logs candidate votes to strategy_signals, live
 │
 ├── risk/
 │   ├── portfolio_risk.py            Risk budget + same-symbol + correlation caps
-│   └── position_monitor.py          Live P&L and HOLD/SELL per open position
+│   ├── position_monitor.py          Live P&L and HOLD/SELL per open position
+│   └── wallet.py                    Paper wallet: equity, transactions, daily snapshots
 │
 ├── research/                       Offline validation
 │   ├── backtest.py                  Vectorized harness, --selftest
 │   ├── walk_forward_optimizer.py    Rolling out-of-sample threshold fitting
 │   ├── diagnose_edge.py             Is there any edge at all? (baseline + ablations)
-│   └── strategy_lab.py              Measures candidates vs baselines, with costs
+│   ├── strategy_lab.py              Measures candidates vs baselines, with costs
+│   └── donchian_breakout.py         Donchian channel breakout research
 │
 ├── scripts/
 │   ├── scheduler.py                 The daily automation loop
-│   └── validate_setup.py            Pre-flight check before market hours
+│   ├── validate_setup.py            Pre-flight check before market hours
+│   ├── supervisor.py                Process supervisor (experimental)
+│   └── migrate_legacy_timestamps.py One-time migration for legacy +05:30 timestamps
 │
 ├── api/                            FastAPI JSON layer — NO trading logic
 │   ├── main.py                      App, CORS, startup DB init, router registration
 │   ├── serializers.py               numpy/pandas/dataclass -> JSON-safe conversion
 │   └── routers/                     watchlist, positions, opportunities, digest, symbols,
-│                                    wallet, liveness, history, pipeline
+│                                    wallet, liveness, history, pipeline, health
 │
 ├── frontend/                       React + TypeScript + Vite dashboard
 │   └── src/                         Hash-router pages (dashboard, transactions,
@@ -255,7 +271,8 @@ python -m research.strategy_lab --n 60          # do the candidates beat random 
 python -m research.backtest --all
 python -m research.walk_forward_optimizer --all
 python -m research.backtest --selftest          # verify the fast path on YOUR data
-python -m strategy.train_ml_model --all         # optional: the ML comparison model
+python -m strategy.train_ml_model --all         # original ML model
+python -m strategy.train_ml_model_v2 --all      # enhanced ML with walk-forward
 ```
 
 `research/diagnose_edge.py` is the one to run first: it tells you whether there
@@ -360,8 +377,13 @@ Ctrl+C the rest whenever — no cleanup needed.
 | Cost-cover distribution (evidence for the "cost gating is inert" claim) | `python -m strategy.session_features --cost-cover [N]` |
 | Candidate admit-rate check | `python -m strategy.candidates [SYMBOLS...]` |
 | Shadow log candidates | automatic via scheduler, or `python -m strategy.shadow` |
-| Train the ML model | `python -m strategy.train_ml_model [SYMBOLS... \| --all]` |
-| ML decision cycle | `python -m strategy.ml_decision_agent` |
+| Train the ML model (original) | `python -m strategy.train_ml_model [SYMBOLS... \| --all]` |
+| Train the ML model (enhanced, walk-forward) | `python -m strategy.train_ml_model_v2 [SYMBOLS... \| --all]` |
+| ML decision cycle (original) | `python -m strategy.ml_decision_agent` |
+| ML decision cycle (enhanced) | `python -m strategy.ml_decision_agent_v2` |
+| Find best hybrid mode | `python -m strategy.hybrid_strategy [SYMBOLS...]` |
+| Fast hybrid cycle | `python -m strategy.fast_hybrid_strategy [SYMBOLS...]` |
+| Warm up caches | `python -m strategy.fast_hybrid_strategy --warmup [SYMBOLS...]` |
 | Digest (end of day) | `python -m analysis.digest` |
 | Dashboard API | `python -m uvicorn api.main:app --reload --port 8000` |
 | Dashboard UI | `cd frontend && npm run dev` |
@@ -381,7 +403,7 @@ Credentials live in `.env`:
 `.access_token` (gitignored, written by `ingest/kite_auth.py`) holds the daily
 Kite session. Everything else is a named constant at the top of the relevant
 module — the ones that change behaviour most are `SLIPPAGE` and `DEFAULT_PARAMS`
-in `research/backtest.py`, and the risk block in `core/position_sizing.py`:
+in `core/signals.py`, and the risk block in `core/position_sizing.py`:
 
 | Constant | Where | Meaning |
 |---|---|---|
@@ -391,7 +413,10 @@ in `research/backtest.py`, and the risk block in `core/position_sizing.py`:
 | `REWARD_RISK_RATIO` | `core/position_sizing.py` | only used when `USE_TAKE_PROFIT` is on |
 | `VOLATILITY_RISK_CUTOFF` / `VOLATILITY_RISK_FLOOR` | `core/position_sizing.py` | ATR percentile above which risk scales down, and the floor it scales to |
 | `MAX_POSITION_PCT_OF_CAPITAL` | `core/position_sizing.py` | hard cap on position value, whatever the sizing math suggests |
-| `SLIPPAGE` | `research/backtest.py` | round-trip cost every simulated trade pays. Imported (never re-declared) by the ML labels and the cost-cover gate so the three can never disagree |
+| `SLIPPAGE` | `core/signals.py` | round-trip cost every simulated trade pays. Imported (never re-declared) by the ML labels and the cost-cover gate so the three can never disagree |
+| `DEFAULT_PARAMS` | `core/signals.py` | rule-based entry/exit parameters (EMA periods, ADX threshold, RSI bounds, volume filter, ATR multiples) |
+| `FORWARD_WINDOW` | `core/signals.py` | holding horizon in candles for label generation and backtest |
+| `LOOKBACK_MIN` / `MAX_HOLD_CANDLES` | `core/signals.py` | warm-up period and max hold if no stop/target hit |
 
 The liveness layer is tuned by constants in the same style:
 
@@ -418,6 +443,10 @@ trade-offs are in **[docs/DESIGN.md](docs/DESIGN.md)**.
 - **`strategy/decision_agent.py` is the tested path.** `llm_decision_agent.py`
   and `ml_decision_agent.py` run alongside it and write to their own
   `llm_signals` / `ml_signals` tables. Neither feeds the rule-based decision.
+- **`core/signals.py` is the canonical signal implementation.** Both
+  `research/backtest.py` and `strategy/` import from here — no inverted
+  dependency. Contains `SLIPPAGE`, `DEFAULT_PARAMS`, `prepare_symbol_series`,
+  `vectorized_evaluate`, `simulate_trades` and the `--selftest` verification.
 - **SQLite runs in WAL mode, and every write loop commits per symbol.** Holding
   one write transaction across 500 symbols while making network LLM calls in
   between is what produced "database is locked".
@@ -444,6 +473,10 @@ trade-offs are in **[docs/DESIGN.md](docs/DESIGN.md)**.
   paths write to separate tables and the Pipeline page shows their calls side by
   side with their agreement, because the whole point of that separation is to
   earn trust with a track record before any of them is allowed to size a trade.
+- **Hybrid strategy selects the best mode per symbol via backtest.**
+  `strategy/hybrid_strategy.py` tests RULE_ONLY, ML_ONLY, and RULE_ML_COMBINED
+  modes and caches the best performer. `strategy/fast_hybrid_strategy.py` adds
+  precomputed indicator/sentiment caches for <50ms latency in production.
 
 ## Liveness and gap repair
 
@@ -523,17 +556,16 @@ abstention, shown but never counted as a disagreement.
 - Access-token refresh is manual daily (a TOTP auto-login would remove it).
   The watchdog cannot recover from an expired token — it will retry every 30s
   and never succeed, which is why `on_noreconnect` shouts.
-- There is no process supervisor: if the ticker process is killed, data stops
-  until you restart it. The scheduler's repair job keeps filling the hole
-  while that lasts, and the post-close sweep makes it whole, but a supervisor
-  that restarts the process would be strictly better.
+- `scripts/supervisor.py` exists but is experimental: if the ticker process is killed,
+  data stops until it restarts. The scheduler's repair job keeps filling the hole
+  while that lasts, and the post-close sweep makes it whole.
 - Pre-existing databases keep their legacy `+05:30` candle rows. They read
   correctly, but they are only rewritten to the canonical form for minutes the
   healer repairs.
 - `risk/portfolio_risk.py`'s correlation lookback and thresholds are fixed
   constants, not validated the way the decision thresholds are.
-- No model versioning or drift detection — each training run overwrites
-  `models/ml_model.joblib`.
+- `core/ml_versioning.py` provides model registry and drift detection — the
+  artifact `models/ml_model.joblib` is now versioned on each training run.
 - `walk_forward_optimizer.py` tunes **entry thresholds only**; it cannot
   validate exit logic, which is where the largest measurable gain was. The
   take-profit removal is supported by two independent in-sample measurements

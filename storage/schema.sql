@@ -78,6 +78,21 @@ CREATE TABLE IF NOT EXISTS ml_signals (
     rule_based_action TEXT         -- what decision_agent.py said at the same moment, for comparison
 );
 
+-- Hybrid strategy signals (Rule + ML combined), mode-selectable.
+-- Same discipline as llm_signals/ml_signals: compare before trusting.
+CREATE TABLE IF NOT EXISTS hybrid_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    action TEXT NOT NULL,          -- BUY / SELL / HOLD
+    confidence REAL,               -- combined confidence score
+    mode TEXT NOT NULL,            -- rule_only / ml_only / rule_ml_combined
+    rule_action TEXT,              -- what decision_agent.py said
+    ml_action TEXT,                -- what ML model predicted
+    ml_confidence REAL,            -- ML confidence
+    rationale TEXT                 -- explanation of the combined decision
+);
+
 -- Candidate strategy votes (strategy/candidates.py), logged in PARALLEL with
 -- the rule-based `signals` table - same discipline as llm_signals/ml_signals.
 -- One row per candidate per symbol per cycle, so each strategy's live track

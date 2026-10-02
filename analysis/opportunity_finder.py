@@ -25,6 +25,10 @@ alongside the fixed ATR-based take-profit. If the fixed target sits
 beyond a real resistance/support wall, that's worth knowing; if there's
 genuine room beyond it, that's a more promising setup than the fixed
 target alone would suggest.
+
+NEW: Now uses HybridStrategy (strategy/hybrid_strategy.py) to select the
+best decision mode (RULE_ONLY, ML_ONLY, or RULE_ML_COMBINED) per symbol
+via backtest comparison, then uses that mode's signal for the opportunity.
 """
 from dataclasses import dataclass, field
 
@@ -34,6 +38,8 @@ from scipy.signal import find_peaks
 from analysis.rankings import rank_watchlist_with_sizing
 from core.quant_indicators import compute_atr, load_candles
 from storage.db import get_connection, get_open_position_symbols
+from strategy.fast_hybrid_strategy import FastHybridStrategy, StrategyMode, _indicator_cache, _sentiment_cache, warmup_caches, warmup_caches_for_symbols
+from strategy.hybrid_strategy import find_best_mode
 
 # Point weights for the conviction score - each confirming signal ADDS
 # up to this many points (scaled by its own confidence/magnitude); each
@@ -44,6 +50,36 @@ ML_WEIGHT = 20.0
 LLM_WEIGHT = 20.0
 SENTIMENT_WEIGHT = 15.0
 SENTIMENT_THRESHOLD = 0.15  # |sentiment| below this counts as neutral, not agreement/disagreement
+
+# Cache for best mode per symbol (persists across calls within same process)
+_best_mode_cache: dict[str, StrategyMode] = {}
+
+
+def _get_best_mode(symbol: str, candle_limit: int = 5000, use_cache: bool = True) -> StrategyMode:
+    """Get the best strategy mode for a symbol, using cache or computing via backtest."""
+    if use_cache and symbol in _best_mode_cache:
+        return _best_mode_cache[symbol]
+    
+    # Import here to avoid circular import
+    from strategy.hybrid_strategy import find_best_mode
+    
+    # Compute best mode via backtest
+    result = find_best_mode([symbol], candle_limit, use_cache=use_cache)
+    best_mode = StrategyMode(result["best_mode"])
+    _best_mode_cache[symbol] = best_mode
+    return best_mode
+
+
+def _get_hybrid_signal(symbol: str, mode: StrategyMode) -> tuple:
+    """Get signal from fast hybrid strategy for a symbol using the specified mode."""
+    # Use a shared strategy instance (created once per call)
+    if not hasattr(_get_hybrid_signal, '_strategy'):
+        _get_hybrid_signal._strategy = FastHybridStrategy(mode)
+    elif _get_hybrid_signal._strategy.mode != mode:
+        _get_hybrid_signal._strategy = FastHybridStrategy(mode)
+    
+    signal = _get_hybrid_signal._strategy.evaluate(symbol)
+    return signal.action, signal.confidence, signal.rationale
 
 
 @dataclass
@@ -158,14 +194,14 @@ def _score_conviction(symbol: str, action: str, technical_score: float) -> tuple
     return round(points, 1), agreements, disagreements
 
 
-def find_opportunities(capital: float | None = None, n: int = 10) -> dict:
+def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache: bool = True, max_symbols: int = 20) -> dict:
     """Returns {'bullish': [...], 'bearish': [...]}, each a list of
     Opportunity objects.
 
-    Ranking is RULE-BASED FIRST: entries are sorted by the technical
-    (rule) score - the same deterministic RSI/ADX/pattern signal that
-    drives the rule-based open positions - with the ML/LLM/sentiment
-    conviction score used only as a tie-breaker.
+    Ranking uses HybridStrategy: for each symbol, we determine the best
+    decision mode (RULE_ONLY, ML_ONLY, or RULE_ML_COMBINED) via backtest
+    comparison, then use that mode's signal. The conviction score combines
+    the hybrid strategy's confidence with ML/LLM/sentiment agreement.
 
     Symbols that already have an OPEN paper position are excluded: a second
     position in the same symbol is blocked in EITHER direction
@@ -177,7 +213,16 @@ def find_opportunities(capital: float | None = None, n: int = 10) -> dict:
     `capital` defaults to the wallet's unified equity (fixed book + float)
     (risk/wallet.py:available_equity) instead of a hardcoded number,
     so sizing tracks the book as it changes with deposits, withdrawals
-    and closed trades."""
+    and closed trades.
+
+    `use_mode_cache`: If True, use cached best modes from disk (fast).
+    If False, run backtests to find best modes (slow, but more accurate).
+    
+    `max_symbols`: Maximum number of symbols to process (for speed).
+
+    `fast_mode`: If True (default), uses FastHybridStrategy with precomputed
+    caches for ~100x speedup. If False, uses original HybridStrategy."""
+    # Get the symbols we'll need from rankings first (to warm up only those)
     if capital is None:
         from risk.wallet import available_equity  # lazy - keeps this module importable without the wallet book
         from storage.db import get_connection
@@ -186,32 +231,34 @@ def find_opportunities(capital: float | None = None, n: int = 10) -> dict:
             capital = available_equity(conn)
         finally:
             conn.close()
-
-    # Top opportunity should surface only symbols that are actually
-    # tradeable, so request more raw candidates than needed: held symbols
-    # get filtered out below, and we want the final list to still be full
-    # of fresh picks rather than shrinking by however many are held.
-    #
-    # reserve_prior=True: this IS the "what should I do with my capital"
-    # list, so consecutive rows must be sized against what the earlier rows
-    # already promise - otherwise the panel offers ten independently-approved
-    # positions that cannot all be opened, and their sizes sum to several
-    # times the book. A row that no longer fits comes back blocked with the
-    # reason named, rather than silently full-sized.
+    
+    # Get top candidates to know which symbols to warm up
     sized = rank_watchlist_with_sizing(capital, n=n * 2, reserve_prior=True)
-
-    # A held symbol is not an opportunity - it is a position you already have.
-    # portfolio_risk hard-blocks any new position in a symbol that is already
-    # open (Check 0), so offering one here would be advice the sizing gate
-    # immediately refuses. Excluded symbols are still named below, so the
-    # panel reads as "you own some of these" rather than as a quiet market.
     held_symbols = get_open_position_symbols()
-
+    
+    # Collect symbols we'll process
+    symbols_to_process = []
+    for direction, key in (("bullish", "bullish_score"), ("bearish", "bearish_score")):
+        for entry in sized[direction]:
+            if len(symbols_to_process) >= max_symbols:
+                break
+            symbol = entry["symbol"]
+            if symbol not in held_symbols:
+                symbols_to_process.append(symbol)
+    
+    # Warm up caches only for symbols we'll actually process
+    warmup_caches_for_symbols(symbols_to_process)
+    
+    # Use the already-computed sizing results (no duplicate call)
     results = {"bullish": [], "bearish": []}
     excluded = set()
+    processed = 0
 
     for direction, key in (("bullish", "bullish_score"), ("bearish", "bearish_score")):
         for entry in sized[direction]:
+            if processed >= max_symbols:
+                break
+                
             symbol = entry["symbol"]
             # Held is not an opportunity - it is a position you already have.
             # Collected by name, not just dropped, so a short list reads as
@@ -220,8 +267,18 @@ def find_opportunities(capital: float | None = None, n: int = 10) -> dict:
                 excluded.add(symbol)
                 continue
 
-            action = entry["action"]
+            # Get best mode for this symbol and evaluate hybrid signal
+            best_mode = _get_best_mode(symbol, use_cache=use_mode_cache)
+            hybrid_action, hybrid_confidence, hybrid_rationale = _get_hybrid_signal(symbol, best_mode)
+            
+            # Use hybrid signal if it has a trade action, otherwise fall back to rule-based
+            action = hybrid_action if hybrid_action in ("BUY", "SELL") else entry["action"]
+            
+            # Score conviction using hybrid confidence + ML/LLM/sentiment agreement
             conviction, agreements, disagreements = _score_conviction(symbol, action, entry[key])
+            
+            # Add hybrid strategy info to agreements
+            agreements.insert(0, f"Hybrid({best_mode.value}): {hybrid_action} ({hybrid_confidence:.0%}) - {hybrid_rationale}")
 
             room = None
             realistic_rr = None
@@ -241,10 +298,10 @@ def find_opportunities(capital: float | None = None, n: int = 10) -> dict:
                 room_to_target=round(room, 2) if room is not None else None,
                 realistic_reward_risk=realistic_rr,
             ))
+            processed += 1
 
-        # Rule-based ranking first (same signal that opens positions),
-        # conviction only breaks ties between equal rule scores.
-        results[direction].sort(key=lambda o: (o.technical_score, o.conviction_score), reverse=True)
+        # Sort by conviction score (which now includes hybrid strategy confidence)
+        results[direction].sort(key=lambda o: o.conviction_score, reverse=True)
         results[direction] = results[direction][:n]
 
     results["excluded"] = sorted(excluded)

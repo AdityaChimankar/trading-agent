@@ -36,7 +36,7 @@ def fetch_unscored_news(conn, limit: int = 40):
 
 def score_headline(symbol: str, headline: str) -> dict:
     prompt = PROMPT_TEMPLATE.format(symbol=symbol, headline=headline)
-    return extract_json(complete(prompt, temperature=0.0))
+    return extract_json(complete(prompt, temperature=0.0, task_type="sentiment"))
 
 
 def run_sentiment_pass():

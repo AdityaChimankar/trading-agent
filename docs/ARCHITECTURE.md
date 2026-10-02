@@ -6,7 +6,7 @@ Packages form a strict stack. Arrows point in the direction of the import — a
 layer may import the layers below it, never above.
 
 ```
-                       scripts/            (orchestration: scheduler, pre-flight)
+                       scripts/            (orchestration: scheduler, pre-flight, supervisor)
                           │
         ┌─────────────────┼──────────────────────────┐
         ▼                 ▼                          ▼
@@ -17,20 +17,20 @@ layer may import the layers below it, never above.
               risk/  ─────────────────────────────────┤
                  │                                   │
                  ▼                                   ▼
-              core/  ◄────────────────────────────────┘      (indicators, patterns, sizing)
+              core/  ◄────────────────────────────────┘      (indicators, patterns, sizing, signals)
                  │
                  ▼
              storage/                                   (SQLite: connection, schema, watchlist)
                  │
                  ▼
               paths.py                                  (file locations; no imports at all)
+```
 
-   research/  sits beside the stack: it imports core, storage and strategy,
-              and nothing imports it except diagnostics tooling and strategy's
-              shared-helper import (see "Known inversion" below).
+`research/`  sits beside the stack: it imports core, storage and strategy,
+and nothing imports it except diagnostics tooling.
 
-   api/  is a read-only façade — it imports any layer, nothing imports it.
-   frontend/  only ever talks to api/ over HTTP.
+`api/`  is a read-only façade — it imports any layer, nothing imports it.
+`frontend/`  only ever talks to api/ over HTTP.
 ```
 
 ### What each package is allowed to do
@@ -39,7 +39,7 @@ layer may import the layers below it, never above.
 |---|---|---|
 | `paths.py` | Resolve every file location from `__file__` | Import anything project-local |
 | `storage/` | SQLite connection, schema, migrations, watchlist reads | Contain trading logic |
-| `core/` | Deterministic math: indicators, patterns, sizing | Call an LLM, write files, place orders |
+| `core/` | Deterministic math: indicators, patterns, sizing, signals, ML versioning, LLM client, circuit breaker, logging, shutdown, config | Call an LLM, write files, place orders |
 | `ingest/` | Talk to Kite/NSE/RSS, write candles and news | Decide anything |
 | `analysis/` | Read stored data and describe it | Write signals |
 | `strategy/` | Turn features into BUY/SELL/HOLD | Size positions or enforce portfolio limits |
@@ -48,35 +48,25 @@ layer may import the layers below it, never above.
 | `scripts/` | Wire the pipeline into a schedule | Contain business logic |
 | `api/` | Serialize existing functions to JSON | Re-implement any calculation |
 
-## Known inversion: `strategy/` → `research/`
+## Fixed inversion: `strategy/` → `research/` (now resolved via `core/signals.py`)
 
-Three strategy modules import shared helpers from `research/backtest.py`:
+Previously, three strategy modules imported shared helpers from `research/backtest.py`:
 
 - `strategy/ml_features.py` → `prepare_symbol_series`, `precompute_pattern_bias_codes`
 - `strategy/ml_decision_agent.py` → the same two
 - `strategy/candidates.py`, `strategy/session_features.py` → `prepare_symbol_series`
   constants (`SWING_ORDER`, `DEFAULT_PARAMS`, `FORWARD_WINDOW`, `SLIPPAGE`)
 
-That is backwards: validation code should depend on the strategy, not the other
-way around. It is a deliberate, documented wart rather than a bug — these helpers
-are the *canonical* implementations, and `research/backtest.py` is where they were
-written and verified. `research/backtest.py` itself imports
-`strategy/decision_agent.py`'s `evaluate_signals`, so the two packages reference
-each other.
+This was backwards: validation code should depend on the strategy, not the other
+way around. **This is now fixed** by lifting the shared pieces into
+`core/signals.py`:
 
-There is **no import-time cycle** (importing `strategy.ml_features` pulls in
-`research.backtest`, which pulls in `strategy.decision_agent`, which imports only
-`core`/`storage` — the chain terminates). But the layering is wrong, and the fix
-is to lift the shared pieces — `SLIPPAGE`, `DEFAULT_PARAMS`,
-`precompute_pattern_bias_codes`, `vectorized_evaluate`, `prepare_symbol_series`
-— into a new `core/signals.py`, leaving `research/backtest.py` as a caller. That
-makes `strategy → core` and `research → {core, strategy}`, with no inverted edge.
+- `SLIPPAGE`, `DEFAULT_PARAMS`, `FORWARD_WINDOW`, `LOOKBACK_MIN`, `MAX_HOLD_CANDLES`, `SWING_ORDER`
+- `prepare_symbol_series`, `precompute_pattern_bias_codes`, `vectorized_evaluate`, `simulate_trades`
+- `--selftest` verification that fast path matches reference implementation
 
-Note the constraint that fix has to respect: `strategy/session_features.py` must
-keep importing `SLIPPAGE` and `FORWARD_WINDOW` from `research/backtest.py` (not
-copy them), because a second copy of a cost constant is exactly how a silent
-behavioural drift starts — see the same reasoning for `DEFAULT_PARAMS` in
-`research/backtest.py`.
+Now both `strategy/` and `research/` import from `core/signals.py`, with no
+inverted edge. The layering is correct: `strategy → core`, `research → {core, strategy}`.
 
 ## Candidate strategies: pure, memoized, and self-verifying
 
@@ -106,24 +96,38 @@ what they have already caught.
   RSS feeds ────────► ingest/fetch_news.py ────────► news
                                         │
                                         ▼
-                            analysis/sentiment.py ──► sentiment
+                              analysis/sentiment.py ──► sentiment
                                         │
    candles ─────► core/quant_indicators.py   (RSI, ATR, ADX)
-                  core/pattern_detection.py  (candles + swings)
+                 core/pattern_detection.py  (candles + swings)
+                 core/signals.py            (prepare_symbol_series, vectorized_evaluate)
                                         │
                                         ▼
                           strategy/decision_agent.py  ──► signals
                           strategy/llm_decision_agent.py ──► llm_signals
                           strategy/ml_decision_agent.py  ──► ml_signals
+                          strategy/ml_decision_agent_v2.py ──► ml_signals (enhanced)
                                         │
                                         ▼
-                            analysis/digest.py ──► digests
+                              analysis/digest.py ──► digests
 
-   On demand / by hand:
-     analysis/rankings.py ──► analysis/opportunity_finder.py   (conviction picks)
-     core/position_sizing.py ──► risk/portfolio_risk.py ──► open_positions
-     risk/position_monitor.py  ──► live P&L + HOLD/SELL per position
+  On demand / by hand:
+    analysis/rankings.py ──► analysis/opportunity_finder.py   (conviction picks)
+    strategy/hybrid_strategy.py ──► best mode per symbol (cached)
+    strategy/fast_hybrid_strategy.py ──► low-latency hybrid signal (cached)
+    core/position_sizing.py ──► risk/portfolio_risk.py ──► open_positions
+    risk/position_monitor.py  ──► live P&L + HOLD/SELL per position
 ```
+
+The three decision agents are **parallel, not sequential**. `decision_agent.py`
+is the only one that counts; the LLM and ML paths exist to build a comparison
+track record on identical inputs. They write to separate tables precisely so a
+comparison can never contaminate the tested path.
+
+The hybrid strategy (`strategy/hybrid_strategy.py`) runs backtests to select the
+best mode (RULE_ONLY, ML_ONLY, RULE_ML_COMBINED) per symbol and caches it.
+`strategy/fast_hybrid_strategy.py` adds precomputed indicator/sentiment caches
+for production latency (<50ms/symbol).
 
 The three decision agents are **parallel, not sequential**. `decision_agent.py`
 is the only one that counts; the LLM and ML paths exist to build a comparison
@@ -146,14 +150,26 @@ created/migrated by `storage/db.py`:
 | `sentiment` | `analysis/sentiment.py` | OpenRouter score per news item |
 | `signals` | `strategy/decision_agent.py` | Rule-based BUY/SELL/HOLD (the tested path) |
 | `llm_signals` | `strategy/llm_decision_agent.py` | LLM calls, for comparison only |
-| `ml_signals` | `strategy/ml_decision_agent.py` | Model calls, for comparison only |
+| `ml_signals` | `strategy/ml_decision_agent.py`, `strategy/ml_decision_agent_v2.py` | Model calls, for comparison only |
 | `strategy_signals` | `strategy/shadow.py` | Candidate votes, logged beside the rule agent's action on the same candle |
+| `hybrid_signals` | `strategy/hybrid_strategy.py`, `strategy/fast_hybrid_strategy.py` | Hybrid strategy signals with mode, rule/ML actions, confidence |
 | `digests` | `analysis/digest.py` | End-of-day narrative |
 | `open_positions` | `risk/portfolio_risk.py` (via the API) | Paper ledger, incl. stop_loss / take_profit |
 | `trades` | `risk/wallet.py` (via the API) | Closed trades: entry/exit, realized P&L, exit reason |
 | `wallet_settings` | the API | Singleton: paper capital the book builds from |
 | `wallet_transactions` | the API | Deposits, withdrawals, and realized P&L, in order |
 | `wallet_daily_snapshots` | the API | Per-day capital / P&L snapshot |
+
+Timestamps in `candles` are naive IST at minute precision. One consequence
+worth knowing before writing a query: pre-existing rows may carry Kite's
+`+05:30` suffix from the original backfill, so compare the 16-character minute
+prefix (`substr(timestamp, 1, 16)`) rather than the raw string, or use
+`core/freshness.minute_key()`. Both forms sort correctly as strings.
+
+`init_db()` is idempotent and self-healing — it runs `schema.sql` and then adds
+any column missing from an existing table. `api/main.py` calls it on startup,
+which is what closes the "I forgot to re-run `python -m storage.db` after
+upgrading" gap.
 
 Timestamps in `candles` are naive IST at minute precision. One consequence
 worth knowing before writing a query: pre-existing rows may carry Kite's
@@ -215,7 +231,26 @@ implementation of every calculation.
 | `GET /api/liveness`, `GET /api/liveness/gaps` | `core.freshness`, `ingest.gap_healer` |
 | `GET /api/wallet` | `risk.wallet`, `risk.position_monitor` |
 | `GET /api/transactions` | `storage.db` (`wallet_transactions`, `trades`) |
-| `GET /api/pipeline` | `analysis.rankings`, `storage.db` (`signals`, `ml_signals`, `llm_signals`) |
+| `GET /api/pipeline` | `analysis.rankings`, `storage.db` (`signals`, `ml_signals`, `llm_signals`, `hybrid_signals`) |
+
+Only the position and wallet endpoints are mutations, and all of them write to
+the paper ledger — nothing reaches a broker.
+
+Two details worth knowing:
+
+- **`api/serializers.py` exists because NaN is not valid JSON.** The analysis
+  modules return dataclasses, `sqlite3.Row`s and numpy scalars; everything
+  crossing the boundary is normalized there, so a NaN indicator arrives as
+  `null` instead of breaking the response.
+- **Transport is separate from the layers.** In dev, Vite (`:5173`) proxies
+  `/api` to uvicorn on `:8000` and CORS allows localhost origins. The front end
+  never imports Python and never computes a signal — it renders what the API
+  returns. That is why `npm run build` and `npx tsc --noEmit` are the only
+  frontend gates that matter.
+- **Routing is hash-based and dependency-free.** `frontend/src/lib/router.ts` is
+  ~30 lines instead of a router inside the app, and three views do not justify a
+  dependency. Every unknown or missing hash resolves to the dashboard, so a bad
+  URL degrades to a working page rather than a blank screen.
 
 Only the position and wallet endpoints are mutations, and all of them write to
 the paper ledger — nothing reaches a broker.
@@ -250,6 +285,7 @@ python -m research.walk_forward_optimizer --selftest 360ONE   # 27/27 grid combo
 python -m strategy.session_features                 # candidate features cannot see the future
 python -m strategy.candidates                       # candidate admit-rates are plausible
 python -m strategy.ml_features 360ONE              # feature build produces labelled rows
+python -m core.signals --selftest 360ONE           # core signals fast path == reference
 cd frontend && npx tsc --noEmit                    # strict TS
 ```
 
@@ -258,6 +294,10 @@ cd frontend && npx tsc --noEmit                    # strict TS
 independently confirm that the vectorized fast paths reproduce the slow
 per-candle loops on *your* stored data, which is the assumption the entire
 validation story rests on.
+
+`core/signals.py --selftest` does the same for the shared signal primitives
+(`prepare_symbol_series`, `vectorized_evaluate`, `simulate_trades`), which are
+now the single source of truth for both `strategy/` and `research/`.
 
 The two `strategy/` self-tests guard a different assumption. A feature that
 peeks at the future, or a gate whose thresholds are in the wrong units, does not
