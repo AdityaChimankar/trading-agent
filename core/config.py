@@ -69,6 +69,7 @@ class RiskConfig:
     atr_stop_multiplier: float = field(default_factory=lambda: _get_env_float("ATR_STOP_MULTIPLIER", 1.5))
     reward_risk_ratio: float = field(default_factory=lambda: _get_env_float("REWARD_RISK_RATIO", 2.0))
     use_take_profit: bool = field(default_factory=lambda: _get_env_bool("USE_TAKE_PROFIT", False))
+    use_position_sizing: bool = field(default_factory=lambda: _get_env_bool("USE_POSITION_SIZING", True))
     max_position_pct_of_capital: float = field(default_factory=lambda: _get_env_float("MAX_POSITION_PCT_OF_CAPITAL", 20.0))
 
     # Portfolio risk limits

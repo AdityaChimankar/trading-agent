@@ -40,6 +40,7 @@ from core.quant_indicators import compute_atr, load_candles
 from storage.db import get_connection, get_open_position_symbols
 from strategy.fast_hybrid_strategy import FastHybridStrategy, StrategyMode, _indicator_cache, _sentiment_cache, warmup_caches, warmup_caches_for_symbols
 from strategy.hybrid_strategy import find_best_mode
+from core.config import get_config
 
 # Point weights for the conviction score - each confirming signal ADDS
 # up to this many points (scaled by its own confidence/magnitude); each
@@ -48,8 +49,6 @@ from strategy.hybrid_strategy import find_best_mode
 # already shows elsewhere.
 ML_WEIGHT = 20.0
 LLM_WEIGHT = 20.0
-SENTIMENT_WEIGHT = 15.0
-SENTIMENT_THRESHOLD = 0.15  # |sentiment| below this counts as neutral, not agreement/disagreement
 
 # Cache for best mode per symbol (persists across calls within same process)
 _best_mode_cache: dict[str, StrategyMode] = {}
@@ -174,23 +173,6 @@ def _score_conviction(symbol: str, action: str, technical_score: float) -> tuple
             points -= LLM_WEIGHT * confidence
             disagreements.append(f"LLM agent disagrees (said {llm_signal['action']}, {confidence:.0%} confidence)")
 
-    sentiment = None
-    try:
-        from analysis.sentiment import latest_sentiment  # lazy - only latest_sentiment's plain SQL read is needed here, not the LLM scoring path
-        sentiment = latest_sentiment(symbol)
-    except ImportError:
-        pass  # analysis.sentiment unavailable - sentiment simply won't contribute to conviction
-
-    if sentiment is not None and abs(sentiment) >= SENTIMENT_THRESHOLD:
-        sentiment_bullish = sentiment > 0
-        action_bullish = action == "BUY"
-        if sentiment_bullish == action_bullish:
-            points += SENTIMENT_WEIGHT * abs(sentiment)
-            agreements.append(f"News sentiment agrees ({sentiment:+.2f})")
-        else:
-            points -= SENTIMENT_WEIGHT * abs(sentiment)
-            disagreements.append(f"News sentiment disagrees ({sentiment:+.2f})")
-
     return round(points, 1), agreements, disagreements
 
 
@@ -231,6 +213,11 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
             capital = available_equity(conn)
         finally:
             conn.close()
+    
+    # Check if position sizing is enabled
+    config = get_config()
+    if not config.risk.use_position_sizing:
+        return {"bullish": [], "bearish": [], "excluded": [], "position_sizing_disabled": True}
     
     # Get top candidates to know which symbols to warm up
     sized = rank_watchlist_with_sizing(capital, n=n * 2, reserve_prior=True)
@@ -300,9 +287,13 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
             ))
             processed += 1
 
-        # Sort by conviction score (which now includes hybrid strategy confidence)
-        results[direction].sort(key=lambda o: o.conviction_score, reverse=True)
-        results[direction] = results[direction][:n]
+    # Filter out blocked opportunities (position sizing validation failed)
+    # Only include opportunities that are not blocked and have valid position sizing
+    results[direction] = [o for o in results[direction] if not o.blocked and o.suggested_size is not None and o.suggested_size > 0]
+
+    # Sort by conviction score (which now includes hybrid strategy confidence)
+    results[direction].sort(key=lambda o: o.conviction_score, reverse=True)
+    results[direction] = results[direction][:n]
 
     results["excluded"] = sorted(excluded)
     return results
