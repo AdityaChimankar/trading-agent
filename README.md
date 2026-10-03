@@ -212,13 +212,16 @@ of the `python -m` form, and it is what makes the package imports resolve.
 
 ```bash
 pip install -r requirements.txt
+playwright install chromium
 ```
 
 1. Sign up at https://developers.kite.trade/signup and subscribe to the paid
    Kite Connect plan (required for live *and* historical data).
 2. Get a free OpenRouter API key at https://openrouter.ai/keys.
 3. Copy `.env.example` to `.env` and fill in `KITE_API_KEY`, `KITE_API_SECRET`,
-   and `OPENROUTER_API_KEY`.
+   `KITE_TOTP_SECRET`, `KITE_USER_ID`, `KITE_PASSWORD`, and `OPENROUTER_API_KEY`.
+
+   **To get `KITE_TOTP_SECRET`:** Enable 2FA on Kite (Profile → My Profile → Two-factor authentication), choose "Authenticator app", and copy the text secret shown below the QR code (base32 string like `JBSWY3DPEHPK3PXP`).
 4. Build the watchlist and create the database:
 
 ```bash
@@ -236,8 +239,10 @@ cd frontend && npm install && cd ..
 ## Backfill (one-time, or an occasional top-up)
 
 ```bash
-python -m ingest.kite_auth          # daily login: opens a URL, paste back the request_token
-python -m ingest.fetch_historical   # 60 days of 1-min candles, resumable if interrupted
+python -m ingest.kite_auto_login          # automated daily login with TOTP (preferred)
+# OR
+python -m ingest.kite_auth                # manual: opens a URL, paste back the request_token
+python -m ingest.fetch_historical         # 60 days of 1-min candles, resumable if interrupted
 ```
 
 The default interval is **minute**, deliberately matching what the live ticker
@@ -298,8 +303,10 @@ both just print a number.
 ## Daily routine (trading days, 9:15 AM – 3:30 PM IST)
 
 ```bash
-python -m ingest.kite_auth        # 1. refresh today's access token (required daily, ~1 min)
-python -m scripts.validate_setup  # 2. pre-flight: Kite, news feeds, OpenRouter, DB all working
+python -m ingest.kite_auto_login      # 1. refresh today's access token (automated, ~30s)
+# OR if automated fails:
+python -m ingest.kite_auth            # manual fallback
+python -m scripts.validate_setup      # 2. pre-flight: Kite, news feeds, OpenRouter, DB all working
 ```
 
 `scripts/validate_setup.py` exits 0 on success and 1 on failure, so you can
@@ -357,7 +364,8 @@ Ctrl+C the rest whenever — no cleanup needed.
 | What | Command |
 |---|---|
 | Pre-flight check | `python -m scripts.validate_setup` |
-| Refresh Kite token | `python -m ingest.kite_auth` |
+| Refresh Kite token (auto) | `python -m ingest.kite_auto_login` |
+| Refresh Kite token (manual) | `python -m ingest.kite_auth` |
 | Build watchlist from NSE | `python -m ingest.build_nifty500_symbols` |
 | Resolve instrument tokens | `python -m ingest.instrument_lookup symbols.txt` |
 | Create/migrate the DB | `python -m storage.db` |
@@ -397,6 +405,10 @@ Credentials live in `.env`:
 |---|---|
 | `KITE_API_KEY` | Kite Connect API key |
 | `KITE_API_SECRET` | Kite Connect API secret |
+| `KITE_TOTP_SECRET` | TOTP secret from 2FA setup (for automated login) |
+| `KITE_USER_ID` | Kite user ID (email/phone) for automated login |
+| `KITE_PASSWORD` | Kite password for automated login |
+| `KITE_REDIRECT_URL` | OAuth redirect URL (default: `http://localhost`) |
 | `OPENROUTER_API_KEY` | OpenRouter API key (sentiment + LLM decisions) |
 | `OPENROUTER_MODEL` | Optional model override, defaults to a free `:free` model |
 
@@ -553,9 +565,6 @@ abstention, shown but never counted as a disagreement.
 
 ## Known gaps
 
-- Access-token refresh is manual daily (a TOTP auto-login would remove it).
-  The watchdog cannot recover from an expired token — it will retry every 30s
-  and never succeed, which is why `on_noreconnect` shouts.
 - `scripts/supervisor.py` exists but is experimental: if the ticker process is killed,
   data stops until it restarts. The scheduler's repair job keeps filling the hole
   while that lasts, and the post-close sweep makes it whole.

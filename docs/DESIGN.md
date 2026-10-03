@@ -434,3 +434,44 @@ implementation of the same trade-outcome walk.
   meanwhile and the post-close sweep makes the session whole.
 - SEBI algo-trading disclosure rules apply once this moves from personal signals
   to automated order placement. Out of scope for this POC.
+
+---
+
+## TOTP automated login
+
+### `kite_auto_login.py` eliminates the daily manual token refresh
+
+`ingest/kite_auth.py` requires opening a browser, logging in, copying the
+`request_token` from the redirect URL, and pasting it back into the terminal —
+every trading day, because Kite access tokens expire at ~7:30 AM IST.
+
+`ingest/kite_auto_login.py` automates this:
+
+1. Generates a fresh TOTP code from `KITE_TOTP_SECRET` (the base32 secret from
+   2FA setup, stored in `.env`).
+2. Uses Playwright to drive a headless Chromium through the Kite login flow:
+   fills user ID, password, enters the TOTP, submits.
+3. Waits for the redirect to `KITE_REDIRECT_URL` (default `http://localhost`)
+   and extracts `request_token` via regex: `request_token=([^&]+)`.
+4. Calls `kite.generate_session()` to get the `access_token` and saves it to
+   `.access_token`.
+
+The same module provides `ensure_valid_token()` which checks the current token
+with a cheap `kite.profile()` call and only runs the browser automation if the
+token is expired/invalid. The scheduler integration in `scripts/scheduler.py`
+could call this on startup to guarantee a fresh token before the first cycle.
+
+**Prerequisites:**
+- `playwright` and `pyotp` in requirements
+- `playwright install chromium` run once
+- `KITE_TOTP_SECRET`, `KITE_USER_ID`, `KITE_PASSWORD` in `.env`
+- `KITE_REDIRECT_URL` set to `http://localhost` in Kite app settings
+
+**Fallback:** If automation fails (site change, captcha, network), the
+`__main__` block falls back to the manual `kite_auth.py` flow.
+
+**Why not a local HTTP server?** Kite's redirect with `http://localhost` does
+not require a listening server — the browser navigates to
+`http://localhost/?request_token=XXX`, Playwright captures the URL from its
+address bar, and the regex extracts the token. No port binding, no firewall
+rules, no race condition between server startup and browser navigation.
