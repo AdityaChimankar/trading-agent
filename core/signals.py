@@ -37,6 +37,7 @@ DEFAULT_PARAMS = {
     "atr_tp_mult": 4.0,
     "trail_mult": 2.0,
     "use_trailing": False,
+    "use_take_profit": False,  # measured: stop-only (-0.0363%) beats stop+target (-0.0451%)
     # Filters
     "min_atr_pct": 0.0005,
     "adx_threshold": 20,
@@ -322,12 +323,12 @@ def _simulate_trades_reference(prepared: dict, params: dict = None, index_range:
 
         if action == 1:  # BUY
             stop_loss = entry_price - sl_dist
-            take_profit = entry_price + tp_dist
+            take_profit = entry_price + tp_dist if p["use_take_profit"] else None
             trail_stop = None
             trail_activated = False
         else:  # SELL
             stop_loss = entry_price + sl_dist
-            take_profit = entry_price - tp_dist
+            take_profit = entry_price - tp_dist if p["use_take_profit"] else None
             trail_stop = None
             trail_activated = False
 
@@ -344,7 +345,7 @@ def _simulate_trades_reference(prepared: dict, params: dict = None, index_range:
                     exit_price = stop_loss
                     exit_reason = "SL"
                     break
-                if high >= take_profit:
+                if take_profit is not None and high >= take_profit:
                     exit_price = take_profit
                     exit_reason = "TP"
                     break
@@ -364,7 +365,7 @@ def _simulate_trades_reference(prepared: dict, params: dict = None, index_range:
                     exit_price = stop_loss
                     exit_reason = "SL"
                     break
-                if low <= take_profit:
+                if take_profit is not None and low <= take_profit:
                     exit_price = take_profit
                     exit_reason = "TP"
                     break
@@ -473,12 +474,12 @@ def simulate_trades(prepared: dict, params: dict = None, index_range: tuple = No
 
         if action == 1:  # BUY
             stop_loss = entry_price - sl_dist
-            take_profit = entry_price + tp_dist
+            take_profit = entry_price + tp_dist if p["use_take_profit"] else None
             trail_stop = None
             trail_activated = False
         else:  # SELL
             stop_loss = entry_price + sl_dist
-            take_profit = entry_price - tp_dist
+            take_profit = entry_price - tp_dist if p["use_take_profit"] else None
             trail_stop = None
             trail_activated = False
 
@@ -496,8 +497,8 @@ def simulate_trades(prepared: dict, params: dict = None, index_range: tuple = No
                     exit_price = stop_loss
                     exit_reason = "SL"
                     break
-                # Check take profit (hit high)
-                if high >= take_profit:
+                # Check take profit (hit high) - only if take_profit is enabled
+                if take_profit is not None and high >= take_profit:
                     exit_price = take_profit
                     exit_reason = "TP"
                     break
@@ -519,8 +520,8 @@ def simulate_trades(prepared: dict, params: dict = None, index_range: tuple = No
                     exit_price = stop_loss
                     exit_reason = "SL"
                     break
-                # Check take profit (hit low)
-                if low <= take_profit:
+                # Check take profit (hit low) - only if take_profit is enabled
+                if take_profit is not None and low <= take_profit:
                     exit_price = take_profit
                     exit_reason = "TP"
                     break

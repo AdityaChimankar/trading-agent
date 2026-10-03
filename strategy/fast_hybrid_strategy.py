@@ -31,26 +31,7 @@ from paths import ML_MODEL_PATH
 from storage.db import get_connection, get_watchlist_symbols
 from strategy.decision_agent import evaluate_signals, decide as rule_based_decide
 from strategy.ml_decision_agent import _load_model as load_ml_model
-
-
-class StrategyMode(Enum):
-    RULE_ONLY = "rule_only"
-    ML_ONLY = "ml_only"
-    RULE_ML_COMBINED = "rule_ml_combined"
-
-
-@dataclass
-class HybridSignal:
-    symbol: str
-    action: str  # BUY, SELL, HOLD
-    confidence: float
-    mode: StrategyMode
-    rule_action: Optional[str] = None
-    rule_rationale: Optional[str] = None
-    ml_action: Optional[str] = None
-    ml_confidence: Optional[float] = None
-    rationale: str = ""
-    latency_ms: float = 0.0
+from strategy.hybrid_strategy import HybridSignal, StrategyMode
 
 
 class IndicatorCache:
@@ -318,7 +299,8 @@ class FastHybridStrategy:
         if prepared is None or prepared["length"] < LOOKBACK_MIN:
             return HybridSignal(
                 symbol=symbol, action="HOLD", confidence=0.0,
-                mode=self.mode, rationale="No indicator data available"
+                mode=self.mode, rationale="No indicator data available",
+                signal_timestamp=None, close_price=None
             )
         
         i = prepared["length"] - 1  # Latest candle index
@@ -373,6 +355,11 @@ class FastHybridStrategy:
         
         latency_ms = (time.perf_counter() - start_time) * 1000
         
+        # Get signal timestamp and close price from indicators
+        indicators = latest_indicators(symbol)
+        signal_timestamp = indicators.get("timestamp") if "error" not in indicators else None
+        signal_close = indicators.get("close") if "error" not in indicators else None
+        
         return HybridSignal(
             symbol=symbol,
             action=action,
@@ -383,7 +370,8 @@ class FastHybridStrategy:
             ml_action=ml_action,
             ml_confidence=ml_confidence,
             rationale=rationale,
-            latency_ms=latency_ms
+            signal_timestamp=signal_timestamp,
+            close_price=signal_close,
         )
     
     def _evaluate_rule_from_prepared(self, prepared: dict, i: int, symbol: str) -> tuple:

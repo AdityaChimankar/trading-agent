@@ -78,7 +78,8 @@ def _get_hybrid_signal(symbol: str, mode: StrategyMode) -> tuple:
         _get_hybrid_signal._strategy = FastHybridStrategy(mode)
     
     signal = _get_hybrid_signal._strategy.evaluate(symbol)
-    return signal.action, signal.confidence, signal.rationale
+    # Return action, confidence, rationale, signal_timestamp, signal_price
+    return signal.action, signal.confidence, signal.rationale, signal.signal_timestamp, signal.close_price
 
 
 @dataclass
@@ -98,6 +99,8 @@ class Opportunity:
     block_reason: str = None
     room_to_target: float = None       # rupees to the nearest opposing swing level, or None if none found
     realistic_reward_risk: float = None  # room_to_target / stop_distance, or None
+    signal_timestamp: str = None       # timestamp of the signal candle
+    signal_price: float = None         # price at signal time (close of signal candle)
 
 
 def _get_latest_signal(table: str, symbol: str) -> dict | None:
@@ -256,7 +259,7 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
 
             # Get best mode for this symbol and evaluate hybrid signal
             best_mode = _get_best_mode(symbol, use_cache=use_mode_cache)
-            hybrid_action, hybrid_confidence, hybrid_rationale = _get_hybrid_signal(symbol, best_mode)
+            hybrid_action, hybrid_confidence, hybrid_rationale, signal_timestamp, signal_price = _get_hybrid_signal(symbol, best_mode)
             
             # Use hybrid signal if it has a trade action, otherwise fall back to rule-based
             action = hybrid_action if hybrid_action in ("BUY", "SELL") else entry["action"]
@@ -284,6 +287,8 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
                 block_reason=entry.get("block_reason"),
                 room_to_target=round(room, 2) if room is not None else None,
                 realistic_reward_risk=realistic_rr,
+                signal_timestamp=signal_timestamp,
+                signal_price=signal_price,
             ))
             processed += 1
 

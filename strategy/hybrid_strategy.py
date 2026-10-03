@@ -67,6 +67,8 @@ class HybridSignal:
     ml_action: Optional[str] = None
     ml_confidence: Optional[float] = None
     rationale: str = ""
+    signal_timestamp: Optional[str] = None
+    close_price: Optional[float] = None
 
 
 class HybridStrategy:
@@ -86,6 +88,12 @@ class HybridStrategy:
         rule_result = rule_based_decide(symbol)
         rule_action = rule_result["action"]
         rule_rationale = rule_result["rationale"]
+        signal_timestamp = rule_result.get("signal_timestamp")
+        
+        # Get close price from latest_indicators
+        from core.quant_indicators import latest_indicators
+        indicators = latest_indicators(symbol)
+        signal_close = indicators.get("close") if "error" not in indicators else None
         
         # Get ML signal
         ml_action = "HOLD"
@@ -142,7 +150,9 @@ class HybridStrategy:
             rule_rationale=rule_rationale,
             ml_action=ml_action,
             ml_confidence=ml_confidence,
-            rationale=rationale
+            rationale=rationale,
+            signal_timestamp=signal_timestamp,
+            close_price=signal_close,
         )
     
     def run_cycle(self, symbols: list = None) -> list:

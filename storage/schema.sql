@@ -261,6 +261,30 @@ CREATE TABLE IF NOT EXISTS backfill_state (
     PRIMARY KEY (symbol, interval)
 );
 
+-- Realized execution cost tracking: captures the gap between signal price
+-- and actual fill price, including spread, slippage, and market impact.
+-- This is the binding constraint identified in EDGE_ANALYSIS.md - every
+-- number in the project assumes flat 0.05% round trip, but real costs vary
+-- by symbol, time-of-day, and volatility regime. Measuring this enables
+-- cost-aware position sizing and symbol selection.
+CREATE TABLE IF NOT EXISTS realized_costs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    signal_timestamp TEXT NOT NULL,    -- candle timestamp the signal was generated on
+    signal_price REAL NOT NULL,        -- price from the signal (close of signal candle)
+    signal_action TEXT NOT NULL,       -- BUY or SELL
+    fill_timestamp TEXT NOT NULL,      -- when the position was actually opened
+    fill_price REAL NOT NULL,          -- actual fill price (from position entry)
+    slippage_pct REAL NOT NULL,        -- (fill_price - signal_price) / signal_price * 100 (signed)
+    spread_pct REAL,                   -- estimated spread at fill time, if available
+    volume_at_fill INTEGER,            -- volume at fill candle, for impact estimation
+    atr_at_signal REAL,                -- ATR at signal time, for cost normalization
+    session_minute INTEGER,            -- minute of day (0-1440), for time-of-day analysis
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_realized_costs_symbol ON realized_costs(symbol);
+CREATE INDEX IF NOT EXISTS idx_realized_costs_signal_ts ON realized_costs(signal_timestamp);
+
 -- A per-day snapshot of the portfolio so "entire days" can be viewed even
 -- if the live stream was interrupted. Filled once per trading day (whenever
 -- the window is still open) by a lightweight endpoint; or by you at close.

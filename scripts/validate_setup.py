@@ -29,11 +29,32 @@ def check_env_vars() -> bool:
         print(f"  {FAIL_MARK} Missing or placeholder values in .env: {missing}")
         return False
     print(f"  {CHECK_MARK} All required .env variables are set")
+    
+    # Check for auto-login credentials
+    totp_creds = ["KITE_TOTP_SECRET", "KITE_USER_ID", "KITE_PASSWORD"]
+    totp_missing = [k for k in totp_creds if not os.getenv(k) or "your_" in os.getenv(k, "")]
+    if totp_missing:
+        print(f"  {WARN_MARK} Auto-login not configured (missing: {totp_missing}) - manual login required daily")
+    else:
+        print(f"  {CHECK_MARK} Auto-login credentials present")
     return True
 
 
 def check_kite_auth() -> bool:
     print("Checking Kite Connect authentication...")
+    
+    # Try to use auto-login if credentials are available
+    totp_secret = os.getenv("KITE_TOTP_SECRET")
+    if totp_secret and "your_" not in totp_secret:
+        try:
+            from ingest.kite_auto_login import ensure_valid_token
+            token = ensure_valid_token()
+            print(f"  {CHECK_MARK} Kite auth valid (auto-login succeeded)")
+            return True
+        except Exception as e:
+            print(f"  {WARN_MARK} Auto-login failed: {e} - falling back to manual token")
+    
+    # Fall back to checking existing access token
     if not os.path.exists(".access_token"):
         print(f"  {FAIL_MARK} .access_token not found - run: python -m ingest.kite_auth")
         return False

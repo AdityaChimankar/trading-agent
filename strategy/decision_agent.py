@@ -7,6 +7,10 @@ Combines three independent signals into a single gated decision:
 evaluate_signals() is the pure rule function - both live trading
 (decide()) and backtest.py call this exact same code, so backtest
 results actually reflect what the live agent would have done.
+
+NEW: Optional session/regime gates from strategy/session_features.py and
+strategy/candidates.py - these are the "when NOT to trade" filters that
+measured positive in the strategy lab. Enabled via config.
 """
 from datetime import datetime
 import pandas as pd
@@ -15,6 +19,7 @@ from core.pattern_detection import detect_patterns
 from core.quant_indicators import latest_indicators, compute_macd
 from core.logging_config import get_logger
 from storage.db import get_connection, get_watchlist_symbols
+from core.config import get_config
 
 
 logger = get_logger(__name__)
@@ -27,6 +32,17 @@ def evaluate_signals(
     pattern_confirm_buy_rsi: float = 50, pattern_confirm_sell_rsi: float = 50,
     macd_trend_filter: bool = False, volume_confirm: bool = False,
     min_volume_ratio: float = 1.0,
+    # Session/regime gates (optional, from strategy/candidates.py)
+    session_window: bool = False, session_open_minute: int = 585, session_close_minute: int = 870,
+    cost_cover: bool = False, cost_cover_multiple: float = 3.0,
+    vol_regime: bool = False, vol_regime_low: float = 0.2, vol_regime_high: float = 0.8,
+    vwap_filter: bool = False, vwap_rising: bool = False,
+    htf_agreement: bool = False,
+    gap_filter: bool = False, gap_max_pct: float = 0.02,
+    # Current candle context for session gates
+    minute_of_day: int = None, atr_pctile: float = None, dist_vwap: float = None,
+    vwap_slope: float = None, htf_fast_ret: float = None, htf_slow_ret: float = None,
+    gap_pct: float = None, expected_move: float = None,
 ) -> tuple:
     """Pure decision logic - no DB or I/O. Returns (action, rationale).
 
@@ -54,6 +70,36 @@ def evaluate_signals(
     if volume_confirm and volume_ratio < min_volume_ratio:
         return "HOLD", f"Volume ratio {volume_ratio:.2f} < {min_volume_ratio} - weak conviction{pattern_note}"
 
+    # Session/regime gates - the "when NOT to trade" layer
+    # These are applied BEFORE entry logic to filter out unfavorable conditions
+    if session_window:
+        if minute_of_day is None or not (session_open_minute <= minute_of_day <= session_close_minute):
+            return "HOLD", f"Outside session window ({session_open_minute//60:02d}:{session_open_minute%60:02d}-{session_close_minute//60:02d}:{session_close_minute%60:02d}){pattern_note}"
+
+    if cost_cover:
+        if expected_move is None or expected_move < cost_cover_multiple * 0.0005:  # SLIPPAGE
+            return "HOLD", f"Expected move {expected_move:.4f} < {cost_cover_multiple}x cost{pattern_note}"
+
+    if vol_regime:
+        if atr_pctile is None or not (vol_regime_low <= atr_pctile <= vol_regime_high):
+            return "HOLD", f"ATR percentile {atr_pctile:.2f} outside [{vol_regime_low}, {vol_regime_high}]{pattern_note}"
+
+    if vwap_filter:
+        if dist_vwap is None or dist_vwap < 0:
+            return "HOLD", f"Price below VWAP (dist {dist_vwap:.4f}){pattern_note}"
+
+    if vwap_rising:
+        if vwap_slope is None or vwap_slope < 0:
+            return "HOLD", f"VWAP not rising (slope {vwap_slope:.4f}){pattern_note}"
+
+    if htf_agreement:
+        if htf_fast_ret is None or htf_slow_ret is None or htf_fast_ret <= 0 or htf_slow_ret <= 0:
+            return "HOLD", f"HTF disagreement (fast {htf_fast_ret:.4f}, slow {htf_slow_ret:.4f}){pattern_note}"
+
+    if gap_filter:
+        if gap_pct is not None and abs(gap_pct) >= gap_max_pct:
+            return "HOLD", f"Large gap {gap_pct:.2%} >= {gap_max_pct:.2%}{pattern_note}"
+
     # Strategy 1: RSI oversold/overbought with sentiment confirmation (live only)
     if rsi < rsi_oversold and sentiment > 0.3 and pattern_bias != "bearish":
         return "BUY", f"RSI {rsi:.1f} oversold + positive sentiment ({sentiment:.2f}) + {pattern_bias} pattern{pattern_note}"
@@ -76,6 +122,8 @@ def evaluate_signals(
 
 def decide(symbol: str) -> dict:
     from analysis.sentiment import latest_sentiment  # lazy import - only live trading needs the LLM sentiment path
+    from strategy.session_features import features as session_features
+    from core.signals import prepare_symbol_series
 
     indicators = latest_indicators(symbol)
     if "error" in indicators:
@@ -103,9 +151,62 @@ def decide(symbol: str) -> dict:
         if avg_vol > 0:
             vol_ratio = float(curr_vol / avg_vol)
 
+    # Get session/regime features for optional gates
+    config = get_config()
+    signal_cfg = config.signal
+    
+    minute_of_day = None
+    atr_pctile = None
+    dist_vwap = None
+    vwap_slope = None
+    htf_fast_ret = None
+    htf_slow_ret = None
+    gap_pct = None
+    expected_move = None
+    
+    if signal_cfg.use_session_gates:
+        try:
+            prepared = prepare_symbol_series(symbol, candle_limit=2000)
+            if prepared:
+                sf = session_features(prepared)
+                i = prepared["length"] - 1  # latest candle
+                minute_of_day = float(sf["minute_of_day"][i]) if i < len(sf["minute_of_day"]) else None
+                atr_pctile = float(sf["atr_pctile"][i]) if i < len(sf["atr_pctile"]) else None
+                dist_vwap = float(sf["dist_vwap"][i]) if i < len(sf["dist_vwap"]) else None
+                vwap_slope = float(sf["vwap_slope"][i]) if i < len(sf["vwap_slope"]) else None
+                htf_fast_ret = float(sf["htf_fast_ret"][i]) if i < len(sf["htf_fast_ret"]) else None
+                htf_slow_ret = float(sf["htf_slow_ret"][i]) if i < len(sf["htf_slow_ret"]) else None
+                gap_pct = float(sf["gap_pct"][i]) if i < len(sf["gap_pct"]) else None
+                expected_move = float(sf["expected_move"][i]) if i < len(sf["expected_move"]) else None
+        except Exception:
+            pass  # If session features fail, continue without them
+
     action, rationale = evaluate_signals(
         rsi, adx, sentiment, pattern_bias, patterns_found,
-        macd_hist=macd_hist_val, volume_ratio=vol_ratio
+        macd_hist=macd_hist_val, volume_ratio=vol_ratio,
+        # Session/regime gates from config
+        session_window=signal_cfg.use_session_gates,
+        session_open_minute=signal_cfg.session_gate_open_minute,
+        session_close_minute=signal_cfg.session_gate_close_minute,
+        cost_cover=signal_cfg.use_session_gates,
+        cost_cover_multiple=signal_cfg.cost_cover_multiple,
+        vol_regime=signal_cfg.use_session_gates,
+        vol_regime_low=signal_cfg.vol_regime_low_pctile,
+        vol_regime_high=signal_cfg.vol_regime_high_pctile,
+        vwap_filter=signal_cfg.use_session_gates,
+        vwap_rising=signal_cfg.use_session_gates,
+        htf_agreement=signal_cfg.use_session_gates,
+        gap_filter=signal_cfg.use_session_gates,
+        gap_max_pct=signal_cfg.gap_max_pct,
+        # Session feature values
+        minute_of_day=minute_of_day,
+        atr_pctile=atr_pctile,
+        dist_vwap=dist_vwap,
+        vwap_slope=vwap_slope,
+        htf_fast_ret=htf_fast_ret,
+        htf_slow_ret=htf_slow_ret,
+        gap_pct=gap_pct,
+        expected_move=expected_move,
     )
 
     return {

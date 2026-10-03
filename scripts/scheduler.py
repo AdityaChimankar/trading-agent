@@ -38,8 +38,41 @@ from strategy.decision_agent import run_decision_cycle
 from strategy.llm_decision_agent import run_llm_decision_cycle
 from strategy.ml_decision_agent import run_ml_decision_cycle
 from strategy.shadow import run_shadow_cycle
+from scripts.ml_retrain import run_scheduled_job as ml_retrain_scheduled
 
 logger = get_logger(__name__)
+
+# LLM Kill Switch - checks if LLM path should be disabled
+# Run `python -m scripts.llm_eval` to evaluate and update this status
+LLM_KILL_SWITCH_FILE = Path(__file__).parent.parent / "data" / "llm_kill_switch.json"
+
+
+def is_llm_killed() -> bool:
+    """Check if LLM decision path has been killed by evaluation."""
+    if not LLM_KILL_SWITCH_FILE.exists():
+        return False
+    try:
+        with open(LLM_KILL_SWITCH_FILE) as f:
+            data = json.load(f)
+        return data.get("killed", False)
+    except Exception:
+        return False
+
+
+def kill_llm(reason: str):
+    """Disable LLM decision path."""
+    LLM_KILL_SWITCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(LLM_KILL_SWITCH_FILE, "w") as f:
+        json.dump({"killed": True, "reason": reason, "killed_at": datetime.now().isoformat()}, f)
+    logger.warning(f"LLM kill switch activated: {reason}")
+
+
+def revive_llm():
+    """Re-enable LLM decision path."""
+    if LLM_KILL_SWITCH_FILE.exists():
+        LLM_KILL_SWITCH_FILE.unlink()
+    logger.info("LLM kill switch cleared - LLM path re-enabled")
+
 
 # If the ticker's heartbeat is older than this, treat the live feed as down.
 HEARTBEAT_TRUST_SEC = 90
@@ -98,6 +131,9 @@ def ml_decision_cycle():
 
 @market_hours_only
 def llm_decision_cycle():
+    if is_llm_killed():
+        logger.info("LLM decision cycle skipped: kill switch active")
+        return
     run_llm_decision_cycle(get_watchlist_symbols())
 
 
@@ -155,6 +191,19 @@ def end_of_session_heal():
         logger.info(f"heal end-of-session sweep: {result}")
     except Exception as e:
         logger.error("heal end-of-session sweep failed", extra={"error": str(e)})
+
+
+def ml_retrain_cycle():
+    """Weekly ML model retraining with drift detection.
+    
+    Runs outside market hours to avoid contention with live trading.
+    """
+    logger.info("Starting weekly ML retraining cycle...")
+    try:
+        result = ml_retrain_scheduled()
+        logger.info(f"ML retraining cycle completed: {result}")
+    except Exception as e:
+        logger.error("ML retraining cycle failed", extra={"error": str(e)})
 
 
 scheduler.add_job(
@@ -221,6 +270,12 @@ scheduler.add_job(
     CronTrigger(day_of_week="mon-fri", hour=15, minute=35),
     id="daily_digest",
 )
+# Weekly ML model retraining - Sunday 2 AM (outside market hours)
+scheduler.add_job(
+    ml_retrain_cycle,
+    CronTrigger(day_of_week="sun", hour=2, minute=0),
+    id="ml_retrain_weekly",
+)
 
 
 def _on_job_event(event):
@@ -270,6 +325,7 @@ if __name__ == "__main__":
     logger.info(
         "Scheduler started - news/sentiment/decisions/ML compare every 5 min, "
         "LLM comparison every 15 min, feed watchdog every 10 min, "
-        "repair sweep at 3:32 PM, digest at 3:35 PM..."
+        "repair sweep at 3:32 PM, digest at 3:35 PM, "
+        "weekly ML retraining Sunday 2 AM..."
     )
     scheduler.start()

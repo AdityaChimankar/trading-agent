@@ -57,6 +57,111 @@ def _migrate_add_missing_columns(conn: sqlite3.Connection) -> None:
                 raise  # a real error, not just "already migrated" - don't swallow it
 
 
+def record_realized_cost(
+    symbol: str,
+    signal_timestamp: str,
+    signal_price: float,
+    signal_action: str,
+    fill_timestamp: str,
+    fill_price: float,
+    atr_at_signal: float = None,
+    session_minute: int = None,
+    volume_at_fill: int = None,
+) -> None:
+    """Record the realized execution cost for a signal-to-fill transition.
+    
+    This captures the actual slippage (difference between signal price and fill price),
+    enabling cost-aware position sizing and symbol selection.
+    """
+    from datetime import datetime
+    
+    slippage_pct = ((fill_price - signal_price) / signal_price) * 100
+    if signal_action == "SELL":
+        slippage_pct = -slippage_pct  # normalize: positive = cost for both BUY and SELL
+    
+    conn = get_connection()
+    try:
+        conn.execute(
+            """INSERT INTO realized_costs 
+               (symbol, signal_timestamp, signal_price, signal_action, 
+                fill_timestamp, fill_price, slippage_pct, atr_at_signal,
+                session_minute, volume_at_fill, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (symbol, signal_timestamp, signal_price, signal_action,
+             fill_timestamp, fill_price, slippage_pct, atr_at_signal,
+             session_minute, volume_at_fill, datetime.now().isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_realized_costs(symbol: str = None, limit: int = 1000) -> list:
+    """Get recent realized costs for analysis."""
+    conn = get_connection()
+    try:
+        if symbol:
+            rows = conn.execute(
+                "SELECT * FROM realized_costs WHERE symbol = ? ORDER BY signal_timestamp DESC LIMIT ?",
+                (symbol, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM realized_costs ORDER BY signal_timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_realized_cost_stats(symbol: str = None, min_samples: int = 10) -> dict:
+    """Get statistics on realized costs for cost model calibration."""
+    import statistics
+    
+    costs = get_realized_costs(symbol, limit=5000)
+    if not costs:
+        return {"error": "no realized cost data"}
+    
+    if symbol:
+        costs = [c for c in costs if c["symbol"] == symbol]
+    
+    if len(costs) < min_samples:
+        return {"error": f"insufficient samples: {len(costs)} < {min_samples}"}
+    
+    slippages = [c["slippage_pct"] for c in costs]
+    
+    # Group by session minute for time-of-day analysis
+    by_session = {}
+    for c in costs:
+        if c["session_minute"] is not None:
+            bucket = (c["session_minute"] // 30) * 30  # 30-min buckets
+            by_session.setdefault(bucket, []).append(c["slippage_pct"])
+    
+    session_stats = {}
+    for bucket, vals in by_session.items():
+        if len(vals) >= 5:
+            hour = bucket // 60
+            minute = bucket % 60
+            session_stats[f"{hour:02d}:{minute:02d}"] = {
+                "samples": len(vals),
+                "median": round(statistics.median(vals), 4),
+                "p95": round(sorted(vals)[int(len(vals) * 0.95)], 4),
+            }
+    
+    return {
+        "symbol": symbol or "ALL",
+        "samples": len(slippages),
+        "median_slippage_pct": round(statistics.median(slippages), 4),
+        "mean_slippage_pct": round(statistics.mean(slippages), 4),
+        "p50_slippage_pct": round(statistics.median(slippages), 4),
+        "p95_slippage_pct": round(sorted(slippages)[int(len(slippages) * 0.95)], 4),
+        "max_slippage_pct": round(max(slippages), 4),
+        "min_slippage_pct": round(min(slippages), 4),
+        "by_session": session_stats,
+    }
+
+
 def get_watchlist() -> list:
     """Single source of truth for the watchlist - reads from the DB
     (populated by ingest.fetch_historical's seed_watchlist(), which

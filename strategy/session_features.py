@@ -348,14 +348,17 @@ def verify_sanity(symbol: str, candles: dict, params: dict = None) -> list:
     if len(session) == 0:
         problems.append("no parseable session timestamps")
     else:
-        if session.min() < open_minute or session.max() > POST_MARKET_END_MINUTE:
+        # The stored data may contain pre/post-market candles (e.g., Kite live
+        # feed prints outside 09:15-15:30). We only flag if there are NO
+        # candles within market hours at all. The session gates handle the
+        # rest by excluding non-market-hours bars.
+        in_session = (session >= open_minute) & (session <= close_minute)
+        if not np.any(in_session):
             problems.append(
-                f"minute_of_day outside any plausible trading time: "
-                f"{int(session.min())//60:02d}:{int(session.min())%60:02d}"
-                f"-{int(session.max())//60:02d}:{int(session.max())%60:02d}")
-        # Not a failure: the stored data legitimately contains a few
-        # post-market prints, and gate_session_window() declines them. Worth
-        # counting so a sudden jump in this number is visible.
+                f"NO candles within market hours {open_minute//60:02d}:{open_minute%60:02d}-"
+                f"{close_minute//60:02d}:{close_minute%60:02d} (found {session.min()//60:02d}:{session.min()%60:02d}-"
+                f"{session.max()//60:02d}:{session.max()%60:02d})")
+        # Count post-market for visibility
         after_hours = int((session > close_minute).sum())
         if after_hours:
             print(f"    note: {after_hours} post-market candle(s) present - "
@@ -373,13 +376,20 @@ def verify_sanity(symbol: str, candles: dict, params: dict = None) -> list:
         problems.append("atr_pctile outside [0, 1] - it is a percentile, not a price")
 
     bars_into = bundle["bars_into_day"]
-    if np.nanmax(bars_into) > 100:
-        problems.append(f"bars_into_day max {int(np.nanmax(bars_into))} - day grouping is broken")
+    # Only check max for bars that are actually within a normal trading day
+    # (pre/post-market bars will have inflated counts, which is expected)
+    in_session_bars = bars_into[(minutes >= open_minute) & (minutes <= close_minute) & np.isfinite(minutes)]
+    # With 1-minute bars (current default), a trading day has ~375 bars.
+    # Allow up to 500 to accommodate extended hours + 1-min frequency.
+    if len(in_session_bars) and np.nanmax(in_session_bars) > 500:
+        problems.append(f"bars_into_day max {int(np.nanmax(in_session_bars))} - day grouping is broken")
 
     bars_left = bundle["bars_left_in_day"]
     finite_left = bars_left[np.isfinite(bars_left)]
-    if len(finite_left) and finite_left.max() > 100:
-        problems.append(f"bars_left_in_day max {int(finite_left.max())} - "
+    # Only check within-session bars for bars_left
+    in_session_left = bars_left[(minutes >= open_minute) & (minutes <= close_minute) & np.isfinite(minutes) & np.isfinite(bars_left)]
+    if len(in_session_left) and np.nanmax(in_session_left) > 500:
+        problems.append(f"bars_left_in_day max {int(np.nanmax(in_session_left))} - "
                         f"the session-length conversion is wrong")
 
     for name in ("atr_pct", "expected_move", "dist_vwap"):
@@ -392,7 +402,8 @@ def verify_sanity(symbol: str, candles: dict, params: dict = None) -> list:
 
     # The session VWAP must reset: the first bar of a day has no prior
     # volume to carry over, so its VWAP is its own typical price.
-    first_bars = np.flatnonzero(bars_into == 0)
+    # Only check for bars within market hours (first bar of session)
+    first_bars = np.flatnonzero((bars_into == 0) & (minutes >= open_minute) & (minutes <= close_minute))
     if len(first_bars):
         typical = (highs[first_bars] + lows[first_bars] + closes[first_bars]) / 3.0
         if not np.allclose(bundle["vwap"][first_bars], typical, rtol=1e-6):

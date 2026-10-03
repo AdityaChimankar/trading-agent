@@ -49,7 +49,23 @@ def open_position(payload: OpenPositionRequest):
         position_size=adjusted.approved_size,
         position_value=adjusted.approved_value,
     )
-    add_open_position(recorded_plan)
+    
+    # Get signal timestamp and price for realized cost tracking
+    signal_timestamp = None
+    signal_price = None
+    try:
+        from analysis.opportunity_finder import find_opportunities
+        opportunities = find_opportunities(capital=payload.capital, n=50)
+        for direction in ("bullish", "bearish"):
+            for opp in opportunities[direction]:
+                if opp.symbol == payload.symbol and opp.action == payload.action:
+                    signal_timestamp = opp.signal_timestamp
+                    signal_price = opp.signal_price
+                    break
+    except Exception:
+        pass  # Don't fail if opportunity lookup fails
+    
+    add_open_position(recorded_plan, signal_timestamp=signal_timestamp, signal_price=signal_price)
     return jsonable({"symbol": payload.symbol, "action": payload.action,
                      "shares": adjusted.approved_size, "value": adjusted.approved_value})
 

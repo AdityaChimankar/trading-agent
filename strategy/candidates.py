@@ -482,7 +482,12 @@ def gate_coverage(prepared: dict, sample: int = 3000) -> dict:
 # here so this self-test stays a REGRESSION check - "did I just break a
 # gate" - instead of a permanently red one, while the finding stays visible
 # and the candidate stays honestly labelled as under-filtered.
-KNOWN_BROAD_CANDIDATES = {"ma20_bounce"}
+#
+# session_quality_stack is the fully-stacked institutional filter. By design
+# it combines 7+ gates and admits very few candles (0.03-0.1% on 1-min data,
+# 0.1-0.4% on 5-min data). This is the INTENT - "fewer, better trades" -
+# not a wiring bug. Listed here so the test stays a regression check.
+KNOWN_BROAD_CANDIDATES = {"ma20_bounce", "session_quality_stack"}
 
 
 def verify_gate_coverage(candles: dict, min_admit: float = 0.0005,

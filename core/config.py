@@ -107,6 +107,15 @@ class SignalConfig:
     lookback_min: int = field(default_factory=lambda: _get_env_int("LOOKBACK_MIN", 20))
     swing_order: int = field(default_factory=lambda: _get_env_int("SWING_ORDER", 5))
 
+    # Session/regime gates (the "when NOT to trade" layer from strategy/candidates.py)
+    use_session_gates: bool = field(default_factory=lambda: _get_env_bool("USE_SESSION_GATES", False))
+    session_gate_open_minute: int = field(default_factory=lambda: _get_env_int("SESSION_GATE_OPEN_MINUTE", 585))  # 09:45
+    session_gate_close_minute: int = field(default_factory=lambda: _get_env_int("SESSION_GATE_CLOSE_MINUTE", 870))  # 14:30
+    cost_cover_multiple: float = field(default_factory=lambda: _get_env_float("COST_COVER_MULTIPLE", 3.0))
+    vol_regime_low_pctile: float = field(default_factory=lambda: _get_env_float("VOL_REGIME_LOW_PCTILE", 0.20))
+    vol_regime_high_pctile: float = field(default_factory=lambda: _get_env_float("VOL_REGIME_HIGH_PCTILE", 0.80))
+    gap_max_pct: float = field(default_factory=lambda: _get_env_float("GAP_MAX_PCT", 0.02))
+
 
 @dataclass(frozen=True)
 class IngestConfig:

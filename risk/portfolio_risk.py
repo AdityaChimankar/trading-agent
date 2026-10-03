@@ -61,7 +61,12 @@ def get_open_positions() -> list:
     return [dict(r) for r in rows]
 
 
-def add_open_position(plan: PositionPlan) -> None:
+def add_open_position(plan: PositionPlan, signal_timestamp: str = None, signal_price: float = None) -> None:
+    """Add an open position and record realized cost if signal info provided."""
+    from datetime import datetime
+    from storage.db import record_realized_cost
+    from core.quant_indicators import load_candles
+    
     conn = get_connection()
     conn.execute(
         "INSERT INTO open_positions (symbol, action, entry_price, position_size, position_value, "
@@ -71,6 +76,40 @@ def add_open_position(plan: PositionPlan) -> None:
     )
     conn.commit()
     conn.close()
+    
+    # Record realized cost if signal info is available
+    if signal_timestamp is not None and signal_price is not None:
+        # Get ATR at signal time for cost normalization
+        atr_at_signal = None
+        session_minute = None
+        try:
+            df = load_candles(plan.symbol, limit=50)
+            if len(df) > 0:
+                # Find the candle matching signal_timestamp
+                signal_candle = df[df["timestamp"] == signal_timestamp]
+                if len(signal_candle) > 0:
+                    from core.quant_indicators import compute_atr
+                    atr_at_signal = float(compute_atr(signal_candle).iloc[-1])
+                    # Parse session minute from timestamp
+                    ts = signal_timestamp
+                    if 'T' in ts:
+                        time_part = ts.split('T')[1].split('+')[0]  # Handle both naive and tz-aware
+                        hour, minute = map(int, time_part.split(':')[:2])
+                        session_minute = hour * 60 + minute
+        except Exception:
+            pass  # Don't fail position creation if cost recording fails
+        
+        # Record the cost (slippage between signal price and fill price)
+        record_realized_cost(
+            symbol=plan.symbol,
+            signal_timestamp=signal_timestamp,
+            signal_price=signal_price,
+            signal_action=plan.action,
+            fill_timestamp=datetime.now().isoformat(),
+            fill_price=plan.entry_price,
+            atr_at_signal=atr_at_signal,
+            session_minute=session_minute,
+        )
 
 
 def close_position(position_id: int) -> None:
