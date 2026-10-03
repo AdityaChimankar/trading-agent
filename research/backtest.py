@@ -81,16 +81,18 @@ def summarize(label: str, trades: list) -> dict:
     return result
 
 
-def run_multi_backtest(symbols: list, parallel: bool = True) -> dict:
+def run_multi_backtest(symbols: list, parallel: bool = True, max_workers: int = None) -> dict:
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
+    workers = max_workers or MAX_WORKERS
+
     print(f"Running backtest on {len(symbols)} symbol(s)"
-          + (f" in parallel (max {MAX_WORKERS} workers)..." if parallel and len(symbols) > 1 else " serially..."))
+          + (f" in parallel (max {workers} workers)..." if parallel and len(symbols) > 1 else " serially..."))
     start = time.time()
     all_trades = []
 
     if parallel and len(symbols) > 1:
-        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(collect_trades, s): s for s in symbols}
             done = 0
             for future in as_completed(futures):

@@ -576,7 +576,7 @@ def verify_fast_path_matches_reference(symbol: str, params: dict = None) -> bool
     return fast_key == slow_key
 
 
-MAX_WORKERS = 4
+MAX_WORKERS = 4  # Default fallback, overridden by scripts/optimize_strategy.py's detect_optimal_workers()
 
 
 if __name__ == "__main__":

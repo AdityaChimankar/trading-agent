@@ -18,6 +18,10 @@ DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = DATA_DIR / "trading_agent.db"
 SCHEMA_PATH = PROJECT_ROOT / "storage" / "schema.sql"
 
+# --- parquet storage -----------------------------------------------------
+PARQUET_DIR = DATA_DIR / "parquet"
+CANDLES_PARQUET_DIR = PARQUET_DIR / "candles"
+
 # --- credentials & market-data inputs ------------------------------------
 ACCESS_TOKEN_PATH = PROJECT_ROOT / ".access_token"
 SYMBOLS_TXT = PROJECT_ROOT / "symbols.txt"

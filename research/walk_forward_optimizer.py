@@ -160,14 +160,15 @@ def _summarize_quiet(trades: list) -> dict:
     }
 
 
-def run_walk_forward_multi(symbols: list, parallel: bool = True) -> dict:
+def run_walk_forward_multi(symbols: list, parallel: bool = True, max_workers: int = None) -> dict:
+    workers = max_workers or MAX_WORKERS
     print(f"Running walk-forward optimization on {len(symbols)} symbol(s)"
-          + (f" in parallel (max {MAX_WORKERS} workers)..." if parallel else " serially..."))
+          + (f" in parallel (max {workers} workers)..." if parallel else " serially..."))
     start_time = time.time()
     per_symbol_results = {}
 
     if parallel and len(symbols) > 1:
-        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(run_walk_forward, s, False): s for s in symbols}
             done = 0
             for future in as_completed(futures):
