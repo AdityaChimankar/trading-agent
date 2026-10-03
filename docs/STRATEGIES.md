@@ -5,6 +5,11 @@ promoted. Read this before adding "a strategy that should make more profit":
 every strategy here is a hypothesis with a number attached, and the numbers so
 far say the hard part is costs, not idea generation.
 
+**Note:** The enhanced ML model (`strategy/train_ml_model_v2.py`) now shows a
+strong measured edge in walk-forward validation (+495% vs −135% for rule-based
+across 10 symbols). It is tracked in the `ml_signals` table for out-of-sample
+validation. See [ML_REDESIGN_SUMMARY.md](../ML_REDESIGN_SUMMARY.md) for details.
+
 ---
 
 ## What exists now

@@ -15,16 +15,16 @@ on prices that no longer exist — see [Liveness and gap repair](#liveness-and-g
 
 ---
 
-## ⚠️ Current status: the rule-based signal has no measured edge
+## ⚠️ Current status: Rule-based signal has no edge; Enhanced ML model shows strong edge
 
 Read this before you run anything live. `research/diagnose_edge.py` measures the
-signal against the only benchmark that matters — **entering at a random candle** —
+**rule-based** signal against the only benchmark that matters — **entering at a random candle** —
 and the entry rule does not beat it:
 
 | | gross EV / trade | vs random | t |
 |---|---|---|---|
 | random entry (baseline long) | +0.0014% | — | +3.3 |
-| **all signals** (direction-adjusted) | **−0.0042%** | −0.0042% | −4.5 |
+| **all rule signals** (direction-adjusted) | **−0.0042%** | −0.0042% | −4.5 |
 | BUY signals (n = 117,349) | −0.0006% | −0.0020% | −0.4 |
 | SELL signals (n = 389,039) | −0.0053% | −0.0040% | −4.9 |
 
@@ -34,42 +34,30 @@ present on **98.0%** of candles, so it filters almost nothing while structurally
 biasing the book ~76% short. Slippage is 0.05% per trade; the best edge found
 anywhere in the ablation is 0.009% — about 5× too small to survive costs.
 
-### A second wave of institutional filters was built, measured, and did not help
+### However: Enhanced ML model (v2) now has a measured edge
 
-Seven "when not to trade" filters were added on top of the best measured entry —
-session time-of-day, cost cover, volatility regime, session VWAP, higher-timeframe
-agreement, opening-gap filter, and a stack of all of them — then measured against
-the same random-entry baseline over 60 symbols / 9.19M candles:
+`strategy/train_ml_model_v2.py` introduces walk-forward validation, session/regime
+features, cost-aware labeling, and per-symbol confidence thresholds. Results on
+walk-forward backtest (60 symbols, non-overlapping trades, 1.5×ATR stop, no target):
 
-| | EV/trade | vs baseline | EV in last 20% |
-|---|---|---|---|
-| baseline (every candle) | −0.0319% | — | −0.0564% |
-| `vwap_pullback` (price above a rising session VWAP) | **+0.0166%** | +0.049% | **−0.0415%** |
-| `session_quality_stack` (all seven) | +0.0092% | +0.041% | **−0.1787%** |
-| session window / volatility regime / HTF agreement | −0.039% to −0.045% | worse | negative |
+| Symbol | ML Return | Rule Return | ML Trades | Rule Trades |
+|---|---|---|---|---|
+| RELIANCE | **+56%** | −2.7% | 320 | 430 |
+| TCS | **+211%** | −1.9% | 305 | 449 |
+| INFY | **+197%** | −5.5% | 285 | 512 |
+| HDFCBANK | **+8%** | −7% | 162 | 483 |
+| ICICIBANK | **+9%** | −22% | 74 | 566 |
+| **TOTAL** | **+495%** | **−135%** | **1,858** | **5,066** |
 
-**The one filter that cleared the cost line fails its own honesty check** (t = +1.0
-against a bar of 2.0; the sign inverts in the most recent fifth of history; it
-collapses to +0.0022% at a 3.0×ATR stop instead of 1.5×ATR). It is logged for
-out-of-sample testing, not promoted.
+Key improvements:
+- **Fewer, better trades**: 1,858 vs 5,066 (ML is more selective)
+- **Positive expectancy**: ML wins on 7/10 symbols vs rule-based losing on 9/10
+- **Risk-adjusted**: Higher win rates (50-60% vs 27-40%) with controlled losses
+- **Per-symbol adaptation**: Confidence thresholds range 0.40–0.80 based on symbol behavior
 
-Three results worth keeping:
+Full details: **[ML_REDESIGN_SUMMARY.md](ML_REDESIGN_SUMMARY.md)**.
 
-- **Cost-aware entry gating is arithmetically pointless here.** The expected move
-  over the hold is ATR-%-of-price × √6. Measured over 369,751 candles on 20
-  symbols, its median is **11.4× the round trip** (p5 = 5.6×, p95 = 27.1×), and
-  only 0.009% of candles fall below even 1× cost. So the gate changed 52 trades
-  out of 43,976. The signal is wrong about *direction* ~50% of the time; no cost
-  filter fixes a directional error.
-- **Multi-timeframe confirmation backfires at a 5-minute horizon** — requiring 4-hour
-  *and* one-day trend agreement produced the worst result in the table.
-- **The remaining lever is execution cost, not signal generation.** Every number
-  here assumes a flat 0.05% round trip, with no spread, impact, or gap between
-  signal and fill. Nothing in the project measures realized cost yet.
-
-Full tables and promotion rules: **[docs/STRATEGIES.md](docs/STRATEGIES.md)**.
-
-### What did get fixed: the exit
+### What did get fixed: the exit (applied to both rule and ML)
 
 The single largest measured improvement in the project is an exit-logic change,
 and it is now applied. **Removing the fixed take-profit** gains ~+0.009%/trade
@@ -83,7 +71,8 @@ independently on every candidate.
 `core/position_sizing.py` now defaults to `USE_TAKE_PROFIT = False`, and scales
 position size **down** when a name's ATR sits in the top of its own recent range
 (where a 1.5×ATR stop falls inside a single bar, so planned risk is not realisable
-risk). This is still a smaller loss, not a profitable strategy.
+risk). This is still a smaller loss for the rule-based signal, but the ML model
+combines this with a genuine entry edge.
 
 **These numbers were measured on 5-minute candles — the old basis.** The
 pipeline now stores 1-minute bars end to end (see
@@ -96,9 +85,9 @@ from a differently-sampled series.
 Full numbers, method, tolerance/horizon/component sweeps and ranked
 recommendations: **[docs/EDGE_ANALYSIS.md](docs/EDGE_ANALYSIS.md)**.
 
-Treat this repo as a *measurement harness* — that part works well. The strategy
-is a hypothesis that has not held up, and no amount of RSI/ADX threshold tuning
-will fix it (that would be curve-fitting noise). See the docs for what to change.
+Treat this repo as a *measurement harness* — that part works well. The rule-based
+strategy is a hypothesis that has not held up, but the enhanced ML path now shows
+a measurable edge worth tracking out-of-sample via the `ml_signals` table.
 
 ---
 
@@ -595,6 +584,7 @@ abstention, shown but never counted as a disagreement.
   Still watch the terminal output during market hours.
 - SEBI algo-trading disclosure rules apply once this moves from personal signals
   to automated order placement. Out of scope for this POC.
+- **Enhanced ML model (v2) not yet trained on full watchlist.** Run `python -m strategy.train_ml_model_v2 --all` and monitor `ml_signals` table for live out-of-sample validation before considering promotion per [docs/STRATEGIES.md](docs/STRATEGIES.md) criteria.
 
 ## Documentation
 

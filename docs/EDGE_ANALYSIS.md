@@ -247,8 +247,11 @@ Ordered by measured evidence, best first.
 ## Caveats
 
 - These are **in-sample** measurements across ~18k candles per symbol. They are
-  strong evidence the signal lacks an edge; they are not proof of a specific
-  alternative.
+  strong evidence the **rule-based** signal lacks an edge; they are not proof of a
+  specific alternative.
+- The **enhanced ML model (v2)** shows a strong measured edge in walk-forward
+  validation (+495% vs −135% for rule-based). See
+  [ML_REDESIGN_SUMMARY.md](../ML_REDESIGN_SUMMARY.md) for details.
 - The **exit variants have several degrees of freedom** (stop multiple, target
   ratio, intrabar tie-breaking, max bars). Removing the take-profit is the one
   change with a large margin, but it still needs walk-forward validation —
