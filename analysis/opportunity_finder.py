@@ -42,6 +42,12 @@ from strategy.fast_hybrid_strategy import FastHybridStrategy, StrategyMode, _ind
 from strategy.hybrid_strategy import find_best_mode
 from core.config import get_config
 
+# Simple in-memory cache for find_opportunities results
+# Cache key: (capital_rounded, n, use_mode_cache, max_symbols, use_fixed_mode, warmup)
+# Cache value: (timestamp, result)
+_opportunity_cache: dict[tuple, tuple[float, dict]] = {}
+_CACHE_TTL_SECONDS = 30  # Cache results for 30 seconds
+
 # Point weights for the conviction score - each confirming signal ADDS
 # up to this many points (scaled by its own confidence/magnitude); each
 # CONTRADICTING signal subtracts the same amount. Technical score is
@@ -54,15 +60,22 @@ LLM_WEIGHT = 20.0
 _best_mode_cache: dict[str, StrategyMode] = {}
 
 
-def _get_best_mode(symbol: str, candle_limit: int = 5000, use_cache: bool = True) -> StrategyMode:
-    """Get the best strategy mode for a symbol, using cache or computing via backtest."""
+def _get_best_mode(symbol: str, candle_limit: int = 5000, use_cache: bool = True, use_fixed_mode: bool = True) -> StrategyMode:
+    """Get the best strategy mode for a symbol.
+    
+    If use_fixed_mode is True (default), returns RULE_ML_COMBINED without running backtests.
+    This avoids the extremely slow per-symbol backtest for mode selection.
+    """
+    if use_fixed_mode:
+        return StrategyMode.RULE_ML_COMBINED
+    
     if use_cache and symbol in _best_mode_cache:
         return _best_mode_cache[symbol]
     
     # Import here to avoid circular import
     from strategy.hybrid_strategy import find_best_mode
     
-    # Compute best mode via backtest
+    # Compute best mode via backtest (SLOW - only use if explicitly requested)
     result = find_best_mode([symbol], candle_limit, use_cache=use_cache)
     best_mode = StrategyMode(result["best_mode"])
     _best_mode_cache[symbol] = best_mode
@@ -179,7 +192,7 @@ def _score_conviction(symbol: str, action: str, technical_score: float) -> tuple
     return round(points, 1), agreements, disagreements
 
 
-def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache: bool = True, max_symbols: int = 20) -> dict:
+def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache: bool = True, max_symbols: int = 15, use_fixed_mode: bool = True, warmup: bool = False) -> dict:
     """Returns {'bullish': [...], 'bearish': [...]}, each a list of
     Opportunity objects.
 
@@ -203,10 +216,27 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
     `use_mode_cache`: If True, use cached best modes from disk (fast).
     If False, run backtests to find best modes (slow, but more accurate).
     
+    `use_fixed_mode`: If True (default), skip backtest-based mode selection
+    and use RULE_ML_COMBINED for all symbols. This is ~100x faster.
+    If False, runs per-symbol backtests to find the best mode.
+
     `max_symbols`: Maximum number of symbols to process (for speed).
 
+    `warmup`: If True, warm up indicator caches for symbols before evaluating.
+    Default False (assumes background scheduler has already warmed caches).
+    
     `fast_mode`: If True (default), uses FastHybridStrategy with precomputed
     caches for ~100x speedup. If False, uses original HybridStrategy."""
+    import time
+    
+    # Check cache
+    cache_key = (round(capital or 0, -3), n, use_mode_cache, max_symbols, use_fixed_mode, warmup)
+    current_time = time.time()
+    if cache_key in _opportunity_cache:
+        cached_time, cached_result = _opportunity_cache[cache_key]
+        if current_time - cached_time < _CACHE_TTL_SECONDS:
+            return cached_result
+    
     # Get the symbols we'll need from rankings first (to warm up only those)
     if capital is None:
         from risk.wallet import available_equity  # lazy - keeps this module importable without the wallet book
@@ -237,7 +267,8 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
                 symbols_to_process.append(symbol)
     
     # Warm up caches only for symbols we'll actually process
-    warmup_caches_for_symbols(symbols_to_process)
+    if warmup:
+        warmup_caches_for_symbols(symbols_to_process)
     
     # Use the already-computed sizing results (no duplicate call)
     results = {"bullish": [], "bearish": []}
@@ -258,7 +289,7 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
                 continue
 
             # Get best mode for this symbol and evaluate hybrid signal
-            best_mode = _get_best_mode(symbol, use_cache=use_mode_cache)
+            best_mode = _get_best_mode(symbol, use_cache=use_mode_cache, use_fixed_mode=use_fixed_mode)
             hybrid_action, hybrid_confidence, hybrid_rationale, signal_timestamp, signal_price = _get_hybrid_signal(symbol, best_mode)
             
             # Use hybrid signal if it has a trade action, otherwise fall back to rule-based
@@ -301,6 +332,10 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
     results[direction] = results[direction][:n]
 
     results["excluded"] = sorted(excluded)
+    
+    # Store in cache
+    _opportunity_cache[cache_key] = (current_time, results)
+    
     return results
 
 

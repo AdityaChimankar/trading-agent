@@ -1,5 +1,6 @@
 """SQLite connection + one-time schema setup."""
 import sqlite3
+import time
 from paths import DB_PATH, SCHEMA_PATH
 
 
@@ -17,6 +18,20 @@ def get_connection() -> sqlite3.Connection:
     """)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def execute_with_retry(conn: sqlite3.Connection, query: str, params: tuple = (), max_retries: int = 3) -> sqlite3.Cursor:
+    """Execute a query with retry logic for transient database locks."""
+    for attempt in range(max_retries):
+        try:
+            return conn.execute(query, params)
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(0.5 * (attempt + 1))  # Exponential backoff: 0.5s, 1s, 1.5s
+                continue
+            raise
+    # Should not reach here, but satisfies type checker
+    return conn.execute(query, params)
 def get_open_position_symbols() -> set:
     """Symbols with a currently-open paper position, for cross-referencing
     against the watchlist ranking (so the sidebar can flag them)."""

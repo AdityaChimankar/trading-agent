@@ -372,6 +372,7 @@ class FastHybridStrategy:
             rationale=rationale,
             signal_timestamp=signal_timestamp,
             close_price=signal_close,
+            latency_ms=latency_ms,
         )
     
     def _evaluate_rule_from_prepared(self, prepared: dict, i: int, symbol: str) -> tuple:

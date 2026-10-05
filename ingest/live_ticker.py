@@ -218,11 +218,15 @@ def _collect_buckets(force: bool):
 def _write_candles(conn, rows) -> None:
     if not rows:
         return
-    conn.executemany(
-        "INSERT OR REPLACE INTO candles (symbol, timestamp, open, high, low, close, volume) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)", rows,
-    )
-    conn.commit()
+    try:
+        conn.executemany(
+            "INSERT OR REPLACE INTO candles (symbol, timestamp, open, high, low, close, volume) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)", rows,
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error("Failed to write candles", extra={"error": str(e), "rows": str(rows[:3])}, exc_info=True)
+        raise
 
 
 def _write_heartbeat(conn) -> None:
@@ -232,29 +236,33 @@ def _write_heartbeat(conn) -> None:
         # Both buffers: an unflushed hand-off is data at risk, so it belongs
         # in the "how much is waiting" number.
         pending = len(_buckets) + len(_completed)
-    conn.execute(
-        """
-        INSERT INTO ingest_status (id, connected, connected_at, disconnected_at, last_tick_at,
-                                   symbols_seen, buckets_pending, candles_written,
-                                   heal_queue_depth, reconnects, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            connected = excluded.connected,
-            connected_at = excluded.connected_at,
-            disconnected_at = excluded.disconnected_at,
-            last_tick_at = excluded.last_tick_at,
-            symbols_seen = excluded.symbols_seen,
-            buckets_pending = excluded.buckets_pending,
-            candles_written = excluded.candles_written,
-            heal_queue_depth = excluded.heal_queue_depth,
-            reconnects = excluded.reconnects,
-            updated_at = excluded.updated_at
-        """,
-        (1 if _connected else 0, _connected_at, _disconnected_at, _latest_exchange_minute,
-         len(_symbols_seen), pending, _candles_written, _heal_queue.qsize(), _reconnects,
-         datetime.now().isoformat()),
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            """
+            INSERT INTO ingest_status (id, connected, connected_at, disconnected_at, last_tick_at,
+                                       symbols_seen, buckets_pending, candles_written,
+                                       heal_queue_depth, reconnects, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                connected = excluded.connected,
+                connected_at = excluded.connected_at,
+                disconnected_at = excluded.disconnected_at,
+                last_tick_at = excluded.last_tick_at,
+                symbols_seen = excluded.symbols_seen,
+                buckets_pending = excluded.buckets_pending,
+                candles_written = excluded.candles_written,
+                heal_queue_depth = excluded.heal_queue_depth,
+                reconnects = excluded.reconnects,
+                updated_at = excluded.updated_at
+            """,
+            (1 if _connected else 0, _connected_at, _disconnected_at, _latest_exchange_minute,
+             len(_symbols_seen), pending, _candles_written, _heal_queue.qsize(), _reconnects,
+             datetime.now().isoformat()),
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error("Failed to write heartbeat", extra={"error": str(e)}, exc_info=True)
+        raise
 
 
 def _enqueue_heal(start: datetime, end: datetime) -> None:
@@ -339,7 +347,7 @@ def flush_loop():
         try:
             _flush_once(conn)
         except Exception as e:
-            logger.error("flush iteration failed (continuing)", extra={"error": str(e)})
+            logger.error("flush iteration failed (continuing)", extra={"error": str(e)}, exc_info=True)
 
 
 def _flush_once(conn):

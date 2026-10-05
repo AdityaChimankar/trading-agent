@@ -69,6 +69,7 @@ class HybridSignal:
     rationale: str = ""
     signal_timestamp: Optional[str] = None
     close_price: Optional[float] = None
+    latency_ms: float = 0.0
 
 
 class HybridStrategy:

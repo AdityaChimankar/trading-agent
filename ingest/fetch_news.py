@@ -34,7 +34,7 @@ import feedparser
 import requests
 
 from paths import INSTRUMENTS_CSV
-from storage.db import get_connection, get_watchlist_symbols
+from storage.db import get_connection, get_watchlist_symbols, execute_with_retry
 
 _UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -190,7 +190,7 @@ def fetch_and_store_news() -> None:
             if symbol is None and name_map:
                 symbol = match_symbol_by_name(headline, name_map)
 
-            cur = conn.execute(
+            cur = execute_with_retry(conn,
                 "INSERT OR IGNORE INTO news (symbol, headline, source, published_at, fetched_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (symbol, headline, source, published, fetched_at),

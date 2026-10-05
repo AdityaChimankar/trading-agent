@@ -126,12 +126,18 @@ def _score_symbol(symbol: str) -> dict | None:
     }
 
 
-def rank_watchlist() -> list:
-    """Scores every symbol in the watchlist. Returns raw per-symbol
-    results; use top_bullish()/top_bearish() to get sorted top-N."""
+def rank_watchlist(max_symbols: int = 30) -> list:
+    """Scores symbols in the watchlist. Returns raw per-symbol
+    results; use top_bullish()/top_bearish() to get sorted top-N.
+    
+    Args:
+        max_symbols: Maximum number of symbols to score (default 30 for speed).
+    """
     open_symbols = get_open_position_symbols()
     scored = []
-    for symbol in get_watchlist_symbols():
+    for i, symbol in enumerate(get_watchlist_symbols()):
+        if i >= max_symbols:
+            break
         result = _score_symbol(symbol)
         if result:
             result["has_open_position"] = symbol in open_symbols
@@ -149,7 +155,7 @@ def top_bearish(scored: list, n: int = 10) -> list:
     return sorted(candidates, key=lambda s: s["bearish_score"], reverse=True)[:n]
 
 
-def rank_watchlist_with_sizing(capital: float, n: int = 10, reserve_prior: bool = False) -> dict:
+def rank_watchlist_with_sizing(capital: float, n: int = 10, reserve_prior: bool = False, max_symbols: int = 30) -> dict:
     """
     Combines the accumulated bullish/bearish score (rank_watchlist) with
     an actual portfolio-adjusted position-sizing suggestion for the top
@@ -176,10 +182,12 @@ def rank_watchlist_with_sizing(capital: float, n: int = 10, reserve_prior: bool 
     times the book's value. The default (False) keeps the historical
     per-row behaviour: a diagnostic view (the sidebar, /api/pipeline) WANTS
     each row shown standalone, judged only against what is genuinely open.
+    
+    max_symbols: Maximum number of symbols to score in rank_watchlist (default 500).
     """
     from risk.portfolio_risk import calculate_portfolio_adjusted_position
 
-    scored = rank_watchlist()
+    scored = rank_watchlist(max_symbols=max_symbols)
 
     def _with_sizing(entries: list, action: str) -> list:
         enriched = []

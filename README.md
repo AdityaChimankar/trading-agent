@@ -244,21 +244,21 @@ cd frontend && npm install && cd ..
 python -m ingest.kite_auto_login          # automated daily login with TOTP (preferred)
 # OR
 python -m ingest.kite_auth                # manual: opens a URL, paste back the request_token
-python -m ingest.fetch_historical         # 60 days of 1-min candles, resumable if interrupted
+python -m ingest.fetch_historical         # 120 days of 1-min candles, resumable if interrupted
 ```
 
 The default interval is **minute**, deliberately matching what the live ticker
 writes — a 5-minute history beside 1-minute live candles in one table made
 "the last 200 candles" mean two different horizons and silently rescaled ATR
-and RSI between backtest and session. Minute history is heavy (~375 rows per
-symbol per day), so the default lookback is 60 days rather than a year:
+and RSI between backtest and session. Default is **120 days** (sufficient for
+walk-forward optimization: ~50 days train + 10 days test × multiple folds).
 
 ```bash
-python -m ingest.fetch_historical --days 120            # more minute history
-python -m ingest.fetch_historical --interval 5minute    # the old behaviour
+python -m ingest.fetch_historical --days 250         # ~1 year (requires Parquet migration)
+python -m ingest.fetch_historical --interval 5minute # the old behaviour
 ```
 
-For 500 symbols, expect 30–60 minutes — Kite rate-limits historical requests.
+For 500 symbols at 120 days, expect 45–90 minutes — Kite rate-limits historical requests.
 Re-runs skip symbols already completed *for that interval* (tracked in the
 `backfill_state` table, since the candles table alone cannot tell a minute bar
 from a 5-minute one).
