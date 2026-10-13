@@ -129,10 +129,16 @@ best mode (RULE_ONLY, ML_ONLY, RULE_ML_COMBINED) per symbol and caches it.
 `strategy/fast_hybrid_strategy.py` adds precomputed indicator/sentiment caches
 for production latency (<50ms/symbol).
 
-The three decision agents are **parallel, not sequential**. `decision_agent.py`
-is the only one that counts; the LLM and ML paths exist to build a comparison
-track record on identical inputs. They write to separate tables precisely so a
-comparison can never contaminate the tested path.
+**Signal source tracking**: Every open position now stores its signal source
+(`rule`, `ml`, `hybrid`, `llm`). The position monitor (`risk/position_monitor.py`)
+checks for signal reversals using the SAME source that opened the position:
+- `rule` → queries `signals` table
+- `ml` → queries `ml_signals` table  
+- `hybrid` → queries `hybrid_signals` table
+- `llm` → queries `llm_signals` table
+
+This ensures ML/Hybrid/LLM signals can open and manage positions with the same
+rigor as rule-based signals.
 
 ## Storage schema
 
@@ -154,7 +160,7 @@ created/migrated by `storage/db.py`:
 | `strategy_signals` | `strategy/shadow.py` | Candidate votes, logged beside the rule agent's action on the same candle |
 | `hybrid_signals` | `strategy/hybrid_strategy.py`, `strategy/fast_hybrid_strategy.py` | Hybrid strategy signals with mode, rule/ML actions, confidence |
 | `digests` | `analysis/digest.py` | End-of-day narrative |
-| `open_positions` | `risk/portfolio_risk.py` (via the API) | Paper ledger, incl. stop_loss / take_profit |
+| `open_positions` | `risk/portfolio_risk.py` (via the API) | Paper ledger, incl. stop_loss / take_profit / **signal_source** |
 | `trades` | `risk/wallet.py` (via the API) | Closed trades: entry/exit, realized P&L, exit reason |
 | `wallet_settings` | the API | Singleton: paper capital the book builds from |
 | `wallet_transactions` | the API | Deposits, withdrawals, and realized P&L, in order |

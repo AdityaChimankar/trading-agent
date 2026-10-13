@@ -192,7 +192,12 @@ def build(prepared: dict, params: dict = None) -> dict:
     typical = (highs + lows + closes) / 3.0
     pv_cum = _group_cumsum(typical * volumes, day)
     v_cum = _group_cumsum(volumes, day)
+    # VWAP = cumulative typical*volume / cumulative volume.
+    # When cumulative volume is 0 (first bar of a day with 0 volume),
+    # fall back to the typical price of that bar.
     vwap = _safe_ratio(pv_cum, v_cum)
+    zero_cum_vol = (v_cum == 0)
+    vwap[zero_cum_vol] = typical[zero_cum_vol]
     dist_vwap = _safe_ratio(closes - vwap, vwap)
     # Explicitly shifted, never np.roll: rolling wraps around, which would
     # make the first `slope_bars` bars of the series compare against the END

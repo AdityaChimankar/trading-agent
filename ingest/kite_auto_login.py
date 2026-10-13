@@ -43,23 +43,12 @@ def generate_totp() -> str:
     return totp.now()
 
 
-def _get_sync_playwright():
-    """Import Playwright lazily so editor/runtime checks do not fail before install."""
-    try:
-        from importlib import import_module
-        return import_module("playwright.sync_api").sync_playwright
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "Playwright is not installed. Run: pip install playwright && playwright install chromium"
-        ) from exc
-
-
 def login_with_totp() -> str:
     """
     Automated browser login to Kite using Playwright.
     Returns the access_token.
     """
-    sync_playwright = _get_sync_playwright()
+    from playwright.sync_api import sync_playwright
     
     if not all([API_KEY, API_SECRET, TOTP_SECRET, KITE_USER_ID, KITE_PASSWORD]):
         raise ValueError(

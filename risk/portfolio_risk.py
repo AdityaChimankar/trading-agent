@@ -61,8 +61,15 @@ def get_open_positions() -> list:
     return [dict(r) for r in rows]
 
 
-def add_open_position(plan: PositionPlan, signal_timestamp: str = None, signal_price: float = None) -> None:
-    """Add an open position and record realized cost if signal info provided."""
+def add_open_position(plan: PositionPlan, signal_timestamp: str = None, signal_price: float = None, signal_source: str = None) -> None:
+    """Add an open position and record realized cost if signal info provided.
+    
+    Args:
+        plan: The position plan with sizing details
+        signal_timestamp: Timestamp of the signal candle
+        signal_price: Price at signal time
+        signal_source: Source of the signal - 'rule', 'ml', 'hybrid', 'llm'
+    """
     from datetime import datetime
     from storage.db import record_realized_cost
     from core.quant_indicators import load_candles
@@ -70,9 +77,9 @@ def add_open_position(plan: PositionPlan, signal_timestamp: str = None, signal_p
     conn = get_connection()
     conn.execute(
         "INSERT INTO open_positions (symbol, action, entry_price, position_size, position_value, "
-        "risk_amount, stop_loss, take_profit, opened_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
+        "risk_amount, stop_loss, take_profit, opened_at, status, signal_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
         (plan.symbol, plan.action, plan.entry_price, plan.position_size, plan.position_value,
-         plan.risk_amount, plan.stop_loss, plan.take_profit, datetime.now().isoformat()),
+         plan.risk_amount, plan.stop_loss, plan.take_profit, datetime.now().isoformat(), signal_source),
     )
     conn.commit()
     conn.close()

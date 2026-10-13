@@ -127,7 +127,7 @@ def test_zero_capital_does_not_divide_by_zero(book, monkeypatch):
 # --- the self-consistent list mode ---------------------------------------------
 
 def test_reserve_prior_bounds_the_whole_list_to_the_cap(book, monkeypatch):
-    monkeypatch.setattr(rankings, "rank_watchlist", lambda: _scored(3))
+    monkeypatch.setattr(rankings, "rank_watchlist", lambda max_symbols=500: _scored(3))
     monkeypatch.setattr(pr, "get_open_positions", lambda: [])
     monkeypatch.setattr(pr, "calculate_position",
                         lambda s, a, c: _plan(s, a, size=400, entry=100.0))
@@ -146,7 +146,7 @@ def test_reserve_prior_bounds_the_whole_list_to_the_cap(book, monkeypatch):
 def test_blocked_row_releases_no_reservation(book, monkeypatch):
     """A row refused by Check 0 (symbol already open) promised nothing, so it
     must not shrink the rows after it."""
-    monkeypatch.setattr(rankings, "rank_watchlist", lambda: _scored(2))
+    monkeypatch.setattr(rankings, "rank_watchlist", lambda max_symbols=500: _scored(2))
     monkeypatch.setattr(pr, "get_open_positions", lambda: [_open("S0", 10000)])
     monkeypatch.setattr(pr, "calculate_position",
                         lambda s, a, c: _plan(s, a, size=400, entry=100.0))
@@ -161,7 +161,7 @@ def test_blocked_row_releases_no_reservation(book, monkeypatch):
 def test_default_sizing_stays_per_row_and_unchanged(book, monkeypatch):
     """Callers that do not opt in get exactly the historical behaviour: every
     row sized independently against what is genuinely open."""
-    monkeypatch.setattr(rankings, "rank_watchlist", lambda: _scored(3))
+    monkeypatch.setattr(rankings, "rank_watchlist", lambda max_symbols=500: _scored(3))
     monkeypatch.setattr(pr, "get_open_positions", lambda: [])
     monkeypatch.setattr(pr, "calculate_position",
                         lambda s, a, c: _plan(s, a, size=400, entry=100.0))

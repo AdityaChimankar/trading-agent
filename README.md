@@ -1,661 +1,294 @@
-# Intraday Trading Signal Agent
+# Trading Agent - NSE Intraday Trading Signal System
 
-A local-first research pipeline for NSE intraday signals. It ingests live and
-historical candles, computes deterministic technical/pattern features, and runs
-**three independent decision paths side by side** — rule-based, LLM, and ML — so
-their calls can be compared on real outcomes instead of argued about. On top of
-that: ATR-based position sizing, portfolio-level risk caps, walk-forward
-threshold validation, paper-position monitoring, and a FastAPI + React dashboard.
-Underneath all of it, a live-feed watchdog that detects a stalled stream,
-repairs the missing candles from the exchange's own record, and refuses to trade
-on prices that no longer exist — see [Liveness and gap repair](#liveness-and-gap-repair).
+A local-first research pipeline for NSE intraday signals. It ingests live and historical candles, computes deterministic technical/pattern features, and runs **three independent decision paths side by side** — rule-based, LLM, and ML — so their calls can be compared on real outcomes instead of argued about.
 
-**Paper trading only.** Nothing in this repository places a real order. The
-`open_positions` table is a manual ledger you fill in by clicking a button.
-
----
-
-## ⚠️ Current status: Rule-based signal has no edge; Enhanced ML model shows strong edge
-
-Read this before you run anything live. `research/diagnose_edge.py` measures the
-**rule-based** signal against the only benchmark that matters — **entering at a random candle** —
-and the entry rule does not beat it:
-
-| | gross EV / trade | vs random | t |
-|---|---|---|---|
-| random entry (baseline long) | +0.0014% | — | +3.3 |
-| **all rule signals** (direction-adjusted) | **−0.0042%** | −0.0042% | −4.5 |
-| BUY signals (n = 117,349) | −0.0006% | −0.0020% | −0.4 |
-| SELL signals (n = 389,039) | −0.0053% | −0.0040% | −4.9 |
-
-BUY is statistically indistinguishable from a coin flip (t = −0.4). The "pattern
-confirmation" gate is not a gate at all — a bullish or bearish pattern code is
-present on **98.0%** of candles, so it filters almost nothing while structurally
-biasing the book ~76% short. Slippage is 0.05% per trade; the best edge found
-anywhere in the ablation is 0.009% — about 5× too small to survive costs.
-
-### However: Enhanced ML model (v2) now has a measured edge
-
-`strategy/train_ml_model_v2.py` introduces walk-forward validation, session/regime
-features, cost-aware labeling, and per-symbol confidence thresholds. Results on
-walk-forward backtest (60 symbols, non-overlapping trades, 1.5×ATR stop, no target):
-
-| Symbol | ML Return | Rule Return | ML Trades | Rule Trades |
-|---|---|---|---|---|
-| RELIANCE | **+56%** | −2.7% | 320 | 430 |
-| TCS | **+211%** | −1.9% | 305 | 449 |
-| INFY | **+197%** | −5.5% | 285 | 512 |
-| HDFCBANK | **+8%** | −7% | 162 | 483 |
-| ICICIBANK | **+9%** | −22% | 74 | 566 |
-| **TOTAL** | **+495%** | **−135%** | **1,858** | **5,066** |
-
-Key improvements:
-- **Fewer, better trades**: 1,858 vs 5,066 (ML is more selective)
-- **Positive expectancy**: ML wins on 7/10 symbols vs rule-based losing on 9/10
-- **Risk-adjusted**: Higher win rates (50-60% vs 27-40%) with controlled losses
-- **Per-symbol adaptation**: Confidence thresholds range 0.40–0.80 based on symbol behavior
-
-Full details: **[ML_REDESIGN_SUMMARY.md](ML_REDESIGN_SUMMARY.md)**.
-
-### What did get fixed: the exit (applied to both rule and ML)
-
-The single largest measured improvement in the project is an exit-logic change,
-and it is now applied. **Removing the fixed take-profit** gains ~+0.009%/trade
-(~33% relative) versus the exit logic previously traded live, because the 2:1
-target fires on 23.4% of trades while the 1.5×ATR stop fires on 55.9%. A 2:1
-target on a 1.5×ATR stop needs a ~3×ATR move inside the hold, which almost never
-happens — so the target caps small favourable drifts while the stop still takes
-the full loss on the rest. `research/strategy_lab.py` reproduces this
-independently on every candidate.
-
-`core/position_sizing.py` now defaults to `USE_TAKE_PROFIT = False`, and scales
-position size **down** when a name's ATR sits in the top of its own recent range
-(where a 1.5×ATR stop falls inside a single bar, so planned risk is not realisable
-risk). This is still a smaller loss for the rule-based signal, but the ML model
-combines this with a genuine entry edge.
-
-**These numbers were measured on 5-minute candles — the old basis.** The
-pipeline now stores 1-minute bars end to end (see
-[Backfill](#backfill-one-time-or-an-occasional-top-up)), which changes what RSI,
-ADX and ATR are actually measuring. Re-run `research/diagnose_edge` and
-`research.backtest` on the new basis before reading anything below as current:
-the measurement harness is sound, but every number in this table was produced
-from a differently-sampled series.
-
-Full numbers, method, tolerance/horizon/component sweeps and ranked
-recommendations: **[docs/EDGE_ANALYSIS.md](docs/EDGE_ANALYSIS.md)**.
-
-Treat this repo as a *measurement harness* — that part works well. The rule-based
-strategy is a hypothesis that has not held up, but the enhanced ML path now shows
-a measurable edge worth tracking out-of-sample via the `ml_signals` table.
-
----
-
-## Project structure
-
-Layers point downward only: `storage` → `core` → `{analysis, strategy, risk}` →
-`research`. `scripts/` orchestrates, `api/` reads.
+## Architecture
 
 ```
 trading-agent/
-├── paths.py                        Every file location in the project, in one place
-├── symbols.txt                     Your watchlist seed (one NSE symbol per line)
-├── requirements.txt
-├── .env.example                    Credential template (Kite + OpenRouter keys)
-│
-├── storage/                        SQLite + Parquet persistence
-│   ├── db.py                        Connection (WAL), schema init, migrations, watchlist reads
-│   ├── schema.sql                   Table definitions
-│   └── parquet_store.py             Parquet read/write for candles (10-100x faster than SQLite)
-│
-├── core/                           Deterministic primitives — no LLM, no I/O side effects
-│   ├── freshness.py                 Market-session + candle staleness — "is this data live?"
-│   ├── quant_indicators.py          RSI, ATR, ADX (Pandas + Polars-accelerated variants)
-│   ├── pattern_detection.py         Candlestick + swing patterns
-│   ├── position_sizing.py           ATR-based size, stop-loss; no take-profit by default
-│                                    (measured), volatility-aware risk scaling
-│   ├── signals.py                   Shared signal/backtest primitives (SLIPPAGE, DEFAULT_PARAMS,
-│                                    prepare_symbol_series, vectorized_evaluate, simulate_trades)
-│   ├── ml_versioning.py             Model registry & drift detection
-│   ├── llm_client.py                OpenRouter client with circuit breaker
-│   ├── circuit_breaker.py           Circuit breaker pattern for external APIs
-│   ├── logging_config.py            Structured logging setup
-│   ├── shutdown.py                  Graceful shutdown handling
-│   └── config.py                    Centralized configuration (pydantic-settings)
-│
-├── ingest/                         Getting market data in
-│   ├── kite_auth.py                 Daily Zerodha login -> .access_token
-│   ├── build_nifty500_symbols.py    NSE indices (Nifty 50/100/200/500, Midcap 150, Smallcap 250, or full EQ list 2300+) -> symbols.txt
-│   ├── instrument_lookup.py         symbols.txt -> instrument tokens
-│   ├── instruments.csv              Kite instrument dump (~9 MB, downloaded, tracked)
-│   ├── watchlist_resolved.py        Generated token map (read by fetch_historical)
-│   ├── fetch_historical.py          Resumable, rate-limited 1-min candle backfill
-│   ├── gap_healer.py                Finds missing minutes, refetches them from Kite
-│   ├── fetch_news.py                9 free feeds (Moneycontrol, ET, CNBC-TV18, Livemint,
-│   │                                 Business Standard, NDTV Profit, BSE announcements),
-│   │                                 symbol-tagged via word-boundary + company-name matching
-│   └── live_ticker.py               KiteTicker WebSocket -> 1-min candles, heartbeat,
-│                                    stall watchdog, heal-on-reconnect
-│
-├── analysis/                       Read-only intelligence over stored data
-│   ├── sentiment.py                 OpenRouter sentiment scoring on tagged news
-│   ├── rankings.py                  Watchlist-wide bullish/bearish scoring
-│   ├── opportunity_finder.py        Conviction-ranked top picks (uses HybridStrategy)
-│   ├── technical_summary.py         Human-readable indicator read
-│   └── digest.py                    End-of-day narrative summary
-│
-├── strategy/                       The three decision paths + experimental candidates
-│   ├── decision_agent.py            Rule-based — THE tested path
-│   ├── llm_decision_agent.py        OpenRouter decisions, parallel comparison
-│   ├── ml_decision_agent.py         Trained-model decisions (original), parallel comparison
-│   ├── ml_decision_agent_v2.py      Enhanced ML decisions with session/regime features
-│   ├── ml_features.py               Feature engineering (no lookahead, verified)
-│   ├── train_ml_model.py            Chronological train/test split + trade simulation
-│   ├── train_ml_model_v2.py         Walk-forward training + confidence thresholding
-│   ├── session_features.py          Session VWAP, ATR percentile, HTF momentum, gap,
-│   │                                cost cover — causal, memoized, --selftest
-│   ├── candidates.py                Candidate entries + session/regime gates, --selftest
-│   ├── hybrid_strategy.py           Rule/ML combination modes with backtest selection
-│   ├── fast_hybrid_strategy.py      Cached, low-latency hybrid for real-time use
-│   └── shadow.py                    Logs candidate votes to strategy_signals, live
-│
-├── risk/
-│   ├── portfolio_risk.py            Risk budget + same-symbol + correlation caps
-│   ├── position_monitor.py          Live P&L and HOLD/SELL per open position
-│   └── wallet.py                    Paper wallet: equity, transactions, daily snapshots
-│
-├── research/                       Offline validation
-│   ├── backtest.py                  Vectorized harness, --selftest
-│   ├── walk_forward_optimizer.py    Rolling out-of-sample threshold fitting
-│   ├── diagnose_edge.py             Is there any edge at all? (baseline + ablations)
-│   ├── strategy_lab.py              Measures candidates vs baselines, with costs
-│   └── donchian_breakout.py         Donchian channel breakout research
-│
-├── scripts/
-│   ├── scheduler.py                 The daily automation loop
-│   ├── validate_setup.py            Pre-flight check before market hours
-│   ├── supervisor.py                Process supervisor (experimental)
-│   ├── optimize_strategy.py         Auto-scaled parameter optimization loop (Parquet, Polars, workers)
-│   ├── migrate_legacy_timestamps.py One-time migration for legacy +05:30 timestamps
-│
-├── api/                            FastAPI JSON layer — NO trading logic
-│   ├── main.py                      App, CORS, startup DB init, router registration
-│   ├── serializers.py               numpy/pandas/dataclass -> JSON-safe conversion
-│   └── routers/                     watchlist, positions, opportunities, digest, symbols,
-│                                    wallet, liveness, history, pipeline, health
-│
-├── frontend/                       React + TypeScript + Vite dashboard
-│   └── src/                         Hash-router pages (dashboard, transactions,
-│                                    signal pipeline), polling hooks, Plotly chart, panels
-│
-├── models/ml_model.joblib          Trained ML model artifact
-└── data/
-    ├── trading_agent.db           SQLite database (gitignored, created by storage/db.py)
-    ├── parquet/candles/           Parquet storage (partitioned by symbol/interval)
-    └── liquidity_cache.json       Cached liquidity rankings (24h TTL)
+├── src/trading_agent/
+│   ├── core/           # Shared types, config, indicators, logging, exceptions
+│   ├── ingest/         # Data ingestion (Kite Connect, historical, live, news)
+│   ├── storage/        # Database (SQLAlchemy) + Parquet storage
+│   ├── strategy/       # Signals, candidates, decision agents (rule/LLM/ML)
+│   ├── risk/           # Portfolio risk, position monitoring, paper wallet
+│   ├── analysis/       # Opportunity finder, rankings, technical summary
+│   ├── api/            # FastAPI REST API + WebSocket
+│   ├── research/       # Backtesting, edge diagnosis, strategy lab
+│   ├── optimize/       # Walk-forward optimization CLI
+│   └── cli/            # Main CLI entry point
+├── tests/              # Unit and integration tests
+├── frontend/           # React + Vite dashboard
+└── docker-compose.yml  # Local development stack
 ```
 
-Details in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+## Key Features
 
----
+- **Multi-path Decision Making**: Rule-based, LLM, and ML signals run independently
+- **Walk-Forward Optimization**: Proper out-of-sample parameter validation
+- **Vectorized Backtesting**: Fast, NumPy-based simulation engine
+- **Gap Healing**: Automatic detection and repair of missing candles
+- **Paper Trading**: Full position management with realistic charges
+- **Modern Stack**: Python 3.11+, FastAPI, SQLAlchemy 2.0, Polars, LightGBM
+- **Type Safety**: Full type hints with mypy, ruff, black
 
-## Quickstart
+## Quick Start
 
-**Every command below is run from the repository root** — that is a requirement
-of the `python -m` form, and it is what makes the package imports resolve.
+### Prerequisites
+
+- Python 3.11+
+- PostgreSQL 16+ (or SQLite for development)
+- Kite Connect API credentials
+- Node.js 20+ (for frontend)
+
+### Installation
 
 ```bash
-pip install -r requirements.txt
+# Clone repository
+git clone <repo-url>
+cd trading-agent
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -e ".[dev]"
+
+# Install Playwright for auto-login
 playwright install chromium
+
+# Copy and configure environment
+cp .env.example .env
+# Edit .env with your Kite credentials
+
+# Database is initialized automatically on API startup
 ```
 
-1. Sign up at https://developers.kite.trade/signup and subscribe to the paid
-   Kite Connect plan (required for live *and* historical data).
-2. Get a free OpenRouter API key at https://openrouter.ai/keys.
-3. Copy `.env.example` to `.env` and fill in `KITE_API_KEY`, `KITE_API_SECRET`,
-   `KITE_TOTP_SECRET`, `KITE_USER_ID`, `KITE_PASSWORD`, and `OPENROUTER_API_KEY`.
-
-   **To get `KITE_TOTP_SECRET`:** Enable 2FA on Kite (Profile → My Profile → Two-factor authentication), choose "Authenticator app", and copy the text secret shown below the QR code (base32 string like `JBSWY3DPEHPK3PXP`).
-4. Build the watchlist and create the database:
+### Development with Docker
 
 ```bash
-# Option A: Nifty 500 (default, 500 symbols)
-python -m ingest.build_nifty500_symbols
+# Start all services
+docker-compose up -d
 
-# Option B: Full NSE equity list (2300+ symbols, then filter by liquidity)
-python -m ingest.build_nifty500_symbols --full
+# View logs
+docker-compose logs -f api
 
-# Option C: Nifty 500 + Midcap 150 + Smallcap 250 (deduplicated, ~500 symbols)
-python -m ingest.build_nifty500_symbols --combined
-
-python -m ingest.instrument_lookup symbols.txt # -> ingest/watchlist_resolved.py
-python -m storage.db                           # create/migrate the schema
+# Run tests
+docker-compose exec api pytest
 ```
 
-5. Install the front end's dependencies (Node 18+):
+## CLI Usage
 
 ```bash
-cd frontend && npm install && cd ..
+# Authenticate with Kite
+trading-agent login
+
+# Fetch historical data
+trading-agent ingest RELIANCE TCS INFY --interval 5minute --days 100
+
+# Backfill years of data
+trading-agent backfill --years 2
+
+# Run backtest
+trading-agent backtest RELIANCE TCS --start 2024-01-01 --end 2024-06-30
+
+# Diagnose signal edge
+trading-agent diagnose RELIANCE TCS
+
+# Run walk-forward optimization
+trading-agent optimize walk-forward RELIANCE TCS
+
+# Run walk-forward optimization on all symbols
+trading-agent optimize walk-forward
+
+# Train ML model
+trading-agent optimize ml-model RELIANCE TCS
+
+# Train enhanced ML model (v2)
+trading-agent optimize ml-model-v2 RELIANCE TCS
+
+# Run strategy lab grid search
+trading-agent optimize strategy-lab RELIANCE
+
+# Run trading pipeline
+trading-agent pipeline
+
+# Start API server
+trading-agent api
+
+# Fetch latest news
+trading-agent news
+
+# Show storage statistics
+trading-agent storage-stats
+
+# Compact Parquet files
+trading-agent compact RELIANCE
 ```
 
-## Backfill (one-time, or an occasional top-up)
+## Project Structure Details
+
+### Core Modules
+
+| Module | Purpose |
+|--------|---------|
+| `config.py` | Pydantic Settings for all configuration |
+| `quant_indicators.py` | Vectorized technical indicators (RSI, ADX, ATR, MACD, etc.) |
+| `pattern_detection.py` | Candlestick and chart pattern detection |
+| `signals.py` | Rule-based signal evaluation |
+| `position_sizing.py` | ATR-based position sizing with Kelly/Optimal f |
+| `circuit_breaker.py` | Resilience pattern for external APIs |
+| `freshness.py` | Data freshness monitoring |
+| `ml_versioning.py` | ML model registry with versioning |
+
+### Ingestion Modules
+
+| Module | Purpose |
+|--------|---------|
+| `kite_auth.py` | Kite Connect authentication |
+| `instrument_lookup.py` | NSE symbol ↔ token mapping |
+| `fetch_historical.py` | Historical data with rate limiting |
+| `live_ticker.py` | WebSocket live data + candle aggregation |
+| `gap_healer.py` | Missing candle detection and repair |
+| `watchlist_resolved.py` | Watchlist management |
+| `kite_auto_login.py` | Automated TOTP login with Playwright |
+| `fetch_news.py` | Multi-source news fetching |
+
+### Strategy Modules
+
+| Module | Purpose |
+|--------|---------|
+| `candidates.py` | Trading candidate generation |
+| `decision_agent.py` | Rule-based decisions |
+| `llm_decision_agent.py` | LLM-based decisions |
+| `ml_decision_agent.py` | ML model inference |
+| `ml_features.py` | Feature engineering (v1/v2) |
+| `train_ml_model.py` | Standard ML training |
+| `train_ml_model_v2.py` | Enhanced training with regimes |
+| `session_features.py` | Intraday session features |
+| `hybrid_strategy.py` | Multi-agent combination |
+| `fast_hybrid_strategy.py` | Real-time optimized hybrid |
+| `shadow.py` | Shadow testing framework |
+
+### Risk Modules
+
+| Module | Purpose |
+|--------|---------|
+| `portfolio_risk.py` | Portfolio-level risk limits |
+| `position_monitor.py` | Real-time position management |
+| `wallet.py` | Paper trading with realistic charges |
+
+### Analysis Modules
+
+| Module | Purpose |
+|--------|---------|
+| `opportunity_finder.py` | Signal combination and ranking |
+| `rankings.py` | Momentum, mean reversion, volume rankings |
+| `technical_summary.py` | Automated technical analysis |
+| `sentiment.py` | News sentiment analysis |
+| `digest.py` | Daily trading digests |
+
+## API Endpoints
+
+```
+GET  /api/v1/health              # Health check
+GET  /api/v1/symbols             # List symbols
+GET  /api/v1/symbols/{symbol}    # Symbol details
+GET  /api/v1/history/{symbol}    # Historical candles
+GET  /api/v1/opportunities       # Current opportunities
+GET  /api/v1/positions           # Open positions
+POST /api/v1/positions           # Create position
+POST /api/v1/positions/{id}/close # Close position
+GET  /api/v1/wallet/summary      # Wallet snapshot
+GET  /api/v1/wallet/metrics      # Performance metrics
+GET  /api/v1/watchlist           # Watchlist
+POST /api/v1/watchlist           # Add to watchlist
+GET  /api/v1/liveness/freshness  # Data freshness
+GET  /api/v1/liveness/storage    # Storage stats
+```
+
+## Testing
 
 ```bash
-python -m ingest.kite_auto_login          # automated daily login with TOTP (preferred)
-# OR
-python -m ingest.kite_auth                # manual: opens a URL, paste back the request_token
-python -m ingest.fetch_historical         # 120 days of 1-min candles, resumable if interrupted
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=trading_agent --cov-report=html
+
+# Run specific module
+pytest tests/unit/test_core.py -v
+
+# Run all unit tests (61 tests passing)
+pytest tests/unit/ -v
+
+# Run integration tests
+pytest tests/integration/ -v
 ```
 
-The default interval is **minute**, deliberately matching what the live ticker
-writes — a 5-minute history beside 1-minute live candles in one table made
-"the last 200 candles" mean two different horizons and silently rescaled ATR
-and RSI between backtest and session. Default is **120 days** (sufficient for
-walk-forward optimization: ~50 days train + 10 days test × multiple folds).
-
-```bash
-python -m ingest.fetch_historical --days 250         # ~1 year (requires Parquet migration)
-python -m ingest.fetch_historical --interval 5minute # the old behaviour
-```
-
-For 500 symbols at 120 days, expect 45–90 minutes — Kite rate-limits historical requests.
-Re-runs skip symbols already completed *for that interval* (tracked in the
-`backfill_state` table, since the candles table alone cannot tell a minute bar
-from a 5-minute one).
-
-A backfill **replaces the window it covers**, so re-running with
-`--interval minute` over an existing 5-minute history swaps it out instead of
-leaving both bars behind for every fifth minute — which is the intended way to
-migrate to the minute basis.
-
-### Parquet acceleration (recommended for 500+ symbols)
-
-```bash
-# Migrate SQLite -> Parquet (one-time, ~800MB for 500 symbols x 60 days)
-python -m storage.parquet_store migrate
-
-# Subsequent runs use Parquet automatically (10-100x faster reads)
-# Polars indicators: 10x faster computation
-pip install polars pyarrow
-```
-
-## Validate before trusting anything
-
-```bash
-python -m research.diagnose_edge --n 120        # is there an edge at all?  <- run this first
-python -m strategy.session_features             # candidate features cannot see the future
-python -m strategy.candidates                   # no candidate is mis-wired or a no-op
-python -m research.strategy_lab --n 60          # do the candidates beat random entry?
-python -m research.backtest --all
-python -m research.walk_forward_optimizer --all
-python -m research.backtest --selftest          # verify the fast path on YOUR data
-python -m strategy.train_ml_model --all         # original ML model
-python -m strategy.train_ml_model_v2 --all      # enhanced ML with walk-forward
-```
-
-## Strategy optimization loop (new)
-
-```bash
-# Auto-scales workers (CPU + RAM), pre-filters symbols by liquidity,
-# uses Parquet + Polars, saves incrementally (resume on crash)
-python -m scripts.optimize_strategy --symbol-set top200 --grid all --mode backtest --output optimization_results
-
-# Or walk-forward (slower but more robust)
-python -m scripts.optimize_strategy --symbol-set top100 --grid all --mode walkforward --output optimization_results
-```
-
-Options:
-- `--symbol-set`: `full` | `top50` | `top100` | `top200` (top N by liquidity score)
-- `--grid`: `conservative` | `aggressive` | `balanced` | `exit_focused` | `all`
-- `--mode`: `backtest` | `walkforward`
-- `--workers N`: override auto-detected worker count
-
-`research/diagnose_edge.py` is the one to run first: it tells you whether there
-is anything to tune, which the others cannot answer. `research/backtest.py`
-reports win rate, risk-reward and max drawdown at the default thresholds, and
-`research/walk_forward_optimizer.py` re-fits RSI/ADX per stock on rolling
-windows and validates out-of-sample — the only number there that isn't
-in-sample.
-
-The two strategy self-tests are cheap and catch a specific, dangerous class of
-bug: **a broken feature and a bad strategy look identical in a results table** —
-both just print a number.
-
-- `python -m strategy.session_features` rebuilds every session/regime feature
-  over a symbol's full history, then again over a truncated prefix, and requires
-  identical values. Any centered window, full-series normalization or backfill
-  changes its value once later candles exist, so a lookahead fails by
-  construction.
-- `python -m strategy.candidates` asserts each candidate's **admit-rate**. A
-  gate below 0.05% is usually a unit mistake; a gate above 60% is not filtering
-  anything — which is the same defect as the shipped 98%-always pattern gate.
-
-## Daily routine (trading days, 9:15 AM – 3:30 PM IST)
-
-```bash
-python -m ingest.kite_auto_login      # 1. refresh today's access token (automated, ~30s)
-# OR if automated fails:
-python -m ingest.kite_auth            # manual fallback
-python -m scripts.validate_setup      # 2. pre-flight: Kite, news feeds, OpenRouter, DB all working
-```
-
-`scripts/validate_setup.py` exits 0 on success and 1 on failure, so you can
-chain it: `python -m scripts.validate_setup && python -m ingest.live_ticker`
-refuses to start on a failed check.
-
-Then, in separate terminals:
-
-```bash
-python -m ingest.live_ticker                             # 3. live candle stream
-python -m scripts.scheduler                              # 4. news / sentiment /
-                                                         #    decisions (5 min) / ML (5 min) /
-                                                         #    LLM (15 min) / feed watchdog (10 min) /
-                                                         #    repair sweep (3:32 PM) / digest (3:35 PM)
-python -m uvicorn api.main:app --reload --port 8000      # 5. dashboard API
-cd frontend && npm run dev                               # 6. dashboard UI -> localhost:5173
-```
-
-Any time during the session, one command answers "is this live?":
-
-```bash
-python -m core.freshness   # feed status, staleness, heartbeat; also /api/liveness
-```
-
-`live` means the heartbeat is current and every candle is fresh. `degraded`
-means the ticker is up but the data has fallen behind. `down` means no
-heartbeat, or no socket, during market hours — restart the ticker, then run
-`python -m ingest.gap_healer` to refill the hole.
-
-The UI polls on its own schedule (positions and charts every 15 s, rankings and
-opportunities every 60 s) and the top bar shows a `⟳ live` indicator while a
-request is in flight. FastAPI serves interactive endpoint docs at
-http://localhost:8000/docs.
-
-The scheduler also runs a **shadow cycle** every 5 minutes: the eleven candidate
-strategies in `strategy/candidates.py` vote on the latest candle and their votes
-are logged to the `strategy_signals` table — alongside the rule agent's action on
-the same candle — without influencing any live decision. That table is the
-out-of-sample track record used by the promotion rules in
-[docs/STRATEGIES.md](docs/STRATEGIES.md). The shadow logger evaluates the
-**same function objects** the lab backtests, so lab and live cannot disagree
-about what a strategy is; its cost is ~0.01 s/symbol, i.e. seconds for a
-500-symbol cycle.
-
-At close, Ctrl+C the ticker first: it flushes its in-flight candle and then
-runs an end-of-session repair sweep over every symbol, so anything lost during
-the day comes back from the exchange's own record before you stop. The
-scheduler does the same sweep at 3:32 PM if you would rather just leave it.
-Ctrl+C the rest whenever — no cleanup needed.
-
----
-
-## Command reference
-
-| What | Command |
-|---|---|
-| Pre-flight check | `python -m scripts.validate_setup` |
-| Refresh Kite token (auto) | `python -m ingest.kite_auto_login` |
-| Refresh Kite token (manual) | `python -m ingest.kite_auth` |
-| Build watchlist from NSE | `python -m ingest.build_nifty500_symbols` |
-| Resolve instrument tokens | `python -m ingest.instrument_lookup symbols.txt` |
-| Create/migrate the DB | `python -m storage.db` |
-| Backfill history | `python -m ingest.fetch_historical [--days N] [--interval minute]` |
-| Stream live candles | `python -m ingest.live_ticker` |
-| Repair missing candles | `python -m ingest.gap_healer [--recent 90]` |
-| Check feed liveness | `python -m core.freshness` |
-| Feed health over HTTP | `curl localhost:8000/api/liveness` |
-| Transaction history over HTTP | `curl localhost:8000/api/transactions` |
-| Signal-path wiring over HTTP | `curl localhost:8000/api/pipeline` |
-| Run the daily automation | `python -m scripts.scheduler` |
-| Backtest | `python -m research.backtest [SYMBOLS... \| --all \| --selftest]` |
-| Walk-forward validation | `python -m research.walk_forward_optimizer [SYMBOLS... \| --all \| --selftest]` |
-| Edge diagnostics | `python -m research.diagnose_edge [--n N \| --all \| SYMBOLS...] [--exits]` |
-| Strategy lab | `python -m research.strategy_lab [--n N \| --all] [--stop-mult 3.0] [--max-bars 12]` |
-| Strategy feature causality check | `python -m strategy.session_features [SYMBOLS...]` |
-| Cost-cover distribution (evidence for the "cost gating is inert" claim) | `python -m strategy.session_features --cost-cover [N]` |
-| Candidate admit-rate check | `python -m strategy.candidates [SYMBOLS...]` |
-| Shadow log candidates | automatic via scheduler, or `python -m strategy.shadow` |
-| Train the ML model (original) | `python -m strategy.train_ml_model [SYMBOLS... \| --all]` |
-| Train the ML model (enhanced, walk-forward) | `python -m strategy.train_ml_model_v2 [SYMBOLS... \| --all]` |
-| ML decision cycle (original) | `python -m strategy.ml_decision_agent` |
-| ML decision cycle (enhanced) | `python -m strategy.ml_decision_agent_v2` |
-| Find best hybrid mode | `python -m strategy.hybrid_strategy [SYMBOLS...]` |
-| Fast hybrid cycle | `python -m strategy.fast_hybrid_strategy [SYMBOLS...]` |
-| Migrate SQLite → Parquet | `python -m storage.parquet_store migrate` |
-| Parquet stats | `python -m storage.parquet_store stats` |
-| Strategy optimization | `python -m scripts.optimize_strategy --symbol-set top200 --grid all` |
-| Warm up caches | `python -m strategy.fast_hybrid_strategy --warmup [SYMBOLS...]` |
-| Digest (end of day) | `python -m analysis.digest` |
-| Dashboard API | `python -m uvicorn api.main:app --reload --port 8000` |
-| Dashboard UI | `cd frontend && npm run dev` |
-| Frontend typecheck/build | `cd frontend && npx tsc --noEmit && npm run build` |
+All 61 unit tests pass across 4 test files:
+- `test_core.py`: 29 tests (indicators, patterns, signals, position sizing, circuit breaker, freshness)
+- `test_strategy.py`: 10 tests (candidates, rule agent, ML features, hybrid strategy)
+- `test_risk.py`: 16 tests (portfolio risk, position monitor, paper wallet)
+- `test_analysis.py`: 6 tests (opportunity finder, rankings)
 
 ## Configuration
 
-Credentials live in `.env`:
+All configuration via `.env` file or environment variables:
 
-| Variable | Purpose |
-|---|---|
-| `KITE_API_KEY` | Kite Connect API key |
-| `KITE_API_SECRET` | Kite Connect API secret |
-| `KITE_TOTP_SECRET` | TOTP secret from 2FA setup (for automated login) |
-| `KITE_USER_ID` | Kite user ID (email/phone) for automated login |
-| `KITE_PASSWORD` | Kite password for automated login |
-| `KITE_REDIRECT_URL` | OAuth redirect URL (default: `http://localhost`) |
-| `OPENROUTER_API_KEY` | OpenRouter API key (sentiment + LLM decisions) |
-| `OPENROUTER_MODEL` | Optional model override, defaults to a free `:free` model |
+```env
+# Required for Kite Connect
+KITE_API_KEY=your_key
+KITE_API_SECRET=your_secret
+KITE_TOTP_SECRET=your_totp  # For auto-login
 
-`.access_token` (gitignored, written by `ingest/kite_auth.py`) holds the daily
-Kite session. Everything else is a named constant at the top of the relevant
-module — the ones that change behaviour most are `SLIPPAGE` and `DEFAULT_PARAMS`
-in `core/signals.py`, and the risk block in `core/position_sizing.py`:
+# Optional
+DB_URL=postgresql://user:pass@localhost/trading
+API_PORT=8000
+LOG_LEVEL=DEBUG
+```
 
-| Constant | Where | Meaning |
-|---|---|---|
-| `RISK_PER_TRADE_PCT` | `core/position_sizing.py` | % of capital risked per trade, before volatility scaling |
-| `ATR_STOP_MULTIPLIER` | `core/position_sizing.py` | stop distance = this × ATR |
-| `USE_TAKE_PROFIT` | `core/position_sizing.py` | **default `False`** — the 2:1 target measured *worse* than no target at all. Set `True` to restore the old behaviour |
-| `REWARD_RISK_RATIO` | `core/position_sizing.py` | only used when `USE_TAKE_PROFIT` is on |
-| `VOLATILITY_RISK_CUTOFF` / `VOLATILITY_RISK_FLOOR` | `core/position_sizing.py` | ATR percentile above which risk scales down, and the floor it scales to |
-| `MAX_POSITION_PCT_OF_CAPITAL` | `core/position_sizing.py` | hard cap on position value, whatever the sizing math suggests |
-| `SLIPPAGE` | `core/signals.py` | round-trip cost every simulated trade pays. Imported (never re-declared) by the ML labels and the cost-cover gate so the three can never disagree |
-| `DEFAULT_PARAMS` | `core/signals.py` | rule-based entry/exit parameters (EMA periods, ADX threshold, RSI bounds, volume filter, ATR multiples) |
-| `FORWARD_WINDOW` | `core/signals.py` | holding horizon in candles for label generation and backtest |
-| `LOOKBACK_MIN` / `MAX_HOLD_CANDLES` | `core/signals.py` | warm-up period and max hold if no stop/target hit |
+## Research Pipeline
 
-The liveness layer is tuned by constants in the same style:
+The research module provides:
 
-| Constant | Where | Meaning |
-|---|---|---|
-| `FLUSH_INTERVAL_SEC` | `ingest/live_ticker.py` | how often buffered candles are written |
-| `STALL_WARN_SEC` | `ingest/live_ticker.py` | silence before the feed is called stalled |
-| `FORCE_RECONNECT_SEC` | `ingest/live_ticker.py` | silence before the socket is forced to re-handshake |
-| `RECONNECT_MAX_TRIES` / `RECONNECT_MAX_DELAY_SEC` | `ingest/live_ticker.py` | how long an outage is ridden out before `on_noreconnect` alerts |
-| `DEFAULT_MAX_AGE_MINUTES` | `core/freshness.py` | how far behind a candle may fall before it is refused |
-| `HEARTBEAT_MAX_AGE_SEC` | `core/freshness.py` | heartbeat age that counts as "alive" |
-| `HEARTBEAT_TRUST_SEC` / `FEED_DOWN_LOOKBACK_MIN` | `scripts/scheduler.py` | when the repair job stops trusting the ticker, and how far back it sweeps |
-| `DEFAULT_INTERVAL` / `DEFAULT_DAYS_BACK` | `ingest/fetch_historical.py` | the stored candle basis and its default lookback |
+1. **Edge Diagnosis** (`diagnose_edge.py`): Measures signal edge vs random baseline
+2. **Strategy Lab** (`strategy_lab.py`): Rapid parameter grid/random search
+3. **Walk-Forward Optimizer** (`walk_forward_optimizer.py`): Proper out-of-sample validation
+4. **Backtesting** (`backtest.py`): Vectorized simulation with realistic charges
 
----
+## ML Pipeline
 
-## Key design decisions
+Two training approaches:
 
-A short version — the reasoning, the bugs that forced each choice, and the
-trade-offs are in **[docs/DESIGN.md](docs/DESIGN.md)**.
+- **v1** (`train_ml_model.py`): Standard LightGBM with time-series CV
+- **v2** (`train_ml_model_v2.py`): Enhanced with regime features, cost-aware labeling, per-symbol thresholds
 
-- **The `watchlist` DB table is the single source of truth.** No module hardcodes
-  a symbol list. A hardcoded list once silently ran signals on 2 of 500 symbols.
-- **`strategy/decision_agent.py` is the tested path.** `llm_decision_agent.py`
-  and `ml_decision_agent.py` run alongside it and write to their own
-  `llm_signals` / `ml_signals` tables. Neither feeds the rule-based decision.
-- **`core/signals.py` is the canonical signal implementation.** Both
-  `research/backtest.py` and `strategy/` import from here — no inverted
-  dependency. Contains `SLIPPAGE`, `DEFAULT_PARAMS`, `prepare_symbol_series`,
-  `vectorized_evaluate`, `simulate_trades` and the `--selftest` verification.
-- **SQLite runs in WAL mode, and every write loop commits per symbol.** Holding
-  one write transaction across 500 symbols while making network LLM calls in
-  between is what produced "database is locked".
-- **`ingest/live_ticker.py` never touches the DB from its tick callback.** All
-  writes happen on a background flush thread; blocking `on_ticks` caused
-  repeated WebSocket 1006 disconnects at scale.
-- **The API holds no trading logic.** Every endpoint calls the same Python
-  modules the CLI does, so each calculation has exactly one implementation.
-- **A finished candle is handed off, never overwritten.** `on_ticks` appends the
-  completed minute to a buffer the flush thread drains, instead of replacing the
-  bucket dict. Replacing it lost the candle for any symbol busy enough to receive
-  another tick before the next flush — which made data coverage *inversely*
-  correlated with liquidity. See [docs/DESIGN.md](docs/DESIGN.md).
-- **A candle timestamp has exactly one identity.** Everything that writes candles
-  normalises to naive IST via `core/freshness.candle_timestamp()`, and reads
-  compare 16-character minute prefixes, so the two forms that historically
-  coexisted in `candles` (one tz-aware, one naive) can no longer create two rows
-  for one minute.
-- **Staleness is checked, not assumed.** No indicator, decision or gate reads a
-  candle without `core/freshness.py` having a say in whether that candle is
-  current. A dead feed and a quiet market produce the same absent rows, and only
-  the clock can tell them apart.
-- **The three decision paths are compared, never merged.** The rule, ML and LLM
-  paths write to separate tables and the Pipeline page shows their calls side by
-  side with their agreement, because the whole point of that separation is to
-  earn trust with a track record before any of them is allowed to size a trade.
-- **Hybrid strategy selects the best mode per symbol via backtest.**
-  `strategy/hybrid_strategy.py` tests RULE_ONLY, ML_ONLY, and RULE_ML_COMBINED
-  modes and caches the best performer. `strategy/fast_hybrid_strategy.py` adds
-  precomputed indicator/sentiment caches for <50ms latency in production.
-- **Parquet storage replaces SQLite for historical candles.**
-  `storage/parquet_store.py` writes single-file-per-symbol Parquet (860MB for 520 symbols × 60 days).
-  `core/quant_indicators.load_candles()` auto-detects and uses Parquet when available.
-- **Polars-accelerated indicators** in `core/quant_indicators.py` compute RSI, ATR, ADX, MACD
-  10x faster than Pandas (0.02s vs 0.2s for 30K candles). Drop-in replacement.
-- **Auto-scaled worker pool** in `scripts/optimize_strategy.py` detects CPU cores + available RAM,
-  pauses if <2GB free, logs system info for reproducibility.
-- **Liquidity pre-filtering** computes volume/spread/stability scores, caches 24h,
-  reduces 500→100 liquid symbols before expensive analysis.
+## Frontend
 
-## Liveness and gap repair
+React + TypeScript + Vite dashboard in `frontend/`:
 
-A live feed that goes quiet is indistinguishable from a quiet market unless
-something says so explicitly. Four things make it explicit:
+```bash
+cd frontend
+npm install
+npm run dev     # Development
+npm run build   # Production build
+```
 
-1. **Heartbeat.** The ticker's flush thread upserts a row into `ingest_status`
-   every 5 seconds (connected, last tick, buffer depth, repairs queued).
-   `GET /api/liveness` turns it into one word — `live`, `degraded`, `down` or
-   `closed`. `python -m core.freshness` prints the same thing.
-2. **Stall watchdog.** Silence during market hours is a dead feed, not a quiet
-   one: 500 symbols never all stop together. After 90s the ticker says so;
-   after 300s it sends a close frame so the client re-handshakes and
-   resubscribes. It deliberately does *not* call `close()`, which stops the
-   retry loop and would turn a recoverable stall into a dead process.
-3. **Repair.** Every detected outage window is refetched from Kite's own
-   historical record by `ingest/gap_healer.py` — on reconnect, on a restart
-   mid-session, every 10 minutes while the feed is down (via the scheduler),
-   and definitively after the close. Each hole is recorded in `candle_gaps`,
-   including the ones that recovered zero candles, because "the symbol
-   genuinely didn't trade" and "we weren't listening" are different facts.
-4. **Refusal.** `core/freshness.py` gates the decision cycles: a symbol whose
-   candles are more than 10 minutes behind the live feed is skipped and named,
-   rather than traded on a price that no longer exists. Outside the session
-   nothing is stale, so backtests and after-hours runs are unaffected.
+## Contributing
 
-### Two bugs this uncovered
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/amazing-feature`)
+3. Run tests and linting (`pytest && ruff check && black --check`)
+4. Commit changes (`git commit -m 'Add amazing feature'`)
+5. Push to branch (`git push origin feature/amazing-feature`)
+6. Open Pull Request
 
-Both were found by looking at what the data actually contained, and both
-produced exactly the symptom they look like — hours of information missing
-while the process appeared to be running fine.
+## License
 
-- **Finished candles were discarded on the tick path.** Replacing a bucket as
-  soon as a tick from the next minute arrived dropped the completed candle
-  unless the 5-second flush thread had already collected it. With ticks
-  arriving in milliseconds, that lost the candle for every symbol busy enough
-  to matter, so coverage was *inversely* correlated with liquidity: of one
-  session's captured minutes, low-volume names had ~230 candles and HDFCBANK
-  had 4. Completed minutes are now handed to a buffer the flusher drains.
-- **Live and historical rows had different timestamp identities.** The
-  backfill stored Kite's tz-aware `...+05:30` datetimes while the ticker wrote
-  naive ones, so the same minute existed under two primary keys — unfixable by
-  `INSERT OR REPLACE`, invisible to equality checks, and enough to make gap
-  detection report every backfilled minute as missing. Writes now normalise
-  through `core.freshness.candle_timestamp()`, and reads compare minute
-  prefixes, so rows written before the fix are still read correctly.
+MIT License - see LICENSE file for details.
 
-## Dashboard
+## Disclaimer
 
-`frontend/` is a hash-routed React app: the header is the navigation bar, and
-every page is a URL you can reload or bookmark (`#/dashboard`, `#/history`,
-`#/pipeline`). Hash routing instead of the History API on purpose — the same
-bundle then works from the Vite dev server, from any static host, and from
-`file://`, with no server rewrite rules.
-
-| Page | What it shows |
-|---|---|
-| `#/dashboard` | Everything that used to be one long scroll: Top Opportunity, digest, wallet, open positions, and the selected symbol's chart, patterns and signal history. The only page with the watchlist sidebar and the symbol picker. |
-| `#/history` | Every money movement in the paper book (`wallet_transactions`) with the closed trade behind it (`trades`), plus win rate, slippage paid, best/worst trade and P&L by day. Read-only. |
-| `#/pipeline` | The three decision paths side by side, per symbol: what the rules said, what the ML model said, what the LLM said, whether they agreed, and the rupee size the plan came out at. |
-
-Top Opportunity excludes any symbol you already hold, because a second position
-in it is blocked in either direction (`risk/portfolio_risk`) — so listing it
-would be listing a trade that cannot be taken. The excluded symbols are named
-under the panel's header, so a list shorter than `n` reads as "you own some of
-these" rather than as a quiet market. Manage those from Position Monitor.
-
-The Pipeline page is the honest picture of the wiring: the ML and LLM paths are
-logged for comparison and never size or place anything, so position size comes
-solely from the rule-based action. A row can therefore show the ML model
-disagreeing while the plan is still sized — that is the connection, not a
-contradiction. Agreement is measured over directional calls only: a HOLD is an
-abstention, shown but never counted as a disagreement.
-
-## Known gaps
-
-- `scripts/supervisor.py` exists but is experimental: if the ticker process is killed,
-  data stops until it restarts. The scheduler's repair job keeps filling the hole
-  while that lasts, and the post-close sweep makes it whole.
-- Pre-existing databases keep their legacy `+05:30` candle rows. They read
-  correctly, but they are only rewritten to the canonical form for minutes the
-  healer repairs.
-- `risk/portfolio_risk.py`'s correlation lookback and thresholds are fixed
-  constants, not validated the way the decision thresholds are.
-- `core/ml_versioning.py` provides model registry and drift detection — the
-  artifact `models/ml_model.joblib` is now versioned on each training run.
-- `walk_forward_optimizer.py` tunes **entry thresholds only**; it cannot
-  validate exit logic, which is where the largest measurable gain was. The
-  take-profit removal is supported by two independent in-sample measurements
-  (`diagnose_edge.py --exits` and `strategy_lab.py`) but has never been
-  walk-forward validated, because no tool here can.
-- **Realized execution cost is never measured.** Every number in this repo
-  assumes a flat 0.05% round trip, with no spread, no market impact, and no gap
-  between the signal candle and the fill. Given that entry filters cannot close
-  a 5× gap-to-costs and the exit change only recovers ~0.009%/trade, per-signal
-  cost measurement is the one direction the evidence actually points at, and it
-  is unbuilt.
-- The candidate strategies are measured **in-sample** by construction. The lab
-  numbers say which hypotheses are worth testing; only the `strategy_signals`
-  shadow table can decide whether one is real.
-- The ticker's socket layer can't be tested offline (it opens a live WebSocket
-  at import), but the aggregation logic now can: `on_ticks` and
-  `_collect_buckets` are pure enough to drive directly with synthetic ticks.
-  Still watch the terminal output during market hours.
-- SEBI algo-trading disclosure rules apply once this moves from personal signals
-  to automated order placement. Out of scope for this POC.
-- **Enhanced ML model (v2) not yet trained on full watchlist.** Run `python -m strategy.train_ml_model_v2 --all` and monitor `ml_signals` table for live out-of-sample validation before considering promotion per [docs/STRATEGIES.md](docs/STRATEGIES.md) criteria.
-- **Parquet migration is manual.** Run `python -m storage.parquet_store migrate` after
-  backfill. Not yet integrated into the daily pipeline (would need incremental
-  append + schema evolution handling).
-- **Polars indicators untested in production path.** `quant_indicators.py` has
-  `_pl` variants but `signals.py`/`backtest.py` still use Pandas. Requires
-  explicit opt-in per caller.
-
-## Documentation
-
-| Document | Contents |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, data flow, dependency rules, DB schema, threading and API boundaries |
-| [docs/DESIGN.md](docs/DESIGN.md) | Why the code is built this way — decisions, the bugs behind them, trade-offs (the liveness section covers the candle-loss and timestamp-identity bugs) |
-| [docs/EDGE_ANALYSIS.md](docs/EDGE_ANALYSIS.md) | Measured evidence that the signal has no edge, the exit-variant fix, the session/regime filter layer, and what to change |
-| [docs/STRATEGIES.md](docs/STRATEGIES.md) | The candidate strategies, how they're measured, their measured results, and the promotion rules |
-| [ML_REDESIGN_SUMMARY.md](ML_REDESIGN_SUMMARY.md) | Enhanced ML model v2: walk-forward training, confidence thresholding, per-symbol results |
-
-**New modules (not yet in docs):**
-- `storage/parquet_store.py` — Parquet read/write for candles
-- `scripts/optimize_strategy.py` — Auto-scaled parameter optimization loop
-- `core/quant_indicators.py` (Polars section) — 10x faster indicators
+**Paper trading only.** This software is for research and educational purposes. Nothing in this repository places real orders. The `positions` table is a manual ledger. Past performance does not guarantee future results. Trade at your own risk.

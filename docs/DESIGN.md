@@ -280,10 +280,24 @@ independent and concentrated scenarios.
 
 ### `position_monitor.py` checks exit conditions in a fixed order
 
-stop-loss hit → take-profit hit → the rule-based signal reversed → else HOLD.
+stop-loss hit → take-profit hit → **the signal that opened the position reversed** → else HOLD.
+
 It only computes a recommendation; closing a position is still a manual click.
 Every branch (long/short, profit and loss, both exit triggers, signal reversal)
 was individually tested with known price/level combinations first.
+
+**Signal source awareness**: Each open position stores its `signal_source`
+(`rule` | `ml` | `hybrid` | `llm`). The monitor queries the corresponding
+signal table for reversals:
+- `rule` → `signals` table (rule-based)
+- `ml` → `ml_signals` table (ML model)
+- `hybrid` → `hybrid_signals` table (combined)
+- `llm` → `llm_signals` table (LLM agent)
+
+This means an ML-opened position is protected by the ML model's own reversal
+signal, a hybrid-opened position by the hybrid signal, etc. The reversal check
+reports the confidence from that source (e.g., "Signal (ml) flipped to SELL
+(confidence: 75%)").
 
 > Note: `research/diagnose_edge.py` later showed the take-profit is actively
 > harmful here — the stop fires on 55.9% of trades and the 2:1 target on only

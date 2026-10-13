@@ -13,6 +13,10 @@ class OpenPositionRequest(BaseModel):
     symbol: str
     action: str = Field(pattern="^(BUY|SELL)$")
     capital: float = Field(gt=0)
+    # Optional: use the opportunity's signal timestamp/price for cost tracking
+    signal_timestamp: str | None = None
+    signal_price: float | None = None
+    signal_source: str | None = None  # 'rule' | 'ml' | 'hybrid' | 'llm'
 
 
 @router.get("/positions")
@@ -27,12 +31,9 @@ def list_positions():
 def open_position(payload: OpenPositionRequest):
     """Records a paper position at the PORTFOLIO-ADJUSTED size.
 
-    Note: the old Streamlit panel labelled its button with
-    `approved_size` but actually recorded `base_plan` - the per-trade
-    size BEFORE the correlation / cluster / risk-budget reductions were
-    applied. So a reduced trade was silently recorded larger than the
-    UI claimed. This records the approved size, which is what the label
-    always promised.
+    The action should match the opportunity's hybrid action (which may be from
+    ML, rule, or combined mode). This ensures the position is sized according
+    to the same signal that generated the opportunity.
     """
     from risk.portfolio_risk import add_open_position, calculate_portfolio_adjusted_position
 
@@ -50,22 +51,32 @@ def open_position(payload: OpenPositionRequest):
         position_value=adjusted.approved_value,
     )
     
-    # Get signal timestamp and price for realized cost tracking
-    signal_timestamp = None
-    signal_price = None
-    try:
-        from analysis.opportunity_finder import find_opportunities
-        opportunities = find_opportunities(capital=payload.capital, n=50)
-        for direction in ("bullish", "bearish"):
-            for opp in opportunities[direction]:
-                if opp.symbol == payload.symbol and opp.action == payload.action:
-                    signal_timestamp = opp.signal_timestamp
-                    signal_price = opp.signal_price
-                    break
-    except Exception:
-        pass  # Don't fail if opportunity lookup fails
+    # Use signal timestamp/price from payload if provided, otherwise look up from opportunities
+    signal_timestamp = payload.signal_timestamp
+    signal_price = payload.signal_price
+    signal_source = payload.signal_source
     
-    add_open_position(recorded_plan, signal_timestamp=signal_timestamp, signal_price=signal_price)
+    if signal_timestamp is None or signal_price is None or signal_source is None:
+        try:
+            from analysis.opportunity_finder import find_opportunities
+            opportunities = find_opportunities(capital=payload.capital, n=50)
+            for direction in ("bullish", "bearish"):
+                for opp in opportunities[direction]:
+                    if opp.symbol == payload.symbol and opp.action == payload.action:
+                        signal_timestamp = signal_timestamp or opp.signal_timestamp
+                        signal_price = signal_price or opp.signal_price
+                        # Determine signal source from the opportunity's hybrid mode
+                        if signal_source is None and hasattr(opp, 'signal_source'):
+                            signal_source = opp.signal_source
+                        break
+        except Exception:
+            pass  # Don't fail if opportunity lookup fails
+    
+    # Default to 'rule' if not determined
+    if signal_source is None:
+        signal_source = 'rule'
+    
+    add_open_position(recorded_plan, signal_timestamp=signal_timestamp, signal_price=signal_price, signal_source=signal_source)
     return jsonable({"symbol": payload.symbol, "action": payload.action,
                      "shares": adjusted.approved_size, "value": adjusted.approved_value})
 

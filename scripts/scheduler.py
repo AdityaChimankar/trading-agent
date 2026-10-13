@@ -23,6 +23,8 @@ noticing:
 """
 import functools
 import json
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -34,7 +36,7 @@ from analysis.digest import generate_digest
 from analysis.sentiment import run_sentiment_pass
 from core.freshness import in_market_hours, ingest_heartbeat
 from core.logging_config import get_logger
-from ingest.fetch_news import fetch_and_store_news
+from ingest.fetch_news import fetch_and_store_news, flush_old_news
 from risk.position_monitor import run_monitor_cycle
 from storage.db import get_watchlist_symbols
 from strategy.decision_agent import run_decision_cycle
@@ -273,6 +275,19 @@ scheduler.add_job(
     CronTrigger(day_of_week="mon-fri", hour=15, minute=35),
     id="daily_digest",
 )
+# Daily news flush - 8:00 AM on weekdays (before market open)
+scheduler.add_job(
+    lambda: flush_old_news(days=3),
+    CronTrigger(day_of_week="mon-fri", hour=8, minute=0),
+    id="flush_old_news",
+)
+# Daily pre-flight validation - 8:15 AM on weekdays (before market open)
+# Runs validation and logs results; doesn't stop the scheduler if it fails
+scheduler.add_job(
+    lambda: subprocess.run([sys.executable, "-m", "scripts.validate_setup"], capture_output=True, text=True),
+    CronTrigger(day_of_week="mon-fri", hour=8, minute=15),
+    id="daily_validation",
+)
 # Weekly ML model retraining - Sunday 2 AM (outside market hours)
 scheduler.add_job(
     ml_retrain_cycle,
@@ -328,6 +343,7 @@ if __name__ == "__main__":
     logger.info(
         "Scheduler started - news/sentiment/decisions/ML compare every 5 min, "
         "LLM comparison every 15 min, feed watchdog every 10 min, "
+        "news flush daily at 8:00 AM, "
         "repair sweep at 3:32 PM, digest at 3:35 PM, "
         "weekly ML retraining Sunday 2 AM..."
     )

@@ -114,6 +114,7 @@ class Opportunity:
     realistic_reward_risk: float = None  # room_to_target / stop_distance, or None
     signal_timestamp: str = None       # timestamp of the signal candle
     signal_price: float = None         # price at signal time (close of signal candle)
+    signal_source: str = None          # 'rule' | 'ml' | 'hybrid' | 'llm'
 
 
 def _get_latest_signal(table: str, symbol: str) -> dict | None:
@@ -228,9 +229,12 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
     `fast_mode`: If True (default), uses FastHybridStrategy with precomputed
     caches for ~100x speedup. If False, uses original HybridStrategy."""
     import time
+    from storage.db import get_open_position_symbols
     
-    # Check cache
-    cache_key = (round(capital or 0, -3), n, use_mode_cache, max_symbols, use_fixed_mode, warmup)
+    # Check cache - include held symbols hash to auto-invalidate on position changes
+    held_symbols_for_cache = get_open_position_symbols()
+    held_hash = hash(frozenset(held_symbols_for_cache))
+    cache_key = (round(capital or 0, -3), n, use_mode_cache, max_symbols, use_fixed_mode, warmup, held_hash)
     current_time = time.time()
     if cache_key in _opportunity_cache:
         cached_time, cached_result = _opportunity_cache[cache_key]
@@ -255,6 +259,15 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
     # Get top candidates to know which symbols to warm up
     sized = rank_watchlist_with_sizing(capital, n=n * 2, reserve_prior=True)
     held_symbols = get_open_position_symbols()
+    
+    # Re-check cache with actual held symbols (in case they changed since the initial check)
+    held_hash = hash(frozenset(held_symbols))
+    cache_key = (round(capital or 0, -3), n, use_mode_cache, max_symbols, use_fixed_mode, warmup, held_hash)
+    current_time = time.time()
+    if cache_key in _opportunity_cache:
+        cached_time, cached_result = _opportunity_cache[cache_key]
+        if current_time - cached_time < _CACHE_TTL_SECONDS:
+            return cached_result
     
     # Collect symbols we'll process
     symbols_to_process = []
@@ -295,6 +308,16 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
             # Use hybrid signal if it has a trade action, otherwise fall back to rule-based
             action = hybrid_action if hybrid_action in ("BUY", "SELL") else entry["action"]
             
+            # Determine signal source from the best mode
+            if best_mode == StrategyMode.ML_ONLY:
+                signal_source = 'ml'
+            elif best_mode == StrategyMode.RULE_ML_COMBINED:
+                signal_source = 'hybrid'
+            elif best_mode == StrategyMode.RULE_ONLY:
+                signal_source = 'rule'
+            else:
+                signal_source = 'rule'
+            
             # Score conviction using hybrid confidence + ML/LLM/sentiment agreement
             conviction, agreements, disagreements = _score_conviction(symbol, action, entry[key])
             
@@ -320,6 +343,7 @@ def find_opportunities(capital: float | None = None, n: int = 10, use_mode_cache
                 realistic_reward_risk=realistic_rr,
                 signal_timestamp=signal_timestamp,
                 signal_price=signal_price,
+                signal_source=signal_source,
             ))
             processed += 1
 

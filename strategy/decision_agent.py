@@ -15,11 +15,14 @@ measured positive in the strategy lab. Enabled via config.
 from datetime import datetime
 import pandas as pd
 from core.freshness import split_stale, warn_stale
-from core.pattern_detection import detect_patterns
-from core.quant_indicators import latest_indicators, compute_macd
+from core.pattern_detection import patterns_from_df
+from core.quant_indicators import load_candles, indicators_from_df, compute_macd
 from core.logging_config import get_logger
 from storage.db import get_connection, get_watchlist_symbols
 from core.config import get_config
+from analysis.sentiment import latest_sentiment
+from strategy.session_features import features as session_features
+from core.signals import prepare_symbol_series
 
 
 logger = get_logger(__name__)
@@ -121,25 +124,26 @@ def evaluate_signals(
 
 
 def decide(symbol: str) -> dict:
-    from analysis.sentiment import latest_sentiment  # lazy import - only live trading needs the LLM sentiment path
-    from strategy.session_features import features as session_features
-    from core.signals import prepare_symbol_series
+    # Load candles ONCE per symbol (enough for all computations)
+    df = load_candles(symbol, limit=2000)
+    if len(df) < 20:
+        return {"symbol": symbol, "action": "HOLD", "rationale": "not enough candles yet"}
 
-    indicators = latest_indicators(symbol)
+    # Compute indicators from the DataFrame
+    indicators = indicators_from_df(df)
     if "error" in indicators:
         return {"symbol": symbol, "action": "HOLD", "rationale": indicators["error"]}
 
     sentiment = latest_sentiment(symbol)
     sentiment = sentiment if sentiment is not None else 0.0
 
-    pattern_result = detect_patterns(symbol)
+    # Compute patterns from the same DataFrame
+    pattern_result = patterns_from_df(df)
     pattern_bias = pattern_result["bias"]
     patterns_found = pattern_result["patterns"]
     rsi, adx, atr = indicators["rsi"], indicators["adx"], indicators["atr"]
 
     # Compute MACD histogram for trend direction filter
-    from core.quant_indicators import load_candles, compute_macd
-    df = load_candles(symbol, limit=50)
     _, _, macd_hist = compute_macd(df)
     macd_hist_val = float(macd_hist.iloc[-1]) if len(macd_hist) > 0 and not pd.isna(macd_hist.iloc[-1]) else 0.0
 

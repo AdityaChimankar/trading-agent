@@ -53,13 +53,13 @@ def write_candles(conn, symbol, last_bar_at, bars=40, close=100.0,
 
 
 def open_position(conn, symbol, action="BUY", entry_price=100.0, stop_loss=99.0,
-                  take_profit=102.0, size=10):
+                  take_profit=102.0, size=10, signal_source="rule"):
     cur = conn.execute(
         "INSERT INTO open_positions (symbol, action, entry_price, position_size, "
-        "position_value, risk_amount, stop_loss, take_profit, opened_at, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
+        "position_value, risk_amount, stop_loss, take_profit, opened_at, status, signal_source) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
         (symbol, action, entry_price, size, entry_price * size, 10.0,
-         stop_loss, take_profit, "2026-09-29T09:20:00"),
+         stop_loss, take_profit, "2026-09-29T09:20:00", signal_source),
     )
     conn.commit()
     return cur.lastrowid
@@ -149,16 +149,32 @@ def test_signal_reversal_still_fires_after_the_level_checks(db):
 
     conn = db.get_connection()
     write_candles(conn, "FLIP", SESSION_NOW, close=100.2)
-    position_id = open_position(conn, "FLIP", stop_loss=95.0, take_profit=110.0)
+    position_id = open_position(conn, "FLIP", stop_loss=95.0, take_profit=110.0, signal_source="rule")
     row = dict(conn.execute("SELECT * FROM open_positions WHERE id = ?", (position_id,)).fetchone())
+    
+    # Insert a rule-based signal that shows a reversal (SELL for a BUY position)
+    conn.execute(
+        "INSERT INTO signals (symbol, timestamp, action, rationale) VALUES (?, ?, ?, ?)",
+        ("FLIP", "2026-09-29T11:00:00", "SELL", "reversal test"),
+    )
+    conn.commit()
     conn.close()
 
-    status = get_position_status(row, current_rule_action="SELL", now=SESSION_NOW)
+    status = get_position_status(row, now=SESSION_NOW)
 
     assert status.recommendation == "SELL"
     assert status.alert_kind == "reversal"
     # A HOLD from the rule path is an abstention, not a reversal.
-    assert get_position_status(row, current_rule_action="HOLD", now=SESSION_NOW).alert_kind is None
+    # Update the signal to HOLD and verify no reversal
+    conn = db.get_connection()
+    conn.execute(
+        "UPDATE signals SET action = 'HOLD' WHERE symbol = 'FLIP'",
+    )
+    conn.commit()
+    conn.close()
+    
+    status2 = get_position_status(row, now=SESSION_NOW)
+    assert status2.alert_kind is None
 
 
 # --- freshness: what may and may not be claimed ---------------------------

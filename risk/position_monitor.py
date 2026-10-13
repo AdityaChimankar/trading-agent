@@ -5,7 +5,9 @@ these checks in priority order:
 
   1. Has the bar reached the stop-loss?          -> SELL (stop-loss)
   2. Has the bar reached the take-profit?        -> SELL (take-profit)
-  3. Has the current rule-based signal flipped?  -> SELL (signal reversed)
+  3. Has the current signal flipped?             -> SELL (signal reversed)
+     - Checks the SAME signal source that opened the position:
+       rule-based, ML, hybrid, or LLM
   4. None of the above, on a fresh candle        -> HOLD
   5. None of the above, on a stale candle        -> STALE
   6. No usable candle for the symbol at all      -> NO_DATA
@@ -41,6 +43,7 @@ survives a closed dashboard - but it, too, closes nothing.
 """
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional
 
 from core.freshness import candle_age_minutes, is_stale
 from core.logging_config import get_logger
@@ -69,6 +72,8 @@ class PositionStatus:
     stale: bool = False                 # candle is behind the live feed during the session
     candle_age_minutes: float | None = None
     candle_timestamp: str | None = None  # the bar this verdict came from
+    # Track which signal source was used to open this position
+    signal_source: str | None = None    # "rule" | "ml" | "hybrid" | "llm" | None
 
 
 def _compute_pnl(action: str, entry_price: float, current_price: float, position_size: int) -> tuple:
@@ -104,6 +109,43 @@ def _level_breach(action: str, stop_loss, take_profit, high, low) -> tuple:
     return None, None
 
 
+def _get_current_signal(symbol: str, signal_source: str | None) -> tuple[str | None, float | None]:
+    """Get the current signal action for a symbol from the specified source.
+    
+    Returns (action, confidence) where action is BUY/SELL/HOLD or None.
+    """
+    from storage.db import get_connection
+    
+    conn = get_connection()
+    try:
+        if signal_source == "ml":
+            row = conn.execute(
+                "SELECT action, confidence FROM ml_signals WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+                (symbol,),
+            ).fetchone()
+        elif signal_source == "hybrid":
+            row = conn.execute(
+                "SELECT action, confidence FROM hybrid_signals WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+                (symbol,),
+            ).fetchone()
+        elif signal_source == "llm":
+            row = conn.execute(
+                "SELECT action, confidence FROM llm_signals WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+                (symbol,),
+            ).fetchone()
+        else:  # rule-based (default)
+            row = conn.execute(
+                "SELECT action, 1.0 as confidence FROM signals WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+                (symbol,),
+            ).fetchone()
+        
+        if row:
+            return row["action"], row["confidence"] if "confidence" in row.keys() else 1.0
+    finally:
+        conn.close()
+    return None, None
+
+
 def get_position_status(position: dict, current_rule_action: str = None,
                         now: datetime | None = None) -> PositionStatus:
     """
@@ -130,11 +172,13 @@ def get_position_status(position: dict, current_rule_action: str = None,
             reason=f"No usable candle for {symbol} ({indicators['error']}) - cannot "
                    f"mark this position or judge its stop. It is still open.",
             alert_kind="no_data",
+            signal_source=position.get("signal_source"),
         )
 
     action = position["action"]
     entry_price = position["entry_price"]
     position_size = position["position_size"]
+    signal_source = position.get("signal_source")
 
     close_price = indicators["close"]
     pnl, pnl_pct = _compute_pnl(action, entry_price, close_price, position_size)
@@ -147,9 +191,13 @@ def get_position_status(position: dict, current_rule_action: str = None,
         action, position.get("stop_loss"), position.get("take_profit"),
         indicators.get("high"), indicators.get("low"),
     )
-    if alert_kind is None and current_rule_action in ("BUY", "SELL") and current_rule_action != action:
-        alert_kind = "reversal"
-        reason = f"Current rule-based signal has flipped to {current_rule_action}"
+    
+    # Check signal reversal using the SAME source that opened the position
+    if alert_kind is None and signal_source:
+        current_action, confidence = _get_current_signal(symbol, signal_source)
+        if current_action in ("BUY", "SELL") and current_action != action:
+            alert_kind = "reversal"
+            reason = f"Signal ({signal_source}) flipped to {current_action} (confidence: {confidence:.0%})"
 
     if alert_kind is not None:
         # A breach is a fact about a bar that exists, so staleness qualifies it
@@ -165,6 +213,7 @@ def get_position_status(position: dict, current_rule_action: str = None,
             recommendation="SELL", reason=reason, alert_kind=alert_kind,
             stale=stale, candle_age_minutes=round(age, 1) if age is not None else None,
             candle_timestamp=indicators.get("timestamp"),
+            signal_source=signal_source,
         )
 
     if stale:
@@ -177,6 +226,7 @@ def get_position_status(position: dict, current_rule_action: str = None,
             alert_kind="stale", stale=True,
             candle_age_minutes=round(age, 1) if age is not None else None,
             candle_timestamp=indicators.get("timestamp"),
+            signal_source=signal_source,
         )
 
     return PositionStatus(
@@ -187,6 +237,7 @@ def get_position_status(position: dict, current_rule_action: str = None,
         recommendation="HOLD", reason="No exit condition met",
         stale=False, candle_age_minutes=round(age, 1) if age is not None else None,
         candle_timestamp=indicators.get("timestamp"),
+        signal_source=signal_source,
     )
 
 
@@ -196,9 +247,10 @@ def get_all_position_statuses(fetch_current_signals: bool = True,
     get_open_positions() returned; anything unreadable comes back as
     NO_DATA rather than being dropped (see get_position_status).
 
-    Signal-reversal checking is optional (fetch_current_signals=False skips
-    decision_agent's live computation, e.g. for a quick check that doesn't
-    need it).
+    Each position now checks its OWN signal source (rule/ml/hybrid/llm)
+    for reversals, so the monitor protects positions regardless of which
+    signal opened them. The `fetch_current_signals` parameter is kept for
+    backwards compatibility but is no longer needed.
     
     Positions are sorted by priority: SELL recommendations (stop/target/reversal)
     first, then STALE/NO_DATA, then HOLD. This ensures actively monitored
@@ -207,14 +259,8 @@ def get_all_position_statuses(fetch_current_signals: bool = True,
     positions = get_open_positions()
     statuses = []
     for position in positions:
-        current_action = None
-        if fetch_current_signals:
-            try:
-                from strategy.decision_agent import decide
-                current_action = decide(position["symbol"])["action"]
-            except Exception:
-                current_action = None  # don't let a signal-fetch failure hide the P&L info
-        statuses.append(get_position_status(position, current_rule_action=current_action, now=now))
+        # Each position now self-determines its signal source for reversal checks
+        statuses.append(get_position_status(position, now=now))
     
     # Sort by priority: SELL (alert) > STALE/NO_DATA > HOLD
     def sort_key(status):

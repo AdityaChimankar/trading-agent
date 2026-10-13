@@ -1,4 +1,4 @@
-"""Unit tests for core signals module."""
+"""Unit tests for core signals module (EMA pullback strategy)."""
 import numpy as np
 import pandas as pd
 
@@ -22,7 +22,7 @@ from core.signals import (
 
 def test_constants():
     """Test that constants have expected values."""
-    assert LOOKBACK_MIN == 20
+    assert LOOKBACK_MIN == 30
     assert FORWARD_WINDOW == 6
     assert SWING_ORDER == 5
     assert NEUTRAL_SENTIMENT == 0.0
@@ -31,16 +31,36 @@ def test_constants():
 
 
 def test_default_params():
-    """Test DEFAULT_PARAMS structure."""
-    assert "rsi_oversold" in DEFAULT_PARAMS
-    assert "rsi_overbought" in DEFAULT_PARAMS
+    """Test DEFAULT_PARAMS structure for EMA pullback strategy."""
+    assert "htf_ema_fast" in DEFAULT_PARAMS
+    assert "htf_ema_slow" in DEFAULT_PARAMS
+    assert "use_htf_trend" in DEFAULT_PARAMS
+    assert "ltf_ema_fast" in DEFAULT_PARAMS
+    assert "ltf_ema_slow" in DEFAULT_PARAMS
+    assert "pullback_ema" in DEFAULT_PARAMS
+    assert "atr_sl_mult" in DEFAULT_PARAMS
+    assert "atr_tp_mult" in DEFAULT_PARAMS
     assert "adx_threshold" in DEFAULT_PARAMS
-    assert "pattern_confirm_buy_rsi" in DEFAULT_PARAMS
-    assert "pattern_confirm_sell_rsi" in DEFAULT_PARAMS
+    assert "rsi_max_long" in DEFAULT_PARAMS
+    assert "rsi_min_short" in DEFAULT_PARAMS
+    assert "volume_mult" in DEFAULT_PARAMS
+    assert "min_atr_pct" in DEFAULT_PARAMS
+    assert "use_rsi_filter" in DEFAULT_PARAMS
+    assert "use_volume_filter" in DEFAULT_PARAMS
 
-    assert DEFAULT_PARAMS["rsi_oversold"] == 30
-    assert DEFAULT_PARAMS["rsi_overbought"] == 70
+    assert DEFAULT_PARAMS["htf_ema_fast"] == 20
+    assert DEFAULT_PARAMS["htf_ema_slow"] == 50
+    assert DEFAULT_PARAMS["use_htf_trend"] is True
+    assert DEFAULT_PARAMS["ltf_ema_fast"] == 9
+    assert DEFAULT_PARAMS["ltf_ema_slow"] == 21
+    assert DEFAULT_PARAMS["pullback_ema"] == 9
+    assert DEFAULT_PARAMS["atr_sl_mult"] == 1.5
+    assert DEFAULT_PARAMS["atr_tp_mult"] == 4.0
     assert DEFAULT_PARAMS["adx_threshold"] == 20
+    assert DEFAULT_PARAMS["rsi_max_long"] == 60
+    assert DEFAULT_PARAMS["rsi_min_short"] == 40
+    assert DEFAULT_PARAMS["volume_mult"] == 1.2
+    assert DEFAULT_PARAMS["min_atr_pct"] == 0.0005
 
 
 def test_pattern_cols():
@@ -54,49 +74,89 @@ def test_pattern_cols():
 
 
 def test_vectorized_evaluate():
-    """Test vectorized_evaluate function."""
-    rsi = np.array([25, 35, 75, 65, 50])
-    adx = np.array([25, 25, 25, 25, 25])
-    pattern_codes = np.array([1, 1, 2, 2, 0], dtype=np.int8)  # bullish, bullish, bearish, bearish, neutral
+    """Test vectorized_evaluate function for EMA pullback strategy."""
+    n = 10
+    ema_fast = np.array([10, 11, 12, 13, 14, 15, 16, 17, 18, 19], dtype=float)
+    ema_slow = np.array([9, 10, 11, 12, 13, 14, 15, 16, 17, 18], dtype=float)
+    ema_pullback = np.array([9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5, 17.5, 18.5], dtype=float)
+    htf_trend_up = np.array([True] * n)
+    htf_trend_down = np.array([False] * n)
+    adx = np.array([25] * n)
+    atr = np.array([0.5] * n)
+    close = np.array([10, 11, 12, 13, 14, 15, 16, 17, 18, 19], dtype=float)
+    rsi = np.array([50] * n)
+    volume_ratio = np.array([1.5] * n)
 
-    actions = vectorized_evaluate(rsi, adx, pattern_codes)
+    actions = vectorized_evaluate(
+        ema_fast, ema_slow, ema_pullback,
+        htf_trend_up, htf_trend_down,
+        adx, atr, close, rsi, volume_ratio
+    )
 
-    # Should be BUY (1) for first two (RSI < 45, bullish pattern, ADX >= 20)
-    # Should be SELL (2) for next two (RSI > 55, bearish pattern, ADX >= 20)
-    # Should be HOLD (0) for last (neutral pattern)
-    assert actions[0] == 1  # BUY
-    assert actions[1] == 1  # BUY
-    assert actions[2] == 2  # SELL
-    assert actions[3] == 2  # SELL
-    assert actions[4] == 0  # HOLD
+    # All should pass initial trend filter (HTF up, LTF up, ADX ok, RSI ok, volume ok)
+    # Result should be int8 array with 0=HOLD, 1=BUY, 2=SELL
+    assert actions.dtype == np.int8
+    assert len(actions) == n
+    # With HTF up and LTF uptrend, we expect BUY (1) where valid
+    # Since all values are valid and trend aligned, should be BUY
+    assert np.all(actions[actions != 0] == 1)  # Only BUY or HOLD
 
 
 def test_vectorized_evaluate_adx_filter():
-    """Test ADX threshold filtering."""
-    rsi = np.array([25, 25])
-    adx = np.array([15, 25])  # First below threshold, second above
-    pattern_codes = np.array([1, 1], dtype=np.int8)
+    """Test ADX threshold filtering in vectorized_evaluate."""
+    n = 5
+    ema_fast = np.array([10, 11, 12, 13, 14], dtype=float)
+    ema_slow = np.array([9, 10, 11, 12, 13], dtype=float)
+    ema_pullback = np.array([9.5, 10.5, 11.5, 12.5, 13.5], dtype=float)
+    htf_trend_up = np.array([True] * n)
+    htf_trend_down = np.array([False] * n)
+    adx = np.array([15, 25, 15, 25, 25])  # Below and above threshold
+    atr = np.array([0.5] * n)
+    close = np.array([10, 11, 12, 13, 14], dtype=float)
+    rsi = np.array([50] * n)
+    volume_ratio = np.array([1.5] * n)
 
-    actions = vectorized_evaluate(rsi, adx, pattern_codes)
+    actions = vectorized_evaluate(
+        ema_fast, ema_slow, ema_pullback,
+        htf_trend_up, htf_trend_down,
+        adx, atr, close, rsi, volume_ratio
+    )
 
-    # First should be HOLD (ADX < 20)
-    # Second should be BUY (ADX >= 20, RSI < 45, bullish pattern)
-    assert actions[0] == 0
-    assert actions[1] == 1
+    # First and third should be HOLD (ADX < 20)
+    # Second, fourth, fifth should be BUY (ADX >= 20, trend aligned)
+    assert actions[0] == 0  # HOLD
+    assert actions[1] == 1  # BUY
+    assert actions[2] == 0  # HOLD
+    assert actions[3] == 1  # BUY
+    assert actions[4] == 1  # BUY
 
 
 def test_vectorized_evaluate_nan_handling():
     """Test NaN handling in vectorized_evaluate."""
-    rsi = np.array([25, np.nan, 25])
-    adx = np.array([25, 25, 25])
-    pattern_codes = np.array([1, 1, 1], dtype=np.int8)
+    n = 5
+    ema_fast = np.array([10, np.nan, 12, 13, 14], dtype=float)
+    ema_slow = np.array([9, 10, 11, 12, 13], dtype=float)
+    ema_pullback = np.array([9.5, 10.5, 11.5, 12.5, 13.5], dtype=float)
+    htf_trend_up = np.array([True] * n)
+    htf_trend_down = np.array([False] * n)
+    adx = np.array([25] * n)
+    atr = np.array([0.5] * n)
+    close = np.array([10, 11, 12, 13, 14], dtype=float)
+    rsi = np.array([50] * n)
+    volume_ratio = np.array([1.5] * n)
 
-    actions = vectorized_evaluate(rsi, adx, pattern_codes)
+    actions = vectorized_evaluate(
+        ema_fast, ema_slow, ema_pullback,
+        htf_trend_up, htf_trend_down,
+        adx, atr, close, rsi, volume_ratio
+    )
 
-    # Middle should be HOLD due to NaN RSI
-    assert actions[0] == 1
-    assert actions[1] == 0
-    assert actions[2] == 1
+    # Middle should be HOLD due to NaN ema_fast
+    assert actions[0] == 1  # BUY
+    assert actions[1] == 0  # HOLD (NaN)
+    assert actions[2] == 1  # BUY
+    assert actions[3] == 1  # BUY
+    assert actions[4] == 1  # BUY
 
 
 def test_precompute_pattern_bias_codes():

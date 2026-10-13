@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  # Main API service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: trading-agent-api
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - DB_URL=postgresql://trading:trading@db:5432/trading
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./.env:/app/.env:ro
+    restart: unless-stopped
+
+  # Background worker for data ingestion
+  ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: trading-agent-ingest fetch-historical --all
+    environment:
+      - ENVIRONMENT=production
+      - DB_URL=postgresql://trading:trading@db:5432/trading
+    depends_on:
+      - db
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    restart: "no"
+
+  # Scheduler for periodic tasks
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: trading-agent-ingest scheduler
+    environment:
+      - ENVIRONMENT=production
+      - DB_URL=postgresql://trading:trading@db:5432/trading
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    restart: unless-stopped
+
+  # PostgreSQL database
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=trading
+      - POSTGRES_USER=trading
+      - POSTGRES_PASSWORD=trading
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Frontend development server
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    working_dir: /app
+    command: npm run dev
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: trading-agent-network

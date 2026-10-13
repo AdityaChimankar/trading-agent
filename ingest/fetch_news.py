@@ -9,17 +9,17 @@ every URL in FEEDS on your machine):
   Business Standard (markets+companies)
   NDTV Profit                    - feedburner "latest" feed
   BSE announcements.xml          - the exchange's corporate-announcement feed;
-                                   titles carry the COMPANY NAME ("Tata
-                                   Consultancy Services Ltd"), not the trading
-                                   symbol, so they are tagged via a
-                                   name->symbol map built from
-                                   ingest/instruments.csv (Kite's dump lists
-                                   both name and tradingsymbol)
+                                    titles carry the COMPANY NAME ("Tata
+                                    Consultancy Services Ltd"), not the trading
+                                    symbol, so they are tagged via a
+                                    name->symbol map built from
+                                    ingest/instruments.csv (Kite's dump lists
+                                    both name and tradingsymbol)
   LiveSquawk / ScoutQuest        - NOT included: both are paid/closed feeds
-                                   (LiveSquawk sells API access; ScoutQuest has
-                                   no public feed - its headlines surface on
-                                   Groww's stock-feed page under Groww's
-                                   domain). Costs vs value in docs/STRATEGIES.md.
+                                    (LiveSquawk sells API access; ScoutQuest has
+                                    no public feed - its headlines surface on
+                                    Groww's stock-feed page under Groww's
+                                    domain). Costs vs value in docs/STRATEGIES.md.
 
 Headlines aren't pre-tagged to a symbol, so matching decides tagging: watchlist
 symbols appear verbatim in wire headlines ("TCS"), BSE announcement titles use
@@ -28,7 +28,7 @@ company names, handled by the name map.
 import csv
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import feedparser
 import requests
@@ -205,6 +205,32 @@ def fetch_and_store_news() -> None:
     conn.close()
     summary = ", ".join(f"{s}: {c}" for s, c in per_source.items() if c)
     print(f"{new_count} new headlines stored ({summary or 'nothing new'})")
+
+
+def flush_old_news(days: int = 3) -> int:
+    """Remove news older than `days` days.
+
+    Uses `published_at` (the original feed publication date) to determine age,
+    not `fetched_at` (when we downloaded it). This ensures we keep news for
+    the full retention window even if we fetched it late.
+
+    Args:
+        days: Retention window in days (default 3).
+
+    Returns:
+        Number of rows deleted.
+    """
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    conn = get_connection()
+    cur = execute_with_retry(conn,
+        "DELETE FROM news WHERE published_at < ?",
+        (cutoff,),
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    print(f"Flushed {deleted} news items older than {days} days (before {cutoff})")
+    return deleted
 
 
 if __name__ == "__main__":

@@ -1,0 +1,338 @@
+"""Live ticker using Kite Connect WebSocket."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Callable, Optional
+
+import pandas as pd
+from kiteconnect import KiteTicker
+
+from trading_agent.core.config import get_settings
+from trading_agent.core.logging_config import get_logger
+from trading_agent.core.exceptions import KiteAPIError
+from trading_agent.core.circuit_breaker import get_circuit_breaker
+from trading_agent.ingest.kite_auth import get_kite_auth
+from trading_agent.ingest.instrument_lookup import get_instrument_lookup
+from trading_agent.storage.parquet_store import get_parquet_store
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class TickData:
+    """Single tick data."""
+
+    symbol: str
+    token: int
+    timestamp: datetime
+    last_price: float
+    volume: int
+    oi: int | None = None
+    bid_price: float | None = None
+    ask_price: float | None = None
+    bid_qty: int | None = None
+    ask_qty: int | None = None
+
+
+@dataclass
+class CandleData:
+    """Aggregated candle data."""
+
+    symbol: str
+    interval: str
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+    oi: int | None = None
+
+
+class LiveTicker:
+    """Kite Connect WebSocket ticker with candle aggregation."""
+
+    def __init__(
+        self,
+        symbols: list[str],
+        interval: str = "5minute",
+        on_candle: Callable[[CandleData], None] | None = None,
+        on_tick: Callable[[TickData], None] | None = None,
+    ):
+        self.symbols = symbols
+        self.interval = interval
+        self.on_candle = on_candle
+        self.on_tick = on_tick
+
+        self.auth = get_kite_auth()
+        self.instruments = get_instrument_lookup()
+        self.parquet = get_parquet_store()
+
+        self._tokens: list[int] = []
+        self._symbol_by_token: dict[int, str] = {}
+        self._candle_buffers: dict[int, list[TickData]] = defaultdict(list)
+        self._last_candle_time: dict[int, datetime] = {}
+        self._running = False
+        self._ticker: KiteTicker | None = None
+
+        # Circuit breaker for reconnection
+        self._reconnect_cb = get_circuit_breaker("kite_ticker_reconnect")
+        self._reconnect_attempts = 0
+        self._max_reconnect_attempts = 10
+
+    def _resolve_tokens(self) -> None:
+        """Resolve symbols to instrument tokens."""
+        self._tokens = []
+        self._symbol_by_token = {}
+
+        for symbol in self.symbols:
+            token = self.instruments.get_token(symbol)
+            if token:
+                self._tokens.append(token)
+                self._symbol_by_token[token] = symbol
+            else:
+                logger.warning("symbol_not_found", symbol=symbol)
+
+        if not self._tokens:
+            raise ValueError("No valid symbols to subscribe")
+
+    def _get_interval_seconds(self) -> int:
+        """Get interval in seconds."""
+        interval_map = {
+            "1minute": 60,
+            "5minute": 300,
+            "15minute": 900,
+            "30minute": 1800,
+            "60minute": 3600,
+        }
+        return interval_map.get(self.interval, 300)
+
+    def _get_candle_start(self, timestamp: datetime) -> datetime:
+        """Get candle start timestamp for a given tick timestamp."""
+        interval_sec = self._get_interval_seconds()
+        ts = int(timestamp.timestamp())
+        candle_ts = (ts // interval_sec) * interval_sec
+        return datetime.fromtimestamp(candle_ts, tz=timezone.utc)
+
+    def _aggregate_candle(self, token: int) -> CandleData | None:
+        """Aggregate ticks into a candle."""
+        ticks = self._candle_buffers.get(token, [])
+        if not ticks:
+            return None
+
+        symbol = self._symbol_by_token[token]
+        interval_sec = self._get_interval_seconds()
+
+        # Determine candle timestamp from first tick
+        candle_start = self._get_candle_start(ticks[0].timestamp)
+
+        # Aggregate
+        prices = [t.last_price for t in ticks]
+        volumes = [t.volume for t in ticks]
+
+        candle = CandleData(
+            symbol=symbol,
+            interval=self.interval,
+            timestamp=candle_start,
+            open=prices[0],
+            high=max(prices),
+            low=min(prices),
+            close=prices[-1],
+            volume=sum(volumes),
+            oi=ticks[-1].oi,
+        )
+
+        # Clear buffer for this token
+        self._candle_buffers[token] = []
+        self._last_candle_time[token] = candle_start
+
+        return candle
+
+    def _on_ticks(self, ws, ticks: list[dict]) -> None:
+        """Handle incoming ticks."""
+        for tick in ticks:
+            token = tick["instrument_token"]
+            if token not in self._symbol_by_token:
+                continue
+
+            symbol = self._symbol_by_token[token]
+            timestamp = datetime.fromtimestamp(tick["timestamp"], tz=timezone.utc)
+
+            # Create tick data
+            tick_data = TickData(
+                symbol=symbol,
+                token=token,
+                timestamp=timestamp,
+                last_price=tick["last_price"],
+                volume=tick.get("volume_traded", 0),
+                oi=tick.get("oi"),
+                bid_price=tick.get("depth", {}).get("buy", [{}])[0].get("price")
+                if tick.get("depth")
+                else None,
+                ask_price=tick.get("depth", {}).get("sell", [{}])[0].get("price")
+                if tick.get("depth")
+                else None,
+            )
+
+            # Callback for raw tick
+            if self.on_tick:
+                try:
+                    self.on_tick(tick_data)
+                except Exception as e:
+                    logger.error("tick_callback_failed", error=str(e))
+
+            # Add to buffer
+            self._candle_buffers[token].append(tick_data)
+
+            # Check if candle is complete
+            candle_start = self._get_candle_start(timestamp)
+            last_candle = self._last_candle_time.get(token)
+
+            if last_candle is None or candle_start > last_candle:
+                # Candle completed, aggregate and emit
+                candle = self._aggregate_candle(token)
+                if candle and self.on_candle:
+                    try:
+                        self.on_candle(candle)
+                    except Exception as e:
+                        logger.error("candle_callback_failed", error=str(e))
+
+    def _on_connect(self, ws, response) -> None:
+        """Handle WebSocket connect."""
+        logger.info("ticker_connected", tokens=len(self._tokens))
+        ws.subscribe(self._tokens)
+        ws.set_mode(ws.MODE_FULL, self._tokens)
+        self._reconnect_attempts = 0
+
+    def _on_close(self, ws, code, reason) -> None:
+        """Handle WebSocket close."""
+        logger.warning("ticker_disconnected", code=code, reason=reason)
+        self._schedule_reconnect()
+
+    def _on_error(self, ws, code, reason) -> None:
+        """Handle WebSocket error."""
+        logger.error("ticker_error", code=code, reason=reason)
+
+    def _on_reconnect(self, ws, attempts) -> None:
+        """Handle reconnection attempt."""
+        logger.info("ticker_reconnecting", attempt=attempts)
+
+    def _on_noreconnect(self, ws) -> None:
+        """Handle max reconnection attempts reached."""
+        logger.error("ticker_max_reconnect_reached")
+        self._running = False
+
+    def _schedule_reconnect(self) -> None:
+        """Schedule reconnection with backoff."""
+        if self._reconnect_attempts >= self._max_reconnect_attempts:
+            logger.error("max_reconnect_attempts_reached")
+            self._running = False
+            return
+
+        self._reconnect_attempts += 1
+        delay = min(2**self._reconnect_attempts, 60)
+        logger.info("scheduling_reconnect", attempt=self._reconnect_attempts, delay=delay)
+
+        # This would be called from the event loop
+        asyncio.create_task(self._reconnect_after(delay))
+
+    async def _reconnect_after(self, delay: float) -> None:
+        """Reconnect after delay."""
+        await asyncio.sleep(delay)
+        if self._running:
+            await self.start()
+
+    def start(self) -> None:
+        """Start the ticker."""
+        if self._running:
+            return
+
+        self._resolve_tokens()
+        self._running = True
+
+        self._ticker = KiteTicker(
+            api_key=self.auth.credentials.api_key,
+            access_token=self.auth.credentials.access_token,
+        )
+
+        self._ticker.on_ticks = self._on_ticks
+        self._ticker.on_connect = self._on_connect
+        self._ticker.on_close = self._on_close
+        self._ticker.on_error = self._on_error
+        self._ticker.on_reconnect = self._on_reconnect
+        self._ticker.on_noreconnect = self._on_noreconnect
+
+        # Run in background thread
+        import threading
+
+        self._thread = threading.Thread(target=self._ticker.connect, daemon=True)
+        self._thread.start()
+
+        logger.info("ticker_started", symbols=self.symbols, interval=self.interval)
+
+    def stop(self) -> None:
+        """Stop the ticker."""
+        self._running = False
+        if self._ticker:
+            self._ticker.close()
+        logger.info("ticker_stopped")
+
+    def subscribe(self, symbols: list[str]) -> None:
+        """Subscribe to additional symbols."""
+        new_tokens = []
+        for symbol in symbols:
+            token = self.instruments.get_token(symbol)
+            if token and token not in self._tokens:
+                new_tokens.append(token)
+                self._tokens.append(token)
+                self._symbol_by_token[token] = symbol
+
+        if new_tokens and self._ticker:
+            self._ticker.subscribe(new_tokens)
+            self._ticker.set_mode(self._ticker.MODE_FULL, new_tokens)
+
+    def unsubscribe(self, symbols: list[str]) -> None:
+        """Unsubscribe from symbols."""
+        tokens_to_remove = []
+        for symbol in symbols:
+            token = self.instruments.get_token(symbol)
+            if token and token in self._tokens:
+                tokens_to_remove.append(token)
+
+        if tokens_to_remove and self._ticker:
+            self._ticker.unsubscribe(tokens_to_remove)
+            self._tokens = [t for t in self._tokens if t not in tokens_to_remove]
+            for t in tokens_to_remove:
+                self._symbol_by_token.pop(t, None)
+                self._candle_buffers.pop(t, None)
+                self._last_candle_time.pop(t, None)
+
+
+def create_default_candle_handler(parquet_store=None) -> Callable[[CandleData], None]:
+    """Create a default candle handler that stores to Parquet."""
+    store = parquet_store or get_parquet_store()
+
+    def handler(candle: CandleData) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "timestamp": candle.timestamp,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                    "oi": candle.oi or 0,
+                }
+            ]
+        )
+        df.attrs["symbol"] = candle.symbol
+        store.write_candles(df, candle.symbol, candle.interval)
+
+    return handler

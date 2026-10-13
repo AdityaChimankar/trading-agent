@@ -45,6 +45,7 @@ traded". So this file also:
 import queue
 import threading
 import time
+import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -64,6 +65,10 @@ logger = get_logger(__name__)
 
 
 FLUSH_INTERVAL_SEC = 5
+# Retry configuration for database writes
+DB_MAX_RETRIES = 5
+DB_RETRY_BASE_DELAY = 0.2  # seconds, exponential backoff
+
 # MODE_FULL is fine for a couple dozen symbols; MODE_QUOTE is lighter
 # and all we actually use is last_price + volume_traded - switch
 # automatically based on watchlist size so this doesn't need manual tuning.
@@ -218,15 +223,23 @@ def _collect_buckets(force: bool):
 def _write_candles(conn, rows) -> None:
     if not rows:
         return
-    try:
-        conn.executemany(
-            "INSERT OR REPLACE INTO candles (symbol, timestamp, open, high, low, close, volume) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)", rows,
-        )
-        conn.commit()
-    except Exception as e:
-        logger.error("Failed to write candles", extra={"error": str(e), "rows": str(rows[:3])}, exc_info=True)
-        raise
+    for attempt in range(DB_MAX_RETRIES):
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO candles (symbol, timestamp, open, high, low, close, volume) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)", rows,
+            )
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower() and attempt < DB_MAX_RETRIES - 1:
+                time.sleep(DB_RETRY_BASE_DELAY * (attempt + 1))
+                continue
+            logger.error("Failed to write candles", extra={"error": str(e), "rows": str(rows[:3])}, exc_info=True)
+            raise
+        except Exception as e:
+            logger.error("Failed to write candles", extra={"error": str(e), "rows": str(rows[:3])}, exc_info=True)
+            raise
 
 
 def _write_heartbeat(conn) -> None:
@@ -236,33 +249,41 @@ def _write_heartbeat(conn) -> None:
         # Both buffers: an unflushed hand-off is data at risk, so it belongs
         # in the "how much is waiting" number.
         pending = len(_buckets) + len(_completed)
-    try:
-        conn.execute(
-            """
-            INSERT INTO ingest_status (id, connected, connected_at, disconnected_at, last_tick_at,
-                                       symbols_seen, buckets_pending, candles_written,
-                                       heal_queue_depth, reconnects, updated_at)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                connected = excluded.connected,
-                connected_at = excluded.connected_at,
-                disconnected_at = excluded.disconnected_at,
-                last_tick_at = excluded.last_tick_at,
-                symbols_seen = excluded.symbols_seen,
-                buckets_pending = excluded.buckets_pending,
-                candles_written = excluded.candles_written,
-                heal_queue_depth = excluded.heal_queue_depth,
-                reconnects = excluded.reconnects,
-                updated_at = excluded.updated_at
-            """,
-            (1 if _connected else 0, _connected_at, _disconnected_at, _latest_exchange_minute,
-             len(_symbols_seen), pending, _candles_written, _heal_queue.qsize(), _reconnects,
-             datetime.now().isoformat()),
-        )
-        conn.commit()
-    except Exception as e:
-        logger.error("Failed to write heartbeat", extra={"error": str(e)}, exc_info=True)
-        raise
+    for attempt in range(DB_MAX_RETRIES):
+        try:
+            conn.execute(
+                """
+                INSERT INTO ingest_status (id, connected, connected_at, disconnected_at, last_tick_at,
+                                           symbols_seen, buckets_pending, candles_written,
+                                           heal_queue_depth, reconnects, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    connected = excluded.connected,
+                    connected_at = excluded.connected_at,
+                    disconnected_at = excluded.disconnected_at,
+                    last_tick_at = excluded.last_tick_at,
+                    symbols_seen = excluded.symbols_seen,
+                    buckets_pending = excluded.buckets_pending,
+                    candles_written = excluded.candles_written,
+                    heal_queue_depth = excluded.heal_queue_depth,
+                    reconnects = excluded.reconnects,
+                    updated_at = excluded.updated_at
+                """,
+                (1 if _connected else 0, _connected_at, _disconnected_at, _latest_exchange_minute,
+                 len(_symbols_seen), pending, _candles_written, _heal_queue.qsize(), _reconnects,
+                 datetime.now().isoformat()),
+            )
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower() and attempt < DB_MAX_RETRIES - 1:
+                time.sleep(DB_RETRY_BASE_DELAY * (attempt + 1))
+                continue
+            logger.error("Failed to write heartbeat", extra={"error": str(e)}, exc_info=True)
+            raise
+        except Exception as e:
+            logger.error("Failed to write heartbeat", extra={"error": str(e)}, exc_info=True)
+            raise
 
 
 def _enqueue_heal(start: datetime, end: datetime) -> None:
@@ -342,10 +363,32 @@ def flush_loop():
     exact failure mode it exists to prevent.
     """
     conn = get_connection()
+    consecutive_failures = 0
     while True:
         time.sleep(FLUSH_INTERVAL_SEC)
         try:
             _flush_once(conn)
+            consecutive_failures = 0
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower():
+                consecutive_failures += 1
+                logger.warning(f"Flush got database locked, attempt {consecutive_failures}", extra={"error": str(e)})
+                # Rollback any pending transaction
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                # Recreate connection after multiple failures
+                if consecutive_failures >= 3:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    conn = get_connection()
+                    consecutive_failures = 0
+                    logger.info("Recreated database connection for flush loop")
+            else:
+                logger.error("flush iteration failed (continuing)", extra={"error": str(e)}, exc_info=True)
         except Exception as e:
             logger.error("flush iteration failed (continuing)", extra={"error": str(e)}, exc_info=True)
 
@@ -429,7 +472,10 @@ def heal_loop():
         except Exception as e:
             logger.error("heal sweep failed", extra={"error": str(e)})
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
             _heal_queue.task_done()
 
 

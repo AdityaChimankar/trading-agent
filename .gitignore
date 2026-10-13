@@ -1,10 +1,66 @@
-.env
-.access_token
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.log
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Data files
+data/parquet/
 *.db
-*.db-shm
-*.db-wal
-/data/
-.claude/settings.local.json
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Cache
+.cache/
+
+# Access tokens
+.access_token
+
+# Models
+data/indicator_cache/*.pkl
+models/*.pkl
+models/registry.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+*.tmp
+*.temp

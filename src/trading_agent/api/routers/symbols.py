@@ -1,0 +1,108 @@
+"""Symbols router."""
+
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
+
+from trading_agent.ingest.instrument_lookup import get_instrument_lookup
+from trading_agent.storage.parquet_store import get_parquet_store
+
+router = APIRouter()
+
+
+class SymbolInfo(BaseModel):
+    symbol: str
+    name: str | None = None
+    exchange: str = "NSE"
+    instrument_token: int | None = None
+    lot_size: int = 1
+    sector: str | None = None
+    has_data: bool = False
+    data_range: dict | None = None
+
+
+@router.get("/", response_model=list[SymbolInfo])
+async def list_symbols(
+    search: str | None = Query(None, description="Search query"),
+    limit: int = Query(100, ge=1, le=500),
+    has_data: bool | None = Query(None, description="Filter by data availability"),
+):
+    """List available symbols."""
+    parquet = get_parquet_store()
+    instruments = get_instrument_lookup()
+
+    all_symbols = instruments.get_all_equity_symbols()
+
+    if search:
+        search = search.upper()
+        all_symbols = [s for s in all_symbols if search in s]
+
+    if has_data is not None:
+        parquet_symbols = set(parquet.get_symbols())
+        if has_data:
+            all_symbols = [s for s in all_symbols if s in parquet_symbols]
+        else:
+            all_symbols = [s for s in all_symbols if s not in parquet_symbols]
+
+    symbols = all_symbols[:limit]
+
+    result = []
+    for symbol in symbols:
+        token = instruments.get_token(symbol)
+        lot_size = instruments.get_lot_size(symbol)
+        sym_has_data = symbol in parquet.get_symbols()
+
+        data_range = None
+        if sym_has_data:
+            start, end = parquet.get_date_range(symbol)
+            if start and end:
+                data_range = {"start": start.isoformat(), "end": end.isoformat()}
+
+        result.append(
+            SymbolInfo(
+                symbol=symbol,
+                instrument_token=token,
+                lot_size=lot_size,
+                has_data=sym_has_data,
+                data_range=data_range,
+            )
+        )
+
+    return result
+
+
+@router.get("/{symbol}", response_model=SymbolInfo)
+async def get_symbol(symbol: str):
+    """Get symbol details."""
+    symbol = symbol.upper()
+    parquet = get_parquet_store()
+    instruments = get_instrument_lookup()
+
+    token = instruments.get_token(symbol)
+    if not token:
+        raise HTTPException(status_code=404, detail="Symbol not found")
+
+    lot_size = instruments.get_lot_size(symbol)
+    has_data = symbol in parquet.get_symbols()
+
+    data_range = None
+    if has_data:
+        start, end = parquet.get_date_range(symbol)
+        if start and end:
+            data_range = {"start": start.isoformat(), "end": end.isoformat()}
+
+    return SymbolInfo(
+        symbol=symbol,
+        instrument_token=token,
+        lot_size=lot_size,
+        has_data=has_data,
+        data_range=data_range,
+    )
+
+
+@router.get("/{symbol}/intervals")
+async def get_symbol_intervals(symbol: str):
+    """Get available intervals for a symbol."""
+    symbol = symbol.upper()
+    parquet = get_parquet_store()
+    intervals = parquet.get_intervals(symbol)
+    return {"symbol": symbol, "intervals": intervals}

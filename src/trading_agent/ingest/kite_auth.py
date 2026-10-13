@@ -1,0 +1,130 @@
+"""Kite Connect authentication and session management."""
+
+from __future__ import annotations
+
+import contextlib
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+from kiteconnect import KiteConnect
+
+from trading_agent.core.config import get_settings
+from trading_agent.core.exceptions import AuthenticationError
+from trading_agent.core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+load_dotenv()
+
+
+@dataclass(frozen=True)
+class KiteCredentials:
+    """Kite Connect credentials."""
+
+    api_key: str
+    api_secret: str
+    access_token: str = ""
+    user_id: str = ""
+    password: str = ""
+    totp_secret: str = ""
+    redirect_url: str = "http://localhost"
+
+
+class KiteAuth:
+    """Kite Connect authentication manager."""
+
+    def __init__(self, credentials: KiteCredentials | None = None):
+        settings = get_settings()
+        self.credentials = credentials or KiteCredentials(
+            api_key=settings.kite.api_key,
+            api_secret=settings.kite.api_secret,
+            access_token=settings.kite.access_token,
+            user_id=settings.kite.user_id,
+            password=settings.kite.password,
+            totp_secret=settings.kite.totp_secret,
+            redirect_url=settings.kite.redirect_url,
+        )
+        self._kite: KiteConnect | None = None
+        self._access_token_path = Path(".access_token")
+
+    @property
+    def kite(self) -> KiteConnect:
+        """Get authenticated Kite client."""
+        if self._kite is None:
+            self._kite = KiteConnect(api_key=self.credentials.api_key)
+            if self.credentials.access_token:
+                self._kite.set_access_token(self.credentials.access_token)
+        return self._kite
+
+    def login_url(self) -> str:
+        """Get login URL for manual authentication."""
+        return self.kite.login_url()
+
+    def generate_session(self, request_token: str) -> str:
+        """Generate access token from request token."""
+        try:
+            session = self.kite.generate_session(
+                request_token, api_secret=self.credentials.api_secret
+            )
+            access_token = session["access_token"]
+            self._save_access_token(access_token)
+            self._kite.set_access_token(access_token)
+            logger.info("kite_session_generated")
+            return access_token
+        except Exception as e:
+            logger.error("kite_session_failed", error=str(e))
+            raise AuthenticationError(f"Failed to generate session: {e}") from e
+
+    def _save_access_token(self, token: str) -> None:
+        """Save access token to file."""
+        with open(self._access_token_path, "w") as f:
+            f.write(token)
+        self.credentials = KiteCredentials(**{**self.credentials.__dict__, "access_token": token})
+
+    def load_access_token(self) -> str | None:
+        """Load access token from file."""
+        if self._access_token_path.exists():
+            with open(self._access_token_path) as f:
+                token = f.read().strip()
+            if token:
+                self._kite.set_access_token(token)
+                return token
+        return None
+
+    def validate_token(self) -> bool:
+        """Validate current access token."""
+        try:
+            self.kite.profile()
+            return True
+        except Exception:
+            return False
+
+    def ensure_valid_token(self) -> str:
+        """Ensure we have a valid token, re-authenticate if needed."""
+        if self.validate_token():
+            return self.credentials.access_token
+
+        logger.warning("kite_token_invalid_reauth")
+        # Could implement auto-login here with TOTP
+        raise AuthenticationError("Token invalid and auto-login not implemented")
+
+    def logout(self) -> None:
+        """Logout and clear token."""
+        with contextlib.suppress(Exception):
+            self.kite.invalidate_access_token()
+        self._access_token_path.unlink(missing_ok=True)
+        self._kite = None
+        logger.info("kite_logged_out")
+
+
+# Global instance
+_auth: KiteAuth | None = None
+
+
+def get_kite_auth(credentials: KiteCredentials | None = None) -> KiteAuth:
+    """Get or create the global Kite auth instance."""
+    global _auth
+    if _auth is None:
+        _auth = KiteAuth(credentials)
+    return _auth

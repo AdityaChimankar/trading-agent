@@ -62,6 +62,7 @@ def _migrate_add_missing_columns(conn: sqlite3.Connection) -> None:
     migrations = [
         ("open_positions", "stop_loss", "REAL"),
         ("open_positions", "take_profit", "REAL"),
+        ("open_positions", "signal_source", "TEXT"),
     ]
     for table, column, col_type in migrations:
         try:

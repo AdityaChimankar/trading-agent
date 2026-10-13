@@ -127,7 +127,8 @@ CREATE TABLE IF NOT EXISTS open_positions (
     stop_loss REAL,                 -- from the PositionPlan that opened this position
     take_profit REAL,
     opened_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open'   -- 'open' or 'closed'
+    status TEXT NOT NULL DEFAULT 'open',   -- 'open' or 'closed'
+    signal_source TEXT              -- 'rule' | 'ml' | 'hybrid' | 'llm' | NULL
 );
 
 -- Every exit the monitor has found on an open position, and when. The monitor

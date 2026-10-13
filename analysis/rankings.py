@@ -27,9 +27,11 @@ trading signal itself - decision_agent.py's evaluate_signals() is still
 the tested BUY/SELL/HOLD logic.
 """
 
-from core.pattern_detection import detect_patterns
-from core.quant_indicators import latest_indicators, load_candles
+from core.pattern_detection import patterns_from_df, detect_double_top_bottom
+from core.quant_indicators import load_candles, indicators_from_df, compute_rsi, compute_atr, compute_adx, compute_macd
 from storage.db import get_watchlist_symbols, get_open_position_symbols
+import numpy as np
+import pandas as pd
 
 # --- Tunable weights - adjust these to change how much each factor
 # influences the ranking. ---
@@ -63,12 +65,11 @@ def _rsi_component(distance: float) -> float:
     return curved * RSI_MAX_DISTANCE * RSI_WEIGHT
 
 
-def _trend_direction(symbol: str) -> str:
+def _trend_direction_from_df(df: pd.DataFrame) -> str:
     """'up' if price is above both MAs and the fast MA is above the slow
     MA, 'down' if the mirror image is true, else 'flat' - no confirmed
     trend direction either way. Needs at least TREND_MA_SLOW candles;
     returns 'flat' (i.e. no gating) if there isn't enough history yet."""
-    df = load_candles(symbol, limit=TREND_MA_SLOW + 10)
     if df is None or len(df) < TREND_MA_SLOW:
         return "flat"
 
@@ -83,15 +84,26 @@ def _trend_direction(symbol: str) -> str:
     return "flat"
 
 
-def _score_symbol(symbol: str) -> dict | None:
-    indicators = latest_indicators(symbol)
+def _score_symbol_from_df(symbol: str, df: pd.DataFrame) -> dict | None:
+    """Score a symbol using an already-loaded DataFrame."""
+    if len(df) < 20:
+        return None
+
+    # Compute indicators from the DataFrame
+    indicators = indicators_from_df(df)
     if "error" in indicators:
         return None
 
-    rsi, adx = indicators["rsi"], indicators["adx"]
-    pattern_result = detect_patterns(symbol)
+    rsi = indicators["rsi"]
+    adx = indicators["adx"]
+    close = indicators["close"]
+
+    # Compute patterns from the same DataFrame
+    pattern_result = patterns_from_df(df)
     pattern_bias = pattern_result["bias"]
-    trend = _trend_direction(symbol)
+
+    # Compute trend from the same DataFrame
+    trend = _trend_direction_from_df(df)
 
     bullish_distance = max(0.0, 30 - rsi) if rsi is not None else 0.0
     bearish_distance = max(0.0, rsi - 70) if rsi is not None else 0.0
@@ -138,7 +150,9 @@ def rank_watchlist(max_symbols: int = 30) -> list:
     for i, symbol in enumerate(get_watchlist_symbols()):
         if i >= max_symbols:
             break
-        result = _score_symbol(symbol)
+        # Load candles ONCE per symbol
+        df = load_candles(symbol, limit=TREND_MA_SLOW + 10)
+        result = _score_symbol_from_df(symbol, df)
         if result:
             result["has_open_position"] = symbol in open_symbols
             scored.append(result)

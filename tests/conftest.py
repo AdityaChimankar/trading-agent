@@ -1,60 +1,91 @@
-"""Shared test fixtures and configuration."""
+"""Pytest configuration and fixtures."""
+
 import pytest
-import os
-import sys
-from pathlib import Path
+import asyncio
+from datetime import datetime, timezone
 
-# Ensure project root is in path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+import numpy as np
+import pandas as pd
 
 
-@pytest.fixture(autouse=True)
-def reset_singletons():
-    """Reset singleton instances between tests."""
-    # Reset config singleton
-    import core.config as config_module
-    config_module._config = None
-
-    # Reset shutdown state
-    import core.shutdown as shutdown_module
-    shutdown_module._is_shutting_down = False
-    shutdown_module._shutdown_event.clear()
-    shutdown_module._shutdown_handlers.clear()
-
-    yield
-
-    # Cleanup after test
-    config_module._config = None
-    shutdown_module._is_shutting_down = False
-    shutdown_module._shutdown_event.clear()
-    shutdown_module._shutdown_handlers.clear()
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create event loop for async tests."""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
 
 
 @pytest.fixture
-def sample_candles():
-    """Create sample candle data for testing."""
-    import pandas as pd
-    import numpy as np
-    from datetime import datetime, timedelta
+def sample_ohlcv_data():
+    """Generate sample OHLCV data for testing."""
+    np.random.seed(42)
+    n = 500
+    dates = pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC")
 
-    dates = pd.date_range(start="2024-01-01 09:15", periods=100, freq="5min")
-
-    # Generate realistic OHLCV data
-    close = 2500 + np.cumsum(np.random.randn(100) * 2)
-    high = close + np.abs(np.random.randn(100) * 5)
-    low = close - np.abs(np.random.randn(100) * 5)
+    close = np.cumsum(np.random.randn(n) * 0.5) + 1000
+    high = close + np.abs(np.random.randn(n)) * 2
+    low = close - np.abs(np.random.randn(n)) * 2
     open_ = np.roll(close, 1)
     open_[0] = close[0]
-    volume = np.random.randint(1000, 10000, 100)
+    volume = np.random.randint(1000, 50000, n)
 
     df = pd.DataFrame({
-        "timestamp": [d.strftime("%Y-%m-%dT%H:%M:00") for d in dates],
+        "timestamp": dates,
         "open": open_,
         "high": high,
         "low": low,
         "close": close,
         "volume": volume,
     })
-
     return df
+
+
+@pytest.fixture
+def sample_symbol_data():
+    """Generate sample data for a single symbol."""
+    np.random.seed(123)
+    n = 2000
+    dates = pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC")
+
+    # Trending market
+    trend = np.linspace(0, 50, n)
+    noise = np.cumsum(np.random.randn(n) * 0.3)
+    close = 1000 + trend + noise
+    high = close + np.abs(np.random.randn(n)) * 1.5
+    low = close - np.abs(np.random.randn(n)) * 1.5
+    open_ = np.roll(close, 1)
+    open_[0] = close[0]
+    volume = np.random.randint(5000, 100000, n)
+
+    df = pd.DataFrame({
+        "timestamp": dates,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": volume,
+    })
+    df.attrs["symbol"] = "TESTSYM"
+    return df
+
+
+@pytest.fixture
+def mock_candidate():
+    """Create a mock candidate for testing."""
+    from trading_agent.strategy.candidates import Candidate
+    from datetime import datetime, timezone
+
+    return Candidate(
+        symbol="RELIANCE",
+        timestamp=datetime.now(timezone.utc),
+        interval="5minute",
+        close=2500.0,
+        rsi=35.0,
+        adx=22.0,
+        atr=45.0,
+        pattern_bias=1,
+        rule_action="BUY",
+        rule_confidence=0.7,
+        volume=50000,
+    )

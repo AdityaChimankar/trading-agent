@@ -8,7 +8,9 @@ far say the hard part is costs, not idea generation.
 **Note:** The enhanced ML model (`strategy/train_ml_model_v2.py`) now shows a
 strong measured edge in walk-forward validation (+495% vs −135% for rule-based
 across 10 symbols). It is tracked in the `ml_signals` table for out-of-sample
-validation. See [ML_REDESIGN_SUMMARY.md](../ML_REDESIGN_SUMMARY.md) for details.
+validation. **Positions can now be opened and managed using ML, Hybrid, or LLM
+signals** — each position stores its signal source and the position monitor
+checks the same source for reversals. See [ML_REDESIGN_SUMMARY.md](../ML_REDESIGN_SUMMARY.md) for details.
 
 ---
 
@@ -255,6 +257,33 @@ Until then: candidates log, nothing trades differently.
    check, keep it; the shadow logger picks it up automatically on the next
    cycle. If not, delete it — a dead hypothesis in a doc is worth more than a
    live one in the code.
+
+## Signal source tracking and position management
+
+Every open position now stores its `signal_source` (`rule` | `ml` | `hybrid` |
+`llm`) in the `open_positions` table. This enables the position monitor to
+protect each position using the SAME signal that opened it:
+
+| signal_source | opens position via | monitors for reversal in |
+|---|---|---|
+| `rule` | Rule-based BUY/SELL from `decision_agent.py` | `signals` table |
+| `ml` | ML model BUY/SELL from `ml_decision_agent_v2.py` | `ml_signals` table |
+| `hybrid` | HybridStrategy BUY/SELL (best mode per symbol) | `hybrid_signals` table |
+| `llm` | LLM agent BUY/SELL from `llm_decision_agent.py` | `llm_signals` table |
+
+**How it works:**
+1. **Opportunity finder** returns opportunities with `signal_source` based on the
+   best hybrid mode for each symbol
+2. **API `/positions` POST** accepts `signal_source` and stores it with the position
+3. **Position monitor** (runs every minute) checks the corresponding signal table
+   for a reversal — e.g., an ML-opened position is protected by the ML model's
+   own reversal signal
+4. **Reversal alert** includes the source and confidence: "Signal (ml) flipped to
+   SELL (confidence: 75%)"
+
+This means ML/Hybrid/LLM signals (which show measured edge in walk-forward
+validation) can open and manage positions with the same rigor as rule-based
+signals — no longer just comparison artifacts.
 
 ## What would actually move the needle
 
