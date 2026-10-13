@@ -53,6 +53,7 @@ dependencies = [
     "apscheduler>=3.10",
     # Email/alerts
     "aiofiles>=23.2",
+    "feedparser>=6.0",
 ]
 
 [project.optional-dependencies]
