@@ -78,6 +78,130 @@ docker-compose logs -f api
 docker-compose exec api pytest
 ```
 
+### Production Docker Setup
+
+#### Prerequisites
+- Docker Desktop / Docker Engine 24+
+- Docker Compose v2+
+- Kite Connect API credentials (API Key, Secret, User ID, Password)
+- Kite 2FA enabled with TOTP secret (for auto-login)
+
+#### 1. Build and Start Services
+```bash
+# Build images and start all services
+docker compose up --build -d
+
+# Verify all containers are healthy
+docker compose ps
+```
+
+#### 2. Kite Authentication (Required for Data Ingestion)
+
+**Option A: Automated TOTP Login (Recommended)**
+```bash
+# Run auto-login - uses Playwright + TOTP from .env
+docker compose run --rm ingest python -m ingest.kite_auto_login
+```
+This automatically:
+- Generates TOTP from `KITE_TOTP_SECRET`
+- Logs into Kite via headless browser
+- Extracts `request_token` from redirect
+- Generates and saves `access_token` to `./data/access_token.txt`
+
+**Option B: Manual Login (If TOTP Fails)**
+The auto-login script falls back to manual mode automatically:
+1. It prints the Kite login URL
+2. Open URL in browser → log in with user/password + TOTP
+3. Copy `request_token` from redirect URL (e.g., `http://localhost/?request_token=XXXX`)
+4. Paste token back in terminal
+
+The access token persists in the mounted `./data/` volume and is reused by all services.
+
+#### 3. Backfill Historical Data
+```bash
+# Full backfill (all symbols in watchlist)
+docker compose run --rm ingest trading-agent-ingest fetch-historical --all
+
+# Specific symbols and date range
+docker compose run --rm ingest trading-agent-ingest fetch-historical --symbol RELIANCE TCS INFY --from 2024-01-01 --to 2024-12-31
+
+# Verify data loaded
+docker compose exec api trading-agent storage-stats
+```
+
+#### 4. Access Services
+| Service | URL | Description |
+|---------|-----|-------------|
+| API | http://localhost:8000 | REST API + WebSocket |
+| API Docs | http://localhost:8000/docs | Swagger UI |
+| Frontend | http://localhost:5173 | React dashboard (if enabled) |
+| PostgreSQL | localhost:5433 | `trading`/`trading`/`trading` |
+| Redis | localhost:6379 | Caching & pub/sub |
+
+#### 5. Common Operations
+```bash
+# View service logs
+docker compose logs -f api        # API server
+docker compose logs -f ingest     # Data ingestion
+docker compose logs -f scheduler  # Periodic tasks
+
+# Run CLI commands in container
+docker compose exec api trading-agent --help
+docker compose exec api trading-agent diagnose RELIANCE
+docker compose exec api trading-agent backtest RELIANCE --start 2024-01-01
+
+# Run tests in container
+docker compose exec api pytest tests/unit/ -v
+
+# Stop all services
+docker compose down
+
+# Stop and remove volumes (clean slate)
+docker compose down -v
+
+# Rebuild after code changes
+docker compose up --build -d
+```
+
+#### Service Architecture
+- **api**: FastAPI server (port 8000), auto-restart
+- **ingest**: One-time historical fetch (`restart: "no"`)
+- **scheduler**: Periodic ingestion + maintenance (cron), auto-restart
+- **db**: PostgreSQL 16 with migrations auto-applied
+- **redis**: Redis 7 for caching
+- **frontend**: Vite dev server (optional)
+
+#### Data Persistence
+- `./data/` → `/app/data` (Parquet files, access_token.txt, SQLite fallback)
+- `./models/` → `/app/models` (ML model artifacts)
+- `postgres_data` volume → `/var/lib/postgresql/data` (PostgreSQL)
+- `redis_data` volume → `/data` (Redis)
+
+#### Troubleshooting
+
+**Auto-login fails:**
+```bash
+# Check TOTP secret is valid (32-char base32)
+docker compose run --rm ingest python -c "import pyotp; import os; print(pyotp.TOTP(os.getenv('KITE_TOTP_SECRET')).now())"
+
+# Run with debug
+docker compose run --rm ingest python -m ingest.kite_auto_login 2>&1 | head -50
+```
+
+**Database connection issues:**
+```bash
+# Check DB health
+docker compose exec db pg_isready -U trading -d trading
+
+# View DB logs
+docker compose logs db
+```
+
+**Port conflicts:**
+```bash
+# Change ports in docker-compose.yml if 8000/5433/6379/5173 are in use
+```
+
 ## CLI Usage
 
 ```bash
