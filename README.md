@@ -2,6 +2,8 @@
 
 A local-first research pipeline for NSE intraday signals. It ingests live and historical candles, computes deterministic technical/pattern features, and runs **three independent decision paths side by side** — rule-based, LLM, and ML — so their calls can be compared on real outcomes instead of argued about.
 
+**Status: ✅ 154/154 tests passing (including 3 integration test suites)**
+
 ## Architecture
 
 ```
@@ -17,9 +19,12 @@ trading-agent/
 │   ├── research/       # Backtesting, edge diagnosis, strategy lab
 │   ├── optimize/       # Walk-forward optimization CLI
 │   └── cli/            # Main CLI entry point
-├── tests/              # Unit and integration tests
+├── tests/              # Unit and integration tests (154 passing)
 ├── frontend/           # React + Vite dashboard
-└── docker-compose.yml  # Local development stack
+├── migrations/         # Alembic database migrations
+├── docker-compose.yml  # Local development stack
+├── Dockerfile          # Optimized multi-stage production image
+└── .dockerignore       # Excludes data/, models/, node_modules/, caches
 ```
 
 ## Key Features
@@ -31,15 +36,16 @@ trading-agent/
 - **Paper Trading**: Full position management with realistic charges
 - **Modern Stack**: Python 3.11+, FastAPI, SQLAlchemy 2.0, Polars, LightGBM
 - **Type Safety**: Full type hints with mypy, ruff, black
+- **Optimized Docker**: Multi-stage build (~2-3 GB final image vs 75 GB naive)
+- **Integration Layer Complete**: Autologin, scheduler, portfolio risk, position monitor, opportunity finder all functional
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
-- PostgreSQL 16+ (or SQLite for development)
-- Kite Connect API credentials
-- Node.js 20+ (for frontend)
+- Kite Connect API subscription (₹2000/month base + ₹500/month for historical data)
+- Git
 
 ### Installation
 
@@ -50,19 +56,126 @@ cd trading-agent
 
 # Create virtual environment
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+# Windows:
+.venv\Scripts\activate
+# Linux/Mac:
+source .venv/bin/activate
 
-# Install dependencies
+# Install package in editable mode
 pip install -e ".[dev]"
 
-# Install Playwright for auto-login
+# Install Playwright for auto-login (optional)
 playwright install chromium
 
 # Copy and configure environment
 cp .env.example .env
 # Edit .env with your Kite credentials
+```
 
-# Database is initialized automatically on API startup
+### Step-by-Step Usage Guide
+
+#### 1. Configure Credentials
+
+Edit `.env` with your Kite Connect credentials:
+
+```env
+# REQUIRED - Get from https://developers.kite.trade
+KITE_API_KEY=your_key
+KITE_API_SECRET=your_secret
+KITE_TOTP_SECRET=your_32_char_base32_secret  # From 2FA QR code
+KITE_USER_ID=your_user_id
+KITE_PASSWORD=your_password
+KITE_REDIRECT_URL=http://localhost
+
+# OPTIONAL - For LLM/sentiment
+OPENROUTER_API_KEY=your_openrouter_key
+```
+
+#### 2. Daily Login (Required - Token Expires at 7:30 AM IST)
+
+**Option A: Manual Login Script (Recommended)**
+```bash
+python manual_login.py
+```
+This opens the login URL, you log in via browser with User ID + Password + TOTP, then paste the `request_token` back.
+
+**Option B: CLI Command**
+```bash
+trading-agent login
+```
+
+**Option C: Docker**
+```bash
+docker compose run --rm ingest python manual_login.py
+```
+
+#### 3. Fetch Historical Data
+
+```bash
+# Fetch specific symbols (100 days)
+trading-agent ingest RELIANCE TCS INFY --days 100
+
+# Fetch entire watchlist
+trading-agent ingest
+
+# Backfill 2 years
+trading-agent backfill --years 2
+
+# Check storage
+trading-agent storage-stats
+```
+
+#### 4. Run Analysis & Backtests
+
+```bash
+# Diagnose signal edge vs random baseline
+trading-agent diagnose RELIANCE TCS
+
+# Vectorized backtest
+trading-agent backtest RELIANCE TCS --start 2024-01-01 --end 2024-06-30
+
+# Walk-forward optimization
+trading-agent optimize walk-forward RELIANCE TCS
+
+# Train enhanced ML model (v2)
+trading-agent optimize ml-model-v2 RELIANCE TCS
+
+# Strategy lab grid search
+trading-agent optimize strategy-lab RELIANCE
+```
+
+#### 5. Live Trading Pipeline (Market Hours: 9:15-15:30 IST)
+
+```bash
+# Terminal 1: Live ticker (WebSocket)
+python -m trading_agent.ingest.live_ticker
+
+# Terminal 2: Scheduler (news, decisions, position monitoring)
+python -m trading_agent.scripts.scheduler
+
+# Terminal 3: API server (for dashboard)
+trading-agent api
+
+# Terminal 4 (optional): Run pipeline once
+trading-agent pipeline
+```
+
+#### 6. Docker Deployment (Optional)
+
+```bash
+# Build and start all services
+docker compose up --build -d
+
+# Daily login in container
+docker compose run --rm ingest python manual_login.py
+
+# Fetch data in container
+docker compose run --rm ingest trading-agent ingest
+
+# Access services:
+# - API: http://localhost:8000
+# - API Docs: http://localhost:8000/docs
+# - Frontend: http://localhost:5173
 ```
 
 ### Development with Docker
@@ -95,35 +208,35 @@ docker compose up --build -d
 docker compose ps
 ```
 
+**Docker Optimizations Applied:**
+- **`.dockerignore`** excludes 3.6 GB of data/caches → build context ~1 MB
+- **Multi-stage Dockerfile** (builder → playwright → runtime)
+- **Final image ~2-3 GB** (no build tools, dev deps, pip cache, or data)
+
 #### 2. Kite Authentication (Required for Data Ingestion)
 
-**Option A: Automated TOTP Login (Recommended)**
+**Option A: Manual Login (Most Reliable)**
+```bash
+# Run manual login in container
+docker compose run --rm ingest python manual_login.py
+```
+
+**Option B: Automated TOTP Login (May Require Non-Headless Mode)**
 ```bash
 # Run auto-login - uses Playwright + TOTP from .env
-docker compose run --rm ingest python -m ingest.kite_auto_login
+docker compose run --rm ingest python -m trading_agent.ingest.kite_auto_login
 ```
-This automatically:
-- Generates TOTP from `KITE_TOTP_SECRET`
-- Logs into Kite via headless browser
-- Extracts `request_token` from redirect
-- Generates and saves `access_token` to `./data/access_token.txt`
-
-**Option B: Manual Login (If TOTP Fails)**
-The auto-login script falls back to manual mode automatically:
-1. It prints the Kite login URL
-2. Open URL in browser → log in with user/password + TOTP
-3. Copy `request_token` from redirect URL (e.g., `http://localhost/?request_token=XXXX`)
-4. Paste token back in terminal
+Note: Auto-login works best in non-headless mode. If it fails, use manual login.
 
 The access token persists in the mounted `./data/` volume and is reused by all services.
 
 #### 3. Backfill Historical Data
 ```bash
 # Full backfill (all symbols in watchlist)
-docker compose run --rm ingest trading-agent-ingest fetch-historical --all
+docker compose run --rm ingest trading-agent ingest --all
 
 # Specific symbols and date range
-docker compose run --rm ingest trading-agent-ingest fetch-historical --symbol RELIANCE TCS INFY --from 2024-01-01 --to 2024-12-31
+docker compose run --rm ingest trading-agent ingest --symbol RELIANCE TCS INFY --days 100
 
 # Verify data loaded
 docker compose exec api trading-agent storage-stats
@@ -185,7 +298,7 @@ docker compose up --build -d
 docker compose run --rm ingest python -c "import pyotp; import os; print(pyotp.TOTP(os.getenv('KITE_TOTP_SECRET')).now())"
 
 # Run with debug
-docker compose run --rm ingest python -m ingest.kite_auto_login 2>&1 | head -50
+docker compose run --rm ingest python -m trading_agent.ingest.kite_auto_login 2>&1 | head -50
 ```
 
 **Database connection issues:**
@@ -203,6 +316,8 @@ docker compose logs db
 ```
 
 ## CLI Usage
+
+The package installs a `trading-agent` command with subcommands:
 
 ```bash
 # Authenticate with Kite
@@ -226,10 +341,10 @@ trading-agent optimize walk-forward RELIANCE TCS
 # Run walk-forward optimization on all symbols
 trading-agent optimize walk-forward
 
-# Train ML model
+# Train ML model (v1)
 trading-agent optimize ml-model RELIANCE TCS
 
-# Train enhanced ML model (v2)
+# Train enhanced ML model (v2) with regime features
 trading-agent optimize ml-model-v2 RELIANCE TCS
 
 # Run strategy lab grid search
@@ -250,6 +365,25 @@ trading-agent storage-stats
 # Compact Parquet files
 trading-agent compact RELIANCE
 ```
+
+### CLI Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `ingest` | Fetch historical candle data |
+| `backfill` | Backfill years of historical data |
+| `login` | Authenticate with Kite Connect |
+| `backtest` | Run vectorized backtest |
+| `diagnose` | Diagnose signal edge vs random baseline |
+| `news` | Fetch latest financial news |
+| `api` | Run FastAPI server |
+| `pipeline` | Run trading pipeline once |
+| `storage-stats` | Show Parquet storage statistics |
+| `compact` | Compact Parquet files for symbol |
+| `optimize walk-forward` | Walk-forward parameter optimization |
+| `optimize ml-model` | Train standard ML models |
+| `optimize ml-model-v2` | Train enhanced ML (regime features) |
+| `optimize strategy-lab` | Strategy grid search |
 
 ## Project Structure Details
 
@@ -335,7 +469,7 @@ GET  /api/v1/liveness/storage    # Storage stats
 ## Testing
 
 ```bash
-# Run all tests
+# Run all tests (154 passing)
 pytest
 
 # Run with coverage
@@ -344,18 +478,12 @@ pytest --cov=trading_agent --cov-report=html
 # Run specific module
 pytest tests/unit/test_core.py -v
 
-# Run all unit tests (61 tests passing)
+# Run all unit tests
 pytest tests/unit/ -v
 
 # Run integration tests
-pytest tests/integration/ -v
+pytest tests/test_portfolio_exposure.py tests/test_position_monitor.py tests/test_opportunity_exclusions.py -v
 ```
-
-All 61 unit tests pass across 4 test files:
-- `test_core.py`: 29 tests (indicators, patterns, signals, position sizing, circuit breaker, freshness)
-- `test_strategy.py`: 10 tests (candidates, rule agent, ML features, hybrid strategy)
-- `test_risk.py`: 16 tests (portfolio risk, position monitor, paper wallet)
-- `test_analysis.py`: 6 tests (opportunity finder, rankings)
 
 ## Configuration
 
@@ -400,14 +528,20 @@ npm run dev     # Development
 npm run build   # Production build
 ```
 
-## Contributing
+## Documentation
 
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Run tests and linting (`pytest && ruff check && black --check`)
-4. Commit changes (`git commit -m 'Add amazing feature'`)
-5. Push to branch (`git push origin feature/amazing-feature`)
-6. Open Pull Request
+| File | Description |
+|------|-------------|
+| [USER_GUIDE.md](USER_GUIDE.md) | **Complete User Guide** — installation, daily workflow, CLI reference, Docker, troubleshooting |
+| [PRD.md](PRD.md) | Product Requirements Document — vision, success metrics, features, risks, timeline |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Architecture Decision Records (10 ADRs) — binding architectural decisions |
+| [DESIGN.md](DESIGN.md) | System design — module responsibilities, data flow, schema, deployment |
+| [RULES.md](RULES.md) | Code style, git, architecture rules, data/trading/ingestion/testing/Docker/security rules |
+| [EDGE_ANALYSIS.md](EDGE_ANALYSIS.md) | Signal edge measurement methodology and results |
+| [STRATEGIES.md](STRATEGIES.md) | Strategy candidates, promotion rules, and measured results |
+| [ML_REDESIGN_SUMMARY.md](ML_REDESIGN_SUMMARY.md) | Enhanced ML v2 walk-forward validation summary |
+| [TASKS.md](TASKS.md) | Task tracker — current sprint, backlog, issues, release checklist |
+| [MEMORY.md](MEMORY.md) | Decision log, technical learnings, metrics, debugging patterns |
 
 ## License
 

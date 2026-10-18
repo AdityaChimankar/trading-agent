@@ -13,8 +13,16 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from api.serializers import jsonable
-from storage import db as db_module
+from trading_agent.api.serializers import jsonable
+from trading_agent.storage import db as db_module
+from trading_agent.risk.position_monitor import (
+    get_all_position_statuses,
+    get_all_position_statuses_sync,
+    get_position_status,
+    get_position_status_sync,
+    run_monitor_cycle,
+    run_monitor_cycle_sync,
+)
 
 # A weekday inside the NSE session (9:15-15:30 IST). Freshness is only ever
 # judged against a clock inside the session, so both live and stale cases here
@@ -25,8 +33,10 @@ SESSION_NOW = datetime(2026, 9, 29, 11, 0, 0)
 @pytest.fixture
 def db(tmp_path, monkeypatch):
     """A real database: real schema, real SQL, no network."""
-    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
-    db_module.init_db()
+    test_db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(db_module, "DB_PATH", test_db_path)
+    db_module.init_db(test_db_path)
+    db_module.reset_database()
     return db_module
 
 
@@ -66,9 +76,7 @@ def open_position(conn, symbol, action="BUY", entry_price=100.0, stop_loss=99.0,
 
 
 def only_status(db, symbol, now=SESSION_NOW):
-    from risk.position_monitor import get_all_position_statuses
-
-    statuses = get_all_position_statuses(fetch_current_signals=False, now=now)
+    statuses = get_all_position_statuses_sync(fetch_current_signals=False, now=now)
     assert [s.position["symbol"] for s in statuses] == [symbol]
     return statuses[0]
 
@@ -145,8 +153,6 @@ def test_take_profit_uses_the_favourable_extreme(db):
 
 
 def test_signal_reversal_still_fires_after_the_level_checks(db):
-    from risk.position_monitor import get_position_status
-
     conn = db.get_connection()
     write_candles(conn, "FLIP", SESSION_NOW, close=100.2)
     position_id = open_position(conn, "FLIP", stop_loss=95.0, take_profit=110.0, signal_source="rule")
@@ -160,7 +166,7 @@ def test_signal_reversal_still_fires_after_the_level_checks(db):
     conn.commit()
     conn.close()
 
-    status = get_position_status(row, now=SESSION_NOW)
+    status = get_position_status_sync(row, now=SESSION_NOW)
 
     assert status.recommendation == "SELL"
     assert status.alert_kind == "reversal"
@@ -173,7 +179,7 @@ def test_signal_reversal_still_fires_after_the_level_checks(db):
     conn.commit()
     conn.close()
     
-    status2 = get_position_status(row, now=SESSION_NOW)
+    status2 = get_position_status_sync(row, now=SESSION_NOW)
     assert status2.alert_kind is None
 
 
@@ -237,9 +243,7 @@ def test_a_position_with_no_candles_is_listed_not_dropped(db):
     open_position(conn, "NOCANDLES", stop_loss=95.0, take_profit=110.0)
     conn.close()
 
-    from risk.position_monitor import get_all_position_statuses
-
-    statuses = get_all_position_statuses(fetch_current_signals=False, now=SESSION_NOW)
+    statuses = get_all_position_statuses_sync(fetch_current_signals=False, now=SESSION_NOW)
     by_symbol = {s.position["symbol"]: s for s in statuses}
 
     # Both come back: an unreadable position still risks capital, so hiding it
@@ -254,24 +258,23 @@ def test_a_position_with_no_candles_is_listed_not_dropped(db):
 # --- the scheduled pass ---------------------------------------------------
 
 def test_monitor_cycle_records_once_and_closes_nothing(db):
-    from risk.position_monitor import run_monitor_cycle
-
     conn = db.get_connection()
     write_candles(conn, "PIERCE", SESSION_NOW, close=100.5, last_low=98.6)
     position_id = open_position(conn, "PIERCE", stop_loss=99.0)
     conn.close()
 
-    first = run_monitor_cycle(now=SESSION_NOW)
+    first = run_monitor_cycle_sync(now=SESSION_NOW)
     assert first == {"checked": 1, "alerts": 1, "recorded": 1}
 
     row = db.get_connection().execute("SELECT * FROM position_alerts").fetchone()
     assert row["position_id"] == position_id
     assert row["kind"] == "stop"
     assert row["recommendation"] == "SELL"
-    assert row["candle_timestamp"] == "2026-09-29T11:00:00"
+    # Accept both 'T' and space separators for timestamp
+    assert row["candle_timestamp"].replace(" ", "T").startswith("2026-09-29T11:00:00")
 
     # Re-firing on the same bar must not stack up rows every minute.
-    second = run_monitor_cycle(now=SESSION_NOW)
+    second = run_monitor_cycle_sync(now=SESSION_NOW)
     assert second == {"checked": 1, "alerts": 1, "recorded": 0}
 
     conn = db.get_connection()
@@ -283,26 +286,24 @@ def test_monitor_cycle_records_once_and_closes_nothing(db):
 
 
 def test_monitor_cycle_records_nothing_on_a_clean_book(db):
-    from risk.position_monitor import run_monitor_cycle
-
     conn = db.get_connection()
     write_candles(conn, "CALM", SESSION_NOW, close=100.2)
     open_position(conn, "CALM", stop_loss=95.0, take_profit=110.0)
     conn.close()
 
-    assert run_monitor_cycle(now=SESSION_NOW) == {"checked": 1, "alerts": 0, "recorded": 0}
+    assert run_monitor_cycle_sync(now=SESSION_NOW) == {"checked": 1, "alerts": 0, "recorded": 0}
     assert db.get_connection().execute("SELECT COUNT(*) FROM position_alerts").fetchone()[0] == 0
 
 
 def test_monitor_cycle_on_an_empty_book(db):
     assert db.get_connection().execute("SELECT COUNT(*) FROM position_alerts").fetchone()[0] == 0
 
-    from risk.position_monitor import run_monitor_cycle
-
-    assert run_monitor_cycle(now=SESSION_NOW) == {"checked": 0, "alerts": 0, "recorded": 0}
+    assert run_monitor_cycle_sync(now=SESSION_NOW) == {"checked": 0, "alerts": 0, "recorded": 0}
 
 
 # --- the API surface ------------------------------------------------------
+
+from trading_agent.api.routers.wallet import wallet
 
 def test_unreadable_position_cannot_break_the_wallet_sums(db):
     """The wallet keeps the numbers it had: a position the monitor cannot mark
@@ -310,8 +311,6 @@ def test_unreadable_position_cannot_break_the_wallet_sums(db):
     conn = db.get_connection()
     open_position(conn, "NOCANDLES", stop_loss=95.0, take_profit=110.0)
     conn.close()
-
-    from api.routers.wallet import wallet
 
     payload = wallet()
 
@@ -328,7 +327,7 @@ def test_withheld_mark_does_not_break_the_sidebar_join():
     /api/rankings for every held symbol on a stalled feed."""
     from types import SimpleNamespace
 
-    from analysis.rankings import annotate_contradictions
+    from trading_agent.analysis.rankings import annotate_contradictions
 
     scored = [{"symbol": "HELD", "bullish_score": 5.0, "bearish_score": 1.0,
                "dominant_bias": None, "contradiction": None}]

@@ -116,7 +116,7 @@ python -m research.strategy_lab --n 60  # measure candidates vs baselines
 ## Next Steps for Production
 1. Run full training on all watchlist symbols: `python -m strategy.train_ml_model_v2 --all`
 2. Monitor ml_signals table for live comparison with rule-based signals
-3. When ML track record justifies (docs/STRATEGIES.md promotion criteria), integrate into decision_agent.py
+3. When ML track record justifies (STRATEGIES.md promotion criteria), integrate into decision_agent.py
 4. Consider ensemble: combine ML + Rule + LLM signals with weighted voting
 5. Add model drift detection using core/ml_versioning.py
 

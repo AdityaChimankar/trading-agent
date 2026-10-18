@@ -213,3 +213,92 @@ class MLDecisionAgent:
     @property
     def feature_names(self) -> list[str]:
         return self._feature_names
+
+
+async def run_ml_decision_cycle(symbols: list[str] | None = None, interval: str = "5minute"):
+    """Run ML decision cycle for all symbols."""
+    from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
+    from trading_agent.storage.parquet_store import get_parquet_store
+    from trading_agent.strategy.ml_features import build_features
+    
+    if symbols is None:
+        symbols = get_watchlist_symbols()
+    
+    if not symbols:
+        logger.warning("run_ml_decision_cycle: no symbols in watchlist")
+        return
+
+    agent = MLDecisionAgent()
+    # Try to load latest model for first symbol
+    if symbols:
+        loaded = agent.load_latest(symbols[0])
+        if not loaded:
+            logger.warning("ml_decision_cycle: no model loaded, skipping")
+            return
+
+    parquet = get_parquet_store()
+
+    for symbol in symbols:
+        try:
+            # Load latest candles
+            df = parquet.read_latest(symbol, interval, n=2000)
+            if df is None or df.empty:
+                logger.warning("no_data_for_symbol", symbol=symbol)
+                continue
+
+            # Build features
+            features_df = build_features(df)
+            if features_df is None or features_df.empty:
+                logger.warning("no_features_built", symbol=symbol)
+                continue
+
+            # Get latest features
+            latest_features = features_df.iloc[[-1]]
+            
+            # Create a dummy candidate for decision
+            from trading_agent.strategy.candidates import Candidate
+            candidate = Candidate(
+                symbol=symbol,
+                timestamp=latest_features.index[-1],
+                close=df["close"].iloc[-1],
+                volume=df["volume"].iloc[-1],
+                rsi=latest_features.get("rsi", [50])[-1],
+                adx=latest_features.get("adx", [20])[-1],
+                pattern_bias=latest_features.get("pattern_bias", [0])[-1],
+                rule_action="HOLD",
+                rule_confidence=0.0,
+            )
+            
+            decision = agent.decide(candidate, latest_features)
+            logger.info("ml_decision", symbol=symbol, action=decision.action, confidence=decision.confidence)
+            
+            # Store decision to database
+            await _store_ml_signal(symbol, decision, interval)
+                
+        except Exception as e:
+            logger.error("ml_decision_failed", symbol=symbol, error=str(e))
+
+
+async def _store_ml_signal(symbol: str, decision, interval: str):
+    """Store ML signal to database."""
+    try:
+        from trading_agent.storage.db import Signal, get_database
+        from datetime import datetime, UTC
+        
+        db = get_database()
+        async with db.session() as session:
+            signal = Signal(
+                symbol=symbol,
+                timestamp=datetime.now(UTC),
+                interval=interval,
+                action=decision.action,
+                strategy="ml",
+                confidence=decision.confidence,
+                rsi=0.0,
+                adx=0.0,
+                pattern_bias=0,
+            )
+            session.add(signal)
+            await session.commit()
+    except Exception as e:
+        logger.error("store_ml_signal_failed", symbol=symbol, error=str(e))

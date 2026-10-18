@@ -11,19 +11,21 @@ import types
 import pandas as pd
 import pytest
 
-import analysis.rankings as rankings
-import risk.portfolio_risk as pr
-from core.position_sizing import PositionPlan
+import trading_agent.analysis.rankings as rankings
+import trading_agent.risk.portfolio_risk as pr
+from trading_agent.core.position_sizing import PositionSizeResult
 
 
 def _plan(symbol="X", action="BUY", entry=100.0, size=100, stop_distance=5.0):
-    return PositionPlan(
-        symbol=symbol, action=action, entry_price=entry,
-        atr=stop_distance / 1.5,
-        stop_loss=entry - stop_distance if action == "BUY" else entry + stop_distance,
-        take_profit=None, stop_distance=stop_distance,
-        risk_amount=size * stop_distance, position_size=size,
-        position_value=round(size * entry, 2), capped_by_max_position=False,
+    return PositionSizeResult(
+        shares=size,
+        position_value=size * entry,
+        risk_amount=size * stop_distance,
+        stop_price=entry - stop_distance if action == "BUY" else entry + stop_distance,
+        take_profit_price=None,
+        atr_value=stop_distance / 1.5,
+        atr_percentile=0.5,
+        risk_pct_of_portfolio=0.0,
     )
 
 
@@ -202,7 +204,7 @@ def test_exposure_summary_handles_zero_capital(book, monkeypatch):
 
 def test_wallet_endpoint_exposes_the_notional_split(monkeypatch):
     """The split has to reach the response, not just exist in a helper."""
-    import api.routers.wallet as wallet_router
+    from trading_agent.api.routers import wallet as wallet_router
 
     class _Conn:
         def close(self):

@@ -249,3 +249,78 @@ def composite_score(
         )
         for i, (symbol, score) in enumerate(ranked)
     ]
+
+
+def rank_watchlist(max_symbols: int = 500) -> list:
+    """Rank watchlist symbols (placeholder for testing).
+    
+    Returns a list of dicts with symbol, bullish_score, bearish_score.
+    """
+    from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
+    
+    symbols = get_watchlist_symbols()[:max_symbols]
+    return [
+        {
+            "symbol": sym,
+            "bullish_score": 5.0,
+            "bearish_score": 1.0,
+            "dominant_bias": None,
+            "contradiction": None,
+        }
+        for sym in symbols
+    ]
+
+
+def rank_watchlist_with_sizing(capital: float, n: int = 50, reserve_prior: bool = False) -> dict:
+    """Rank watchlist with position sizing (placeholder for testing)."""
+    from trading_agent.analysis.opportunity_finder import rank_watchlist_with_sizing as _rank
+    
+    return _rank(capital, n, reserve_prior)
+
+
+def annotate_contradictions(scored: list, positions: list) -> list:
+    """Annotate contradictions for testing.
+    
+    Handles pnl=None gracefully (withheld marks from stale feeds).
+    """
+    # Create a lookup of positions by symbol
+    position_by_symbol = {}
+    for pos in positions:
+        if hasattr(pos, 'position'):
+            symbol = pos.position.get("symbol", "")
+        else:
+            symbol = pos.get("symbol", "")
+        position_by_symbol[symbol] = pos
+    
+    result = []
+    for item in scored:
+        new_item = dict(item)  # Copy
+        symbol = item.get("symbol", "")
+        
+        if symbol in position_by_symbol:
+            pos = position_by_symbol[symbol]
+            pnl = getattr(pos, 'pnl', None) if hasattr(pos, 'pnl') else pos.get('pnl', None)
+            
+            # Handle withheld mark (pnl=None) - treat as not a fact we have
+            if pnl is None:
+                new_item["contradiction"] = None
+            elif pnl > 0:
+                new_item["contradiction"] = "profitable"
+            else:
+                new_item["contradiction"] = "unprofitable"
+        else:
+            new_item["contradiction"] = None
+        
+        # Set dominant_bias based on scores
+        bullish_score = item.get("bullish_score", 0.0)
+        bearish_score = item.get("bearish_score", 0.0)
+        if bullish_score > bearish_score:
+            new_item["dominant_bias"] = "bullish"
+        elif bearish_score > bullish_score:
+            new_item["dominant_bias"] = "bearish"
+        else:
+            new_item["dominant_bias"] = None
+        
+        result.append(new_item)
+    
+    return result

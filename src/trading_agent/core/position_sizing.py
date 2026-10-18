@@ -242,6 +242,25 @@ def calculate_optimal_f(
     return 0.0
 
 
+@dataclass(frozen=True)
+class PositionPlan:
+    """Position plan with portfolio-level adjustments."""
+    
+    symbol: str
+    action: str
+    entry_price: float
+    approved_size: int
+    approved_value: float
+    blocked: bool
+    block_reason: str | None
+    total_exposure_pct: float
+    total_risk_used_pct: float
+    base_size: int
+    base_value: float
+    reserved_value: float = 0.0
+    reserved_risk_amount: float = 0.0
+
+
 def validate_position(
     symbol: str,
     action: Literal["BUY", "SELL"],

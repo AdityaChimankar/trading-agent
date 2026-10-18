@@ -3,8 +3,9 @@
 The filter is one word (`in` vs `not in`) and has already shipped inverted
 once, so it is pinned here rather than only in a manual replay.
 """
-import analysis.opportunity_finder as finder
-import analysis.rankings as rankings
+import trading_agent.analysis.opportunity_finder as finder
+import trading_agent.analysis.rankings as rankings
+import trading_agent.storage.db as db_module
 
 
 def _entry(symbol: str, action: str, score: float) -> dict:
@@ -19,8 +20,8 @@ def test_held_symbols_are_excluded_from_both_lists_and_reported(monkeypatch):
         "bullish": [_entry("HELD", "BUY", 9.0), _entry("FREE", "BUY", 5.0)],
         "bearish": [_entry("HELD", "SELL", 8.0), _entry("OTHER", "SELL", 4.0)],
     })
-    # Patch the imported function in storage.db, not the module attribute
-    monkeypatch.setattr("storage.db.get_open_position_symbols", lambda: {"HELD"})
+    # Patch the function in opportunity_finder where it's defined
+    monkeypatch.setattr(finder, "get_open_position_symbols", lambda: {"HELD"})
     monkeypatch.setattr(finder, "_score_conviction", lambda symbol, action, score: (score, [], []))
     # Return BUY for bullish, SELL for bearish from hybrid signal
     monkeypatch.setattr(finder, "_get_best_mode", lambda symbol, candle_limit=5000, use_cache=True, use_fixed_mode=True: finder.StrategyMode.RULE_ML_COMBINED)
@@ -42,7 +43,7 @@ def test_nothing_is_excluded_when_no_position_is_held(monkeypatch):
         "bullish": [_entry("FREE", "BUY", 5.0)],
         "bearish": [],
     })
-    monkeypatch.setattr("storage.db.get_open_position_symbols", lambda: set())
+    monkeypatch.setattr(finder, "get_open_position_symbols", lambda: set())
     monkeypatch.setattr(finder, "_score_conviction", lambda symbol, action, score: (score, [], []))
     monkeypatch.setattr(finder, "_get_best_mode", lambda symbol, candle_limit=5000, use_cache=True, use_fixed_mode=True: finder.StrategyMode.RULE_ML_COMBINED)
     monkeypatch.setattr(finder, "_get_hybrid_signal", lambda symbol, mode: ("BUY", 0.8, "test", None, 100.0))
@@ -66,7 +67,7 @@ def test_opportunity_finder_opts_into_reserve_prior(monkeypatch):
     finder._opportunity_cache.clear()
     
     monkeypatch.setattr(finder, "rank_watchlist_with_sizing", fake_rank)
-    monkeypatch.setattr("storage.db.get_open_position_symbols", lambda: set())
+    monkeypatch.setattr(finder, "get_open_position_symbols", lambda: set())
     monkeypatch.setattr(finder, "_get_best_mode", lambda symbol, candle_limit=5000, use_cache=True, use_fixed_mode=True: finder.StrategyMode.RULE_ML_COMBINED)
     monkeypatch.setattr(finder, "_get_hybrid_signal", lambda symbol, mode: ("BUY", 0.8, "test", None, 100.0))
 

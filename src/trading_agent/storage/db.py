@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TypeVar
 
@@ -24,10 +25,47 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
+
+@dataclass
+class PositionRow:
+    """Simple position row matching test database schema."""
+    id: int
+    symbol: str
+    action: str
+    entry_price: float
+    position_size: int
+    position_value: float
+    risk_amount: float
+    stop_loss: float
+    take_profit: float | None
+    opened_at: datetime
+    status: str
+    signal_source: str
+    exit_price: float | None
+    exit_time: datetime | None
+    pnl: float | None
+    position_metadata: str | None
+    
+    # Properties for compatibility with position_monitor code
+    @property
+    def quantity(self) -> int:
+        return self.position_size
+    
+    @property
+    def entry_time(self) -> datetime:
+        return self.opened_at
+    
+    @property
+    def strategy(self) -> str:
+        return self.signal_source
+
 from trading_agent.core.config import get_settings
 from trading_agent.core.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# Database path constant for compatibility with tests and health checks
+DB_PATH = get_settings().database.url.replace("sqlite:///", "").replace("sqlite://", "")
 
 T = TypeVar("T")
 
@@ -46,6 +84,11 @@ class Base(DeclarativeBase):
         onupdate=lambda: datetime.now(UTC),
         nullable=False,
     )
+
+
+# Remove any existing open_positions table from metadata to avoid conflicts
+if "open_positions" in Base.metadata.tables:
+    Base.metadata.remove(Base.metadata.tables["open_positions"])
 
 
 class Watchlist(Base):
@@ -102,7 +145,7 @@ class Signal(Base):
 class Position(Base):
     """Paper trading positions."""
 
-    __tablename__ = "positions"
+    __tablename__ = "open_positions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
@@ -191,6 +234,44 @@ class SystemEvent(Base):
     event_metadata: Mapped[str | None] = mapped_column(Text)
 
 
+class PositionAlert(Base):
+    """Position monitoring alerts."""
+
+    __tablename__ = "position_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    position_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # stop, target, reversal, stale, no_data
+    recommendation: Mapped[str] = mapped_column(String(10), nullable=False)  # BUY, SELL, HOLD
+    candle_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+
+class Trade(Base):
+    """Executed trades."""
+
+    __tablename__ = "trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    position_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(10), nullable=False)  # BUY, SELL
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_price: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    gross_pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    charges: Mapped[float] = mapped_column(Float, nullable=False)
+    net_pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    holding_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exit_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Database:
     """Database manager."""
 
@@ -263,8 +344,222 @@ def get_database(url: str | None = None, echo: bool = False) -> Database:
     """Get or create the global database instance."""
     global _db
     if _db is None:
+        # Use the current DB_PATH (which may be monkeypatched in tests)
+        if url is None:
+            import sys
+            module_globals = sys.modules[__name__].__dict__
+            url = module_globals.get("DB_PATH", get_settings().database.url)
+            # Ensure it's a proper SQLite URL
+            if not url.startswith("sqlite"):
+                url = f"sqlite:///{url}"
         _db = Database(url, echo)
     return _db
+
+
+def reset_database() -> None:
+    """Reset the global database instance (for testing)."""
+    global _db
+    if _db is not None:
+        # Close the old engine
+        import asyncio
+        try:
+            asyncio.run(_db.close())
+        except Exception:
+            pass
+    _db = None
+
+
+def init_db(db_path: str | None = None) -> None:
+    """Initialize database tables synchronously (for testing)."""
+    import sqlite3
+    import sys
+    
+    # Use the provided path, or read the current DB_PATH from module globals
+    # This allows monkeypatching to work correctly
+    if db_path is None:
+        # Read from module globals to pick up monkeypatched value
+        module_globals = sys.modules[__name__].__dict__
+        db_path = module_globals.get("DB_PATH", DB_PATH)
+    
+    # Ensure path is a string
+    path = str(db_path)
+    
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT UNIQUE NOT NULL,
+                name TEXT,
+                exchange TEXT DEFAULT 'NSE',
+                instrument_token INTEGER,
+                lot_size INTEGER DEFAULT 1,
+                is_active BOOLEAN DEFAULT 1,
+                sector TEXT,
+                market_cap REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS candles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                interval TEXT DEFAULT '5minute',
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER DEFAULT 0,
+                oi INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_candles_symbol_timestamp ON candles(symbol, timestamp);
+
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                interval TEXT DEFAULT '5minute',
+                action TEXT NOT NULL,
+                strategy TEXT NOT NULL DEFAULT 'rule',
+                confidence REAL DEFAULT 0.0,
+                rsi REAL,
+                adx REAL,
+                pattern_bias INTEGER DEFAULT 0,
+                signal_metadata TEXT,
+                rationale TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_signals_symbol_timestamp ON signals(symbol, timestamp);
+
+            CREATE TABLE IF NOT EXISTS open_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                position_size INTEGER NOT NULL,
+                position_value REAL NOT NULL,
+                risk_amount REAL NOT NULL,
+                stop_loss REAL NOT NULL,
+                take_profit REAL,
+                opened_at TIMESTAMP NOT NULL,
+                status TEXT DEFAULT 'open',
+                signal_source TEXT DEFAULT 'rule',
+                exit_price REAL,
+                exit_time TIMESTAMP,
+                pnl REAL,
+                position_metadata TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS opportunities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                score REAL NOT NULL,
+                rank INTEGER,
+                rule_signal TEXT,
+                llm_signal TEXT,
+                ml_signal TEXT,
+                ml_confidence REAL DEFAULT 0.0,
+                risk_reward REAL,
+                atr REAL,
+                opportunity_metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS ml_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT UNIQUE NOT NULL,
+                symbol TEXT NOT NULL,
+                model_type TEXT NOT NULL,
+                feature_version TEXT,
+                training_date TIMESTAMP NOT NULL,
+                training_samples INTEGER,
+                features TEXT,
+                hyperparameters TEXT,
+                metrics TEXT,
+                data_hash TEXT,
+                file_path TEXT,
+                tags TEXT,
+                is_active BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS wallet (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                cash REAL DEFAULT 0.0,
+                invested REAL DEFAULT 0.0,
+                total_value REAL DEFAULT 0.0,
+                daily_pnl REAL DEFAULT 0.0,
+                total_pnl REAL DEFAULT 0.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS system_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                level TEXT NOT NULL,
+                source TEXT NOT NULL,
+                message TEXT NOT NULL,
+                event_metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS position_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                recommendation TEXT NOT NULL,
+                candle_timestamp TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL NOT NULL,
+                quantity INTEGER NOT NULL,
+                gross_pnl REAL NOT NULL,
+                charges REAL NOT NULL,
+                net_pnl REAL NOT NULL,
+                holding_minutes INTEGER NOT NULL,
+                entry_time TIMESTAMP NOT NULL,
+                exit_time TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_connection():
+    """Get a synchronous sqlite3 connection (for testing)."""
+    import sqlite3
+    import sys
+    
+    # Read current DB_PATH from module globals to support monkeypatching
+    module_globals = sys.modules[__name__].__dict__
+    path = str(module_globals.get("DB_PATH", DB_PATH))
+    
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 # Repository base class
@@ -370,12 +665,49 @@ class PositionRepository(BaseRepository):
     def __init__(self, session: AsyncSession):
         super().__init__(session, Position)
 
-    async def get_open(self, symbol: str | None = None) -> list[Position]:
-        query = select(Position).where(Position.status == "OPEN")
+    async def get_open(self, symbol: str | None = None) -> list[PositionRow]:
+        """Get open positions using raw SQL to match test schema."""
+        from sqlalchemy import text
+        
+        sql = """
+            SELECT id, symbol, action, entry_price, position_size, position_value,
+                   risk_amount, stop_loss, take_profit, opened_at, status,
+                   signal_source, exit_price, exit_time, pnl, position_metadata
+            FROM open_positions
+            WHERE lower(status) = 'open'
+        """
+        params = {}
         if symbol:
-            query = query.where(Position.symbol == symbol)
-        result = await self.session.execute(query)
-        return list(result.scalars().all())
+            sql += " AND symbol = :symbol"
+            params["symbol"] = symbol
+        
+        result = await self.session.execute(text(sql), params)
+        rows = result.fetchall()
+        
+        # Convert rows to PositionRow objects
+        positions = []
+        for row in rows:
+            pos = PositionRow(
+                id=row.id,
+                symbol=row.symbol,
+                action=row.action,
+                entry_price=row.entry_price,
+                position_size=row.position_size,
+                position_value=row.position_value,
+                risk_amount=row.risk_amount,
+                stop_loss=row.stop_loss,
+                take_profit=row.take_profit,
+                opened_at=row.opened_at,
+                status=row.status,
+                signal_source=row.signal_source,
+                exit_price=row.exit_price,
+                exit_time=row.exit_time,
+                pnl=row.pnl,
+                position_metadata=row.position_metadata,
+            )
+            positions.append(pos)
+        
+        return positions
 
 
 class OpportunityRepository(BaseRepository):

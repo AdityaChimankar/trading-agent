@@ -155,3 +155,85 @@ class LLMDecisionAgent:
     async def close(self) -> None:
         """Close LLM client."""
         await self.client.close()
+
+
+async def run_llm_decision_cycle(symbols: list[str] | None = None, interval: str = "5minute"):
+    """Run LLM decision cycle for all symbols."""
+    from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
+    from trading_agent.storage.parquet_store import get_parquet_store
+    from trading_agent.strategy.candidates import CandidateGenerator
+    
+    if symbols is None:
+        symbols = get_watchlist_symbols()
+    
+    if not symbols:
+        logger.warning("run_llm_decision_cycle: no symbols in watchlist")
+        return
+
+    # Check LLM kill switch
+    import json
+    from pathlib import Path
+    kill_switch = Path("data/llm_kill_switch.json")
+    if kill_switch.exists():
+        try:
+            with open(kill_switch) as f:
+                data = json.load(f)
+            if data.get("killed", False):
+                logger.info("LLM decision cycle skipped: kill switch active")
+                return
+        except Exception:
+            pass
+
+    agent = LLMDecisionAgent(use_mock=False)
+    generator = CandidateGenerator()
+    parquet = get_parquet_store()
+
+    for symbol in symbols:
+        try:
+            # Load latest candles
+            df = parquet.read_latest(symbol, interval, n=500)
+            if df is None or df.empty:
+                logger.warning("no_data_for_symbol", symbol=symbol)
+                continue
+
+            candidates = generator.generate_for_symbol(df, symbol, interval)
+            if not candidates:
+                logger.debug("no_candidates_generated", symbol=symbol)
+                continue
+
+            for candidate in candidates:
+                decision = await agent.decide(candidate)
+                logger.info("llm_decision", symbol=symbol, action=decision.action, confidence=decision.confidence)
+                
+                # Store decision to database
+                await _store_llm_signal(symbol, decision, interval)
+                
+        except Exception as e:
+            logger.error("llm_decision_failed", symbol=symbol, error=str(e))
+
+    await agent.close()
+
+
+async def _store_llm_signal(symbol: str, decision, interval: str):
+    """Store LLM signal to database."""
+    try:
+        from trading_agent.storage.db import Signal, get_database
+        from datetime import datetime, UTC
+        
+        db = get_database()
+        async with db.session() as session:
+            signal = Signal(
+                symbol=symbol,
+                timestamp=datetime.now(UTC),
+                interval=interval,
+                action=decision.action,
+                strategy="llm",
+                confidence=decision.confidence,
+                rsi=0.0,
+                adx=0.0,
+                pattern_bias=0,
+            )
+            session.add(signal)
+            await session.commit()
+    except Exception as e:
+        logger.error("store_llm_signal_failed", symbol=symbol, error=str(e))

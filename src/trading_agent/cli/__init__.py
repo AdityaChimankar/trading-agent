@@ -46,8 +46,14 @@ def ingest(
     if not symbols:
         symbols = resolve_watchlist()
 
+    from trading_agent.ingest.fetch_historical import HistoricalFetcher
+    fetcher = HistoricalFetcher()
+
     typer.echo(f"Fetching {interval} data for {len(symbols)} symbols ({days} days)...")
-    results = fetch_historical(symbols, interval, days, parallel=parallel)
+    if len(symbols) == 1:
+        results = {symbols[0]: fetcher.fetch_symbol(symbols[0], interval, days)}
+    else:
+        results = fetcher.fetch_watchlist(symbols, interval, days, parallel=parallel)
 
     for symbol, df in results.items():
         typer.echo(f"  {symbol}: {len(df)} candles")

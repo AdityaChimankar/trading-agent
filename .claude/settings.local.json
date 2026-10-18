@@ -1,9 +1,7 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "https://agentrouter.org",
-    "ANTHROPIC_AUTH_TOKEN": "sk-78Rh8jNemEwaKELrmstHtikk0hCAFwKpuDIo0hU4nNHBtz4e",
-    "ANTHROPIC_MODEL": "claude-opus-4-8",
-    "ANTHROPIC_deepseek_MODEL": "deepseek-v4-flash"
-  },
-  "model": "claude-opus-4-8"
+    "ANTHROPIC_BASE_URL": "https://api.kie.ai/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "d38caba5299f0253641c23dc111ac1ac"
+    
+  }
 }

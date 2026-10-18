@@ -41,7 +41,7 @@ class AutoLogin:
             raise AuthenticationError("TOTP secret not configured")
         return pyotp.TOTP(self.credentials.totp_secret).now()
 
-    async def login_with_playwright(self) -> str:
+    async def login_with_playwright(self, headless: bool = False) -> str:
         """Automated browser login using Playwright."""
         from playwright.async_api import async_playwright
 
@@ -60,34 +60,101 @@ class AutoLogin:
         login_url = kite.login_url()
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
+            # Use stealth settings to avoid detection
+            browser = await p.chromium.launch(
+                headless=headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                ] if headless else [],
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 720},
+                locale="en-US",
+            )
             page = await context.new_page()
+
+            # Inject stealth script
+            await page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+            """)
 
             try:
                 logger.info("navigating_to_kite_login")
-                await page.goto(login_url)
+                await page.goto(login_url, wait_until="networkidle")
 
-                # Wait for login form
-                await page.wait_for_selector('input[type="text"][name="user_id"]', timeout=30000)
+                # Wait for login form - try multiple possible selectors for userid
+                userid_selectors = ['input#userid', 'input[name="user_id"]', 'input[type="text"]', '#userid']
+                userid_found = False
+                for selector in userid_selectors:
+                    try:
+                        await page.wait_for_selector(selector, timeout=10000)
+                        logger.info("found_userid_field", selector=selector)
+                        await page.fill(selector, self.credentials.user_id)
+                        userid_found = True
+                        break
+                    except Exception:
+                        continue
+                
+                if not userid_found:
+                    raise AuthenticationError("Could not find userid input field")
 
-                # Fill credentials
-                await page.fill('input[type="text"][name="user_id"]', self.credentials.user_id)
-                await page.fill(
-                    'input[type="password"][name="password"]', self.credentials.password
-                )
-                await page.click('button[type="submit"]:has-text("Login")')
+                # Fill password - try multiple selectors
+                password_selectors = ['input#password', 'input[name="password"]', 'input[type="password"]']
+                password_found = False
+                for selector in password_selectors:
+                    try:
+                        await page.fill(selector, self.credentials.password)
+                        password_found = True
+                        break
+                    except Exception:
+                        continue
+                
+                if not password_found:
+                    raise AuthenticationError("Could not find password input field")
 
-                # Wait for TOTP page
-                await page.wait_for_selector('input[name="totp"]', timeout=30000)
+                # Click submit button
+                submit_selectors = ['button[type="submit"]', 'button:has-text("Login")', 'input[type="submit"]']
+                for selector in submit_selectors:
+                    try:
+                        await page.click(selector)
+                        break
+                    except Exception:
+                        continue
 
-                # Enter TOTP
-                totp_code = self.generate_totp()
-                logger.info("generated_totp", code=totp_code[:2] + "****")
-                await page.fill('input[name="totp"]', totp_code)
-                await page.click(
-                    'button[type="submit"]:has-text("Continue"), button[type="submit"]:has-text("Submit")'
-                )
+                # Wait for TOTP page - try multiple possible selectors
+                totp_selectors = ['input#totp', 'input[name="totp"]', 'input[placeholder*="TOTP" i]', 'input[placeholder*="2FA" i]']
+                totp_found = False
+                for selector in totp_selectors:
+                    try:
+                        await page.wait_for_selector(selector, timeout=30000)
+                        logger.info("found_totp_field", selector=selector)
+                        
+                        # Enter TOTP
+                        totp_code = self.generate_totp()
+                        logger.info("generated_totp", code=totp_code[:2] + "****")
+                        await page.fill(selector, totp_code)
+                        totp_found = True
+                        break
+                    except Exception:
+                        continue
+                
+                if not totp_found:
+                    # Debug: print page content to help diagnose
+                    content = await page.content()
+                    logger.warning("totp_field_not_found", page_content_preview=content[:2000])
+                    raise AuthenticationError("Could not find TOTP input field")
+
+                # Click submit button for TOTP
+                for selector in submit_selectors:
+                    try:
+                        await page.click(selector)
+                        break
+                    except Exception:
+                        continue
 
                 # Wait for redirect
                 await page.wait_for_url(
@@ -116,7 +183,7 @@ class AutoLogin:
         """Manual login with request token."""
         return self.auth.generate_session(request_token)
 
-    def ensure_valid_token(self) -> str:
+    async def ensure_valid_token(self) -> str:
         """Ensure we have a valid access token."""
         # Try loading from file
         token = self.auth.load_access_token()
@@ -127,7 +194,7 @@ class AutoLogin:
         # Try auto-login with Playwright
         try:
             logger.info("attempting_auto_login")
-            return self.login_with_playwright()
+            return await self.login_with_playwright()
         except Exception as e:
             logger.warning("auto_login_failed", error=str(e))
 
@@ -152,7 +219,8 @@ if __name__ == "__main__":
     async def main():
         auto_login = AutoLogin()
         try:
-            token = await auto_login.login_with_playwright()
+            # Use non-headless mode by default for reliability
+            token = await auto_login.login_with_playwright(headless=False)
             print(f"Success! Access token: {token[:20]}...")
         except Exception as e:
             print(f"Auto-login failed: {e}")

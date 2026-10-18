@@ -128,23 +128,44 @@ class ParquetStore:
         if not path.exists():
             return pd.DataFrame()
 
-        # Build filters
-        ds_filters = []
+        # Build filters as pyarrow expressions
+        # Note: timestamps are stored as strings in ISO format, so we need string comparison
+        import pyarrow.compute as pc
+        ds_filter = None
+        
+        # Convert datetime to ISO string for comparison
         if start:
-            ds_filters.append(("timestamp", ">=", start))
+            start_str = start.isoformat()
+            ds_filter = pc.field("timestamp") >= start_str
         if end:
-            ds_filters.append(("timestamp", "<=", end))
+            end_str = end.isoformat()
+            end_filter = pc.field("timestamp") <= end_str
+            ds_filter = ds_filter & end_filter if ds_filter is not None else end_filter
         if filters:
-            ds_filters.extend(filters)
+            for f in filters:
+                if isinstance(f, tuple) and len(f) == 3:
+                    col, op, val = f
+                    if op == ">=":
+                        f_expr = pc.field(col) >= val
+                    elif op == "<=":
+                        f_expr = pc.field(col) <= val
+                    elif op == ">":
+                        f_expr = pc.field(col) > val
+                    elif op == "<":
+                        f_expr = pc.field(col) < val
+                    elif op == "==":
+                        f_expr = pc.field(col) == val
+                    else:
+                        continue
+                    ds_filter = ds_filter & f_expr if ds_filter is not None else f_expr
 
         dataset = ds.dataset(str(path), format="parquet")
-        table = dataset.to_table(columns=columns, filter=ds_filters)
+        table = dataset.to_table(columns=columns, filter=ds_filter)
         df = table.to_pandas()
 
         if not df.empty:
-            # Ensure timestamp is timezone-aware
-            if df["timestamp"].dt.tz is None:
-                df["timestamp"] = df["timestamp"].dt.tz_localize(UTC)
+            # Convert timestamp from string to datetime
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
             df = df.sort_values("timestamp").reset_index(drop=True)
 
         return df
@@ -168,8 +189,8 @@ class ParquetStore:
         if df.empty:
             return df
 
-        if df["timestamp"].dt.tz is None:
-            df["timestamp"] = df["timestamp"].dt.tz_localize(UTC)
+        # Convert timestamp from string to datetime
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
         df = df.sort_values("timestamp").tail(n).reset_index(drop=True)
         return df
