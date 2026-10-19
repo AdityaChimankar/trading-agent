@@ -56,13 +56,64 @@ Docker Compose uses the same SQLite/Parquet storage model as local execution. `.
 
 ```bash
 cp .env.example .env       # PowerShell: Copy-Item .env.example .env
-docker compose up --build -d
+docker compose --profile live build
+docker compose up -d api frontend
 docker compose ps
 ```
 
 Open the dashboard at http://localhost:5173 or the API docs at http://localhost:8000/docs.
 
-Useful Docker commands:
+The build command is required on first setup and after pulling or making application/dependency changes. It is not a daily command.
+
+## Docker operating schedule
+
+These are the commands an operator may need to repeat. Run them from the repository root.
+
+| When | Required? | Command | Purpose |
+|---|---|---|---|
+| Before the first market-data operation of each trading day, or whenever Kite rejects the token | Yes, for broker data | `docker compose run --rm tools trading-agent login` | Automatically signs in and saves the current token in `data/.access_token` |
+| After login on first use, after downtime, or when candles are missing | As needed | See **Catch up missing candles** below | Brings every configured watchlist symbol forward from its latest stored one-minute candle |
+| Whenever the dashboard/API should run | Yes | `docker compose up -d api frontend` | Starts the API and dashboard without live broker processes |
+| At the start of a live market-data session | Yes, for live mode | `docker compose --profile live up -d api frontend ticker scheduler` | Starts the complete application, live ticker, and scheduler |
+| Immediately after startup | Recommended | `docker compose ps` | Confirms that the requested services started and the API is healthy |
+| While monitoring or troubleshooting | Optional | `docker compose logs -f --tail=200 api frontend ticker scheduler` | Streams logs; press `Ctrl+C` to leave the log view without stopping containers |
+| At the end of a session or before maintenance | Optional | `docker compose down` | Stops containers without deleting candle data, models, or the access token |
+| After source, dependency, Dockerfile, or Compose changes | Required after such changes | `docker compose --profile live build` | Rebuilds the application images; do not run it routinely |
+
+### Normal trading-day sequence
+
+Authenticate first, catch up missing candles if the application was not continuously running, and then start live mode:
+
+```bash
+docker compose run --rm tools trading-agent login
+
+# Run the catch-up command from the next section when needed.
+
+docker compose --profile live up -d api frontend ticker scheduler
+docker compose ps
+docker compose logs -f --tail=200 api frontend ticker scheduler
+```
+
+The login command reuses a still-valid token when possible and automatically logs in when a new token is required. `Ctrl+C` only exits the final log-view command; the application continues running in Docker.
+
+### Catch up missing candles
+
+Run this after a fresh daily login when the system has been offline, after an interrupted backfill, or when the UI reports stale/missing candles. It processes the configured watchlist and resumes each symbol from its latest stored one-minute candle. It is safe to repeat, but it is not necessary before every restart when live ingestion has remained healthy.
+
+```bash
+docker compose run --rm tools python -c "import asyncio; from trading_agent.ingest.watchlist_resolved import resolve_watchlist; from trading_agent.ingest.gap_healer import GapHealer; symbols=asyncio.run(resolve_watchlist()); print(asyncio.run(GapHealer(symbols, 'minute').heal_to_current()))"
+```
+
+For a long run in Windows PowerShell, save the output so progress and failures can be reviewed later:
+
+```powershell
+docker compose run --rm tools python -c "import asyncio; from trading_agent.ingest.watchlist_resolved import resolve_watchlist; from trading_agent.ingest.gap_healer import GapHealer; symbols=asyncio.run(resolve_watchlist()); print(asyncio.run(GapHealer(symbols, 'minute').heal_to_current()))" *> data\backfill_latest.log
+Get-Content data\backfill_latest.log -Tail 100
+```
+
+If interrupted with `Ctrl+C`, run the same command again after confirming the daily Kite token is valid. Existing candles remain stored and each symbol resumes from its latest stored timestamp.
+
+### Other occasional Docker commands
 
 ```bash
 # Run any CLI command in a temporary tools container
@@ -70,12 +121,8 @@ docker compose run --rm tools trading-agent --help
 docker compose run --rm tools trading-agent storage-stats
 docker compose run --rm tools trading-agent ingest RELIANCE TCS --days 30
 
-# Start the market-hours ticker and scheduler profile
-docker compose --profile live up -d ticker scheduler
-
-# Follow logs and stop the stack
-docker compose logs -f api
-docker compose down
+# Inspect a specific service after an error
+docker compose logs --tail=200 api
 ```
 
 The `live` profile is deliberately opt-in because it uses broker/network resources and starts scheduled jobs.

@@ -58,6 +58,7 @@ class GapHealer:
 
     def _get_interval_seconds(self) -> int:
         interval_map = {
+            "minute": 60,
             "1minute": 60,
             "5minute": 300,
             "15minute": 900,
@@ -137,6 +138,17 @@ class GapHealer:
                     seconds=self._get_interval_seconds()
                 )
 
+            if self.interval in {"minute", "1minute"}:
+                available_start = to_date - timedelta(days=7)
+                if from_date < available_start:
+                    logger.warning(
+                        "minute_gap_outside_broker_retention",
+                        symbol=symbol,
+                        requested_from=from_date,
+                        available_from=available_start,
+                    )
+                    from_date = available_start
+
             if from_date >= to_date:
                 return 0
 
@@ -169,6 +181,14 @@ class GapHealer:
                 except Exception as e:
                     logger.error("gap_callback_failed", error=str(e))
 
+        return results
+
+    async def heal_to_current(self) -> dict[str, int]:
+        """Fetch each symbol from its latest stored candle through now."""
+        to_date = datetime.now(timezone.utc)
+        results: dict[str, int] = {}
+        for symbol in self.symbols:
+            results[symbol] = await self._heal_symbol(symbol, to_date)
         return results
 
     def register_gap_callback(self, callback: Callable[[Gap], None]) -> None:

@@ -7,22 +7,18 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_agent.core.config import get_settings
 from trading_agent.core.exceptions import DataError
 from trading_agent.core.logging_config import get_logger
 from trading_agent.ingest.kite_auth import get_kite_auth
 
 logger = get_logger(__name__)
 
-# NSE Instrument CSV URL
-INSTRUMENTS_URL = "https://api.kite.trade/instruments/NSE"
-INSTRUMENTS_CACHE = Path(".cache/instruments_nse.csv.gz")
-
-
 class InstrumentLookup:
     """NSE instrument lookup and symbol resolution."""
 
     def __init__(self, cache_path: Path | None = None):
-        self.cache_path = cache_path or INSTRUMENTS_CACHE
+        self.cache_path = cache_path or get_settings().cache_dir / "instruments_nse.csv.gz"
         self._df: pd.DataFrame | None = None
         self._symbol_to_token: dict[str, int] = {}
         self._token_to_symbol: dict[int, str] = {}

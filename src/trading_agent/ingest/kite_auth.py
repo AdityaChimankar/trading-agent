@@ -47,6 +47,12 @@ class KiteAuth:
         )
         self._kite: KiteConnect | None = None
         self._access_token_path = settings.data_dir / ".access_token"
+        if self._access_token_path.exists():
+            token = self._access_token_path.read_text().strip()
+            if token:
+                self.credentials = KiteCredentials(
+                    **{**self.credentials.__dict__, "access_token": token}
+                )
 
     @property
     def kite(self) -> KiteConnect:
@@ -89,7 +95,7 @@ class KiteAuth:
             with open(self._access_token_path) as f:
                 token = f.read().strip()
             if token:
-                self._kite.set_access_token(token)
+                self.kite.set_access_token(token)
                 self.credentials = KiteCredentials(
                     **{**self.credentials.__dict__, "access_token": token}
                 )

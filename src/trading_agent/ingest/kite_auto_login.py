@@ -41,9 +41,12 @@ class AutoLogin:
             raise AuthenticationError("TOTP secret not configured")
         return pyotp.TOTP(self.credentials.totp_secret).now()
 
-    async def login_with_playwright(self, headless: bool = False) -> str:
+    async def login_with_playwright(self, headless: bool | None = None) -> str:
         """Automated browser login using Playwright."""
         from playwright.async_api import async_playwright
+
+        if headless is None:
+            headless = get_settings().kite.login_headless
 
         if not all(
             [
@@ -74,6 +77,14 @@ class AutoLogin:
                 locale="en-US",
             )
             page = await context.new_page()
+            redirect_url: str | None = None
+
+            def capture_redirect(request) -> None:
+                nonlocal redirect_url
+                if "request_token=" in request.url:
+                    redirect_url = request.url
+
+            page.on("request", capture_redirect)
 
             # Inject stealth script
             await page.add_init_script("""
@@ -126,44 +137,69 @@ class AutoLogin:
                         continue
 
                 # Wait for TOTP page - try multiple possible selectors
-                totp_selectors = ['input#totp', 'input[name="totp"]', 'input[placeholder*="TOTP" i]', 'input[placeholder*="2FA" i]']
-                totp_found = False
-                for selector in totp_selectors:
-                    try:
-                        await page.wait_for_selector(selector, timeout=30000)
-                        logger.info("found_totp_field", selector=selector)
-                        
-                        # Enter TOTP
-                        totp_code = self.generate_totp()
-                        logger.info("generated_totp", code=totp_code[:2] + "****")
-                        await page.fill(selector, totp_code)
-                        totp_found = True
-                        break
-                    except Exception:
-                        continue
-                
-                if not totp_found:
-                    # Debug: print page content to help diagnose
-                    content = await page.content()
-                    logger.warning("totp_field_not_found", page_content_preview=content[:2000])
+                totp_selectors = [
+                    'input#totp',
+                    'input[name="totp"]',
+                    'input[autocomplete="one-time-code"]',
+                    'input[type="number"]',
+                    'input[placeholder*="TOTP" i]',
+                    'input[placeholder*="2FA" i]',
+                    'input[placeholder*="PIN" i]',
+                ]
+                try:
+                    totp_field = page.locator(", ".join(totp_selectors)).first
+                    await totp_field.wait_for(state="visible", timeout=30000)
+                    logger.info("found_totp_field")
+
+                    totp_code = self.generate_totp()
+                    logger.info("generated_totp", code=totp_code[:2] + "****")
+                    await totp_field.fill(totp_code)
+                except Exception:
+                    inputs = await page.locator("input").evaluate_all(
+                        """elements => elements.map(element => ({
+                            id: element.id,
+                            name: element.name,
+                            type: element.type,
+                            placeholder: element.placeholder,
+                            autocomplete: element.autocomplete
+                        }))"""
+                    )
+                    body_text = await page.locator("body").inner_text()
+                    logger.warning(
+                        "totp_field_not_found",
+                        url=page.url,
+                        inputs=inputs,
+                        page_text_preview=body_text[:1000],
+                    )
                     raise AuthenticationError("Could not find TOTP input field")
 
                 # Click submit button for TOTP
                 for selector in submit_selectors:
                     try:
-                        await page.click(selector)
-                        break
+                        button = page.locator(selector).first
+                        if await button.is_visible():
+                            await button.click(timeout=3000)
+                            break
                     except Exception:
                         continue
 
                 # Wait for redirect
-                await page.wait_for_url(
-                    re.compile(rf"{re.escape(self.credentials.redirect_url)}.*request_token="),
-                    timeout=30000,
-                )
+                for _ in range(300):
+                    if redirect_url:
+                        break
+                    await page.wait_for_timeout(100)
+
+                if not redirect_url:
+                    body_text = await page.locator("body").inner_text()
+                    logger.warning(
+                        "kite_redirect_not_received",
+                        url=page.url,
+                        page_text_preview=body_text[:1000],
+                    )
+                    raise AuthenticationError("Kite login did not return a request token")
 
                 # Extract request_token
-                current_url = page.url
+                current_url = redirect_url
                 match = re.search(r"request_token=([^&]+)", current_url)
                 if not match:
                     raise AuthenticationError(

@@ -27,8 +27,9 @@ logger = get_logger(__name__)
 
 # Kite historical data limits
 MAX_DAYS_PER_REQUEST = {
-    "minute": 60,
-    "5minute": 100,
+    "minute": 7,
+    "1minute": 7,
+    "5minute": 30,
     "15minute": 200,
     "30minute": 200,
     "60minute": 400,

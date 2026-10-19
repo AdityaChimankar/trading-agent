@@ -38,6 +38,7 @@ class KiteSettings(BaseSettings):
     user_id: str = Field(default="", description="Kite user ID")
     password: str = Field(default="", description="Kite password")
     totp_secret: str = Field(default="", description="TOTP secret for 2FA")
+    login_headless: bool = Field(default=False, description="Run automated login headlessly")
 
     @property
     def is_configured(self) -> bool:

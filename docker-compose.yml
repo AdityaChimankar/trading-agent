@@ -1,4 +1,5 @@
 x-app: &app
+  image: trading-agent-app:latest
   build:
     context: .
     dockerfile: Dockerfile
@@ -6,6 +7,7 @@ x-app: &app
     - .env
   environment:
     ENVIRONMENT: production
+    KITE_LOGIN_HEADLESS: "true"
     DB_URL: sqlite:////app/data/trading.db
     DATA_DIR: /app/data
     CACHE_DIR: /app/data/cache
