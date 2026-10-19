@@ -139,3 +139,21 @@ core + storage
 ## Adding a new decision
 
 Add or revise an ADR when a change affects persistence format, live-vs-backtest parity, external calls, order safety, deployment topology, or strategy promotion rules. Routine refactors do not require an ADR.
+
+## ADR-011: One supported operating contract
+
+Status: accepted for local paper operations, 2026-10-19
+
+The active console targets `/api/v1`. Legacy frontend panels remain unmounted. The persistent paper book is derived from all `open_positions` rows; it is gross entry-cost accounting, not broker cash or mark-to-market. Risk admission and duplicate checks are serialized in SQLite. New entries can be disabled while exits remain available.
+
+## ADR-012: Single-host candle durability and health
+
+Status: accepted for local filesystems
+
+Writers use immutable, atomically published Parquet batches under per-symbol/interval file locks. Readers deduplicate normalized UTC timestamps before filtering; compaction writes a replacement before removing old files. Shared ticker heartbeat is atomic JSON in `DATA_DIR`. One-day historical overlap repairs recent partial live bars. These controls do not imply interior-gap completeness, multi-host locking, or recovery guarantees.
+
+## ADR-013: Explicit deployment boundary
+
+Status: accepted
+
+Docker runs a compiled static frontend behind Nginx; only loopback ports are exposed. Bearer authentication is optional for local use and required before sharing access. No fake deployment jobs or unsupported scheduling success responses are allowed. Institutional-readiness gates and verification evidence live in [READINESS.md](READINESS.md); live order routing requires a separate approved design.

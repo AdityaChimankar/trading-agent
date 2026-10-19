@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,10 +85,18 @@ class KiteAuth:
             raise AuthenticationError(f"Failed to generate session: {e}") from e
 
     def _save_access_token(self, token: str) -> None:
-        """Save access token to file."""
+        """Atomically publish a private token file; readers never see a partial token."""
         self._access_token_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._access_token_path, "w") as f:
-            f.write(token)
+        fd, name = tempfile.mkstemp(prefix=".access_token-", dir=self._access_token_path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(token)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._access_token_path)
+        finally:
+            temporary.unlink(missing_ok=True)
         self.credentials = KiteCredentials(**{**self.credentials.__dict__, "access_token": token})
 
     def load_access_token(self) -> str | None:
@@ -192,7 +202,7 @@ if __name__ == "__main__":
             f.write(access_token)
 
         print("\nSuccess! Access token saved to .access_token")
-        print(f"Token: {access_token[:20]}...")
+        print("Access token saved.")
 
         # Test the token
         kite.set_access_token(access_token)

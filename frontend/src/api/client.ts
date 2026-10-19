@@ -1,6 +1,13 @@
 // Thin fetch wrapper. In dev, Vite proxies /api to the uvicorn server
 // (see vite.config.ts), so requests are always same-origin.
 const BASE = import.meta.env.VITE_API_BASE ?? ''
+let bearerToken = ''
+
+// Keep credentials in memory; never persist them or bake them into the bundle.
+export function setApiToken(token: string) { bearerToken = token }
+function authHeaders(): Record<string, string> {
+  return bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}
+}
 
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -8,6 +15,7 @@ async function handle<T>(res: Response): Promise<T> {
     try {
       const body = await res.json()
       if (body && typeof body.detail === 'string') detail = body.detail
+      else if (Array.isArray(body?.detail)) detail = body.detail.map((entry: { msg: string }) => entry.msg).join('; ')
     } catch {
       // non-JSON error body - keep the status text
     }
@@ -17,13 +25,13 @@ async function handle<T>(res: Response): Promise<T> {
 }
 
 export function apiGet<T>(path: string): Promise<T> {
-  return fetch(`${BASE}${path}`).then((r) => handle<T>(r))
+  return fetch(`${BASE}${path}`, { headers: authHeaders() }).then((r) => handle<T>(r))
 }
 
 export function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
   }).then((r) => handle<T>(r))
 }

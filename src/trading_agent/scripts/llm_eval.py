@@ -8,24 +8,19 @@ rule-based agent by:
 3. Determining if LLM path should be killed or kept
 
 Usage:
-    python -m scripts.llm_eval --symbols RELIANCE TCS INFY
-    python -m scripts.llm_eval --all
+    python -m trading_agent.scripts.llm_eval --symbols RELIANCE,TCS,INFY
+    python -m trading_agent.scripts.llm_eval --all
 """
 import sys
 import argparse
-import json
-from datetime import datetime
-from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-from trading_agent.core.quant_indicators import load_candles, compute_macd
-from trading_agent.core.pattern_detection import detect_patterns
-from trading_agent.core.signals import prepare_symbol_series, precompute_pattern_bias_codes
-from trading_agent.strategy.decision_agent import evaluate_signals as rule_evaluate_signals
-from trading_agent.strategy.llm_decision_agent import llm_decide, fetch_recent_headlines, PROMPT_TEMPLATE
-from trading_agent.storage.db import get_watchlist_symbols, get_connection
+from trading_agent.core.signals import prepare_symbol_data, DEFAULT_PARAMS
+from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
+from trading_agent.storage.db import get_connection
+
 
 # Thresholds for LLM kill switch
 MIN_AGREEMENT_RATE = 0.65      # LLM must agree with rules at least 65% of the time
@@ -51,51 +46,53 @@ def evaluate_llm_vs_rules(symbols: list = None, min_trades: int = MIN_TRADES_FOR
     """Compare LLM decisions against rule-based decisions on historical data."""
     if symbols is None:
         symbols = get_watchlist_symbols()[:30]  # Limit for speed
-    
+
     all_results = []
-    
+
     for symbol in symbols:
         # Get LLM decisions from DB
         llm_decisions = get_historical_llm_decisions(symbol, limit=200)
-        
+
         if len(llm_decisions) < min_trades:
             print(f"  {symbol}: SKIP - only {len(llm_decisions)} LLM decisions (need {min_trades})")
             continue
-        
-        # Also get rule decisions for same timestamps
-        # For a fair comparison, we need to re-run rule logic on historical candles
-        # at the same timestamps
-        prepared = prepare_symbol_series(symbol, candle_limit=5000)
-        if prepared is None:
+
+        # For a fair comparison, re-run rule logic on historical candles
+        # at the same timestamps using the parquet store
+        from trading_agent.storage.parquet_store import get_parquet_store
+        parquet = get_parquet_store()
+        raw_df = parquet.read_latest(symbol, interval="5minute", n=5000)
+        if raw_df is None or raw_df.empty:
             print(f"  {symbol}: SKIP - insufficient historical data")
             continue
-        
+
+        prepared = prepare_symbol_data(raw_df)
+        if prepared is None:
+            print(f"  {symbol}: SKIP - could not prepare indicators")
+            continue
+
         # Build rule decisions for each LLM decision timestamp
         rule_matches = 0
         total_compared = 0
         llm_trades = 0
         rule_trades = 0
-        
+
         for llm_dec in llm_decisions:
             llm_action = llm_dec["action"]
             rule_action = llm_dec["rule_based_action"]
-            
+
             if llm_action in ("BUY", "SELL"):
                 llm_trades += 1
             if rule_action in ("BUY", "SELL"):
                 rule_trades += 1
-            
+
             if llm_action == rule_action and llm_action != "HOLD":
                 rule_matches += 1
             total_compared += 1
-        
+
         agreement_rate = rule_matches / total_compared if total_compared > 0 else 0
-        
-        # Simulate P&L for both (simplified - using fixed exit logic)
-        from trading_agent.core.signals import simulate_trades, DEFAULT_PARAMS
-        
-        # Get rule-based trades
-        rule_trades_list = simulate_trades(prepared, params=DEFAULT_PARAMS)
+
+
         
         # For LLM, we'd need to reconstruct the signals from stored decisions
         # This is complex - for now we compare agreement rates
@@ -138,10 +135,10 @@ def evaluate_llm_vs_rules(symbols: list = None, min_trades: int = MIN_TRADES_FOR
 
 def estimate_llm_cost_per_decision() -> dict:
     """Estimate the cost of running LLM decisions."""
-    from trading_agent.core.llm_client import get_model
-    
-    model = get_model()
-    
+    from trading_agent.core.config import get_settings
+    settings = get_settings()
+    model = settings.llm.model
+
     # Rough cost estimates (OpenRouter pricing varies)
     cost_estimates = {
         "openrouter/free": {"input_per_1k": 0.0, "output_per_1k": 0.0},

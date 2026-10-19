@@ -11,6 +11,12 @@ from trading_agent.storage.parquet_store import get_parquet_store
 router = APIRouter()
 
 
+@router.get("/feed")
+def get_feed_status():
+    from trading_agent.core.freshness import ingest_heartbeat
+    return ingest_heartbeat() or {"connected": False, "last_tick": None, "heartbeat_age_sec": None}
+
+
 class FreshnessResponse(BaseModel):
     source: str
     status: str

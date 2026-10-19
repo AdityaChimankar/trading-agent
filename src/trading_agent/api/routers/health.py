@@ -3,6 +3,7 @@
 from datetime import UTC
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -40,5 +41,5 @@ async def readiness_check():
         async with db.session() as session:
             await session.execute(text("SELECT 1"))
         return {"status": "ready"}
-    except Exception as e:
-        return {"status": "not ready", "error": str(e)}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "not ready", "error": "Database unavailable"})

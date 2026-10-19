@@ -4,13 +4,15 @@ Trading Agent is a local-first research and paper-trading system for NSE intrada
 
 > This project does not place broker orders. It is research and paper-trading software, not financial advice.
 
+The supported operating surface is the versioned API and paper-operations console. This is **not yet an institutional live-trading platform**. See [READINESS.md](READINESS.md) for the integration audit, tested controls, and remaining release gates.
+
 ## What works without broker credentials
 
 The API, dashboard, tests, stored-data analysis, and backtests can run without Kite credentials. Kite credentials and a current daily access token are needed only for downloading or streaming broker data.
 
 ## Quick start: local
 
-Use Python 3.11 or 3.12. Python 3.13 also passes the current test suite, but 3.11 is the version used by Docker and CI.
+Use Python 3.11 or 3.12 and Node 22 for the frontend. Python 3.13 is also tested locally; Docker and CI use Python 3.11. Only copy `.env.example` on first setup: do not overwrite your existing configuration.
 
 ```powershell
 # Windows PowerShell
@@ -48,11 +50,11 @@ npm ci
 npm run dev
 ```
 
-Then open http://localhost:5173. Vite proxies `/api` to the backend on port 8000.
+Then open http://localhost:5173. Vite proxies `/api` to the backend on port 8000. On PowerShell, use `npm.cmd` if execution policy blocks `npm.ps1`.
 
 ## Quick start: Docker
 
-Docker Compose uses the same SQLite/Parquet storage model as local execution. `./data` and `./models` are mounted into every Python service.
+Docker Compose uses the same SQLite/Parquet storage model as local execution. `./data` and `./models` are mounted into every Python service. The frontend is a compiled bundle served by unprivileged Nginx, not a development server. Host ports are bound to loopback only.
 
 ```bash
 cp .env.example .env       # PowerShell: Copy-Item .env.example .env
@@ -72,13 +74,13 @@ These are the commands an operator may need to repeat. Run them from the reposit
 | When | Required? | Command | Purpose |
 |---|---|---|---|
 | Before the first market-data operation of each trading day, or whenever Kite rejects the token | Yes, for broker data | `docker compose run --rm tools trading-agent login` | Automatically signs in and saves the current token in `data/.access_token` |
-| After login on first use, after downtime, or when candles are missing | As needed | See **Catch up missing candles** below | Brings every configured watchlist symbol forward from its latest stored one-minute candle |
+| After login on first use, after downtime, or when candles are missing | As needed | See **Catch up missing candles** below | Replays a one-day overlap and catches up the selected interval |
 | Whenever the dashboard/API should run | Yes | `docker compose up -d api frontend` | Starts the API and dashboard without live broker processes |
 | At the start of a live market-data session | Yes, for live mode | `docker compose --profile live up -d api frontend ticker scheduler` | Starts the complete application, live ticker, and scheduler |
 | Immediately after startup | Recommended | `docker compose ps` | Confirms that the requested services started and the API is healthy |
 | While monitoring or troubleshooting | Optional | `docker compose logs -f --tail=200 api frontend ticker scheduler` | Streams logs; press `Ctrl+C` to leave the log view without stopping containers |
 | At the end of a session or before maintenance | Optional | `docker compose down` | Stops containers without deleting candle data, models, or the access token |
-| After source, dependency, Dockerfile, or Compose changes | Required after such changes | `docker compose --profile live build` | Rebuilds the application images; do not run it routinely |
+| After source, dependency, Dockerfile, or Compose changes | Required after such changes | `docker compose --profile live build` | Rebuilds images; rerun the appropriate `up -d` command afterward to replace old containers |
 
 ### Normal trading-day sequence
 
@@ -98,20 +100,28 @@ The login command reuses a still-valid token when possible and automatically log
 
 ### Catch up missing candles
 
-Run this after a fresh daily login when the system has been offline, after an interrupted backfill, or when the UI reports stale/missing candles. It processes the configured watchlist and resumes each symbol from its latest stored one-minute candle. It is safe to repeat, but it is not necessary before every restart when live ingestion has remained healthy.
+Run this after login when the system has been offline or a download was interrupted. Start with 100 symbols, review the summary, then omit `--limit` to process the complete watchlist. Choose the **same interval as `STORAGE_CANDLE_INTERVAL`** (default `5minute`); one-minute and five-minute datasets are separate and are not automatically resampled.
+
+The command replays one day before each latest stored candle, correcting recent partial live bars and catching up through the last completed bar. A new symbol defaults to 30 days. Reads deduplicate retries by timestamp. This is not a complete interior-gap audit: use an explicit historical ingest for older holes. Physical storage row counts include replay copies until compaction.
+
+Symbols that are no longer present in Kite's current NSE equity instrument list are logged as `gap_heal_symbol_skipped` and do not stop the remaining watchlist from being processed.
 
 ```bash
-docker compose run --rm tools python -c "import asyncio; from trading_agent.ingest.watchlist_resolved import resolve_watchlist; from trading_agent.ingest.gap_healer import GapHealer; symbols=asyncio.run(resolve_watchlist()); print(asyncio.run(GapHealer(symbols, 'minute').heal_to_current()))"
+# Bounded validation first; replace 5minute with minute if configured that way.
+docker compose run --rm tools trading-agent heal-gaps --interval 5minute --limit 100
+# Full watchlist, only when needed:
+docker compose run --rm tools trading-agent heal-gaps --interval 5minute
 ```
 
 For a long run in Windows PowerShell, save the output so progress and failures can be reviewed later:
 
 ```powershell
-docker compose run --rm tools python -c "import asyncio; from trading_agent.ingest.watchlist_resolved import resolve_watchlist; from trading_agent.ingest.gap_healer import GapHealer; symbols=asyncio.run(resolve_watchlist()); print(asyncio.run(GapHealer(symbols, 'minute').heal_to_current()))" *> data\backfill_latest.log
+docker compose run --rm tools trading-agent heal-gaps --interval 5minute --limit 100 *> data\backfill_latest.log
+$LASTEXITCODE
 Get-Content data\backfill_latest.log -Tail 100
 ```
 
-If interrupted with `Ctrl+C`, run the same command again after confirming the daily Kite token is valid. Existing candles remain stored and each symbol resumes from its latest stored timestamp.
+If interrupted, rerun after checking authentication. Exit code 1 means failure; inspect `errors` and logs. Invalid instruments are listed under `skipped`; `rows_written` includes overlap, not just newly discovered candles. Authentication or open-breaker failures stop the batch. Investigate the first error before retrying; run only one historical-data job at a time because pacing is process-local.
 
 ### Other occasional Docker commands
 
@@ -183,7 +193,14 @@ Settings come from process environment variables first, then `.env`. Important v
 | `DATA_DIR` | `data` | Runtime data and access-token directory |
 | `STORAGE_PARQUET_ROOT` | `data/parquet` | Candle storage |
 | `ML_MODEL_DIR` | `models` | Model registry and artifacts |
-| `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | API bind address |
+| `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Local bind address; Compose overrides inside its containers |
+| `API_AUTH_TOKEN` | empty | Optional bearer authentication; enable before sharing access |
+| `STORAGE_CANDLE_INTERVAL` | `5minute` | Ticker, scheduler, and position-monitor interval |
+| `PAPER_INITIAL_CAPITAL` | `1000000` | Initial paper capital; keep fixed for an existing ledger |
+| `PAPER_ENTRIES_ENABLED` | `true` | Set `false` and restart API to block new paper entries (closing remains allowed) |
+| `PAPER_MAX_POSITIONS` | `10` | Maximum open paper positions |
+| `PAPER_MAX_EXPOSURE_PCT` / `PAPER_MAX_RISK_PCT` | `0.50` / `0.06` | Aggregate notional and stop-risk fractions of gross book equity |
+| `PAPER_MAX_TRADE_RISK_PCT` | `0.02` | Maximum stop risk per paper entry |
 | `API_CORS_ORIGINS` | local frontend origins | JSON list of allowed origins |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `console` | Logging behavior |
 | `LLM_PROVIDER` | `mock` | `mock`, `openai`, or `anthropic` |
@@ -191,6 +208,10 @@ Settings come from process environment variables first, then `.env`. Important v
 | `LLM_API_KEY` / `LLM_MODEL` | empty / `gpt-4o-mini` | Optional LLM credentials/model |
 
 Keep `LLM_PROVIDER=mock` to guarantee that the comparison path makes no external LLM calls. See [.env.example](.env.example) for every supported setting.
+
+The dashboard accepts `API_AUTH_TOKEN` in its access-token form and keeps it in memory only. Do not put secrets in frontend build variables. With authentication enabled, browser Swagger access also requires an Authorization header; ordinary direct navigation does not supply one. Remote access additionally needs TLS, an authenticated gateway, and an operator/security review.
+
+Paper wallet totals come from persisted `open_positions` records, including closed rows. They are gross entry-cost accounting: no live mark-to-market, fees, slippage, deposits, or broker reconciliation. Manual closes use the price you enter. Stops generate advisory alerts, not guaranteed fills or automatic broker exits. Do not change initial capital to conceal losses.
 
 ## Architecture
 
@@ -234,9 +255,13 @@ The API creates missing tables on startup for a zero-setup local experience. For
 ```bash
 alembic upgrade head
 alembic current
+# Docker equivalent (new databases / migration-managed deployments):
+docker compose run --rm tools alembic upgrade head
 ```
 
 Do not edit an already-applied initial migration in a deployed database; add a new Alembic revision instead.
+
+For a new migration-managed database, run migrations **before** starting the API. An older auto-created database may have tables but no Alembic revision: back it up and compare its schema before adopting migrations; do not blindly stamp, drop tables, or run the initial creation over it. Stop writers before filesystem backups and verify restoration into a separate directory. `docker compose down` preserves bind-mounted data; image pruning is not required for an upgrade.
 
 ## Development checks
 
@@ -250,7 +275,7 @@ npm run typecheck
 npm run build
 ```
 
-The current automated suite contains 156 tests. The exact count may change, so treat a zero exit code as the source of truth.
+The suite includes storage replay/concurrency, broker-message normalization, paper-ledger/API contracts, and fresh-database migration checks. See [READINESS.md](READINESS.md) for validation evidence and limitations; a build alone is not a live-session test.
 
 ## Troubleshooting
 
@@ -263,10 +288,15 @@ The current automated suite contains 156 tests. The exact count may change, so t
 | Port 8000/5173 is busy | Change the port mapping in `docker-compose.yml` or use CLI/API port options |
 | Docker frontend cannot reach API | Confirm `api` is healthy with `docker compose ps` and inspect `docker compose logs api` |
 | SQLite is locked | Avoid multiple ad-hoc writers; stop duplicate ticker/scheduler processes |
+| Rebuilt code appears unchanged | Rerun `docker compose up -d api frontend` (and live services if used); rebuilding alone does not replace running containers |
+| `kite_historical` breaker is OPEN | Review the first underlying failure, check login, wait for broker recovery, then retry a bounded batch; avoid concurrent backfills |
+| API returns 401 | Enter the configured bearer token in the console; never disable authentication to expose a public service |
+| Paper entry returns 409 | Read the error: duplicate symbol, entry switch, capital, position, exposure, or stop-risk limit; closes remain available |
 
 ## Documentation map
 
 - [USER_GUIDE.md](USER_GUIDE.md): detailed setup, daily operation, and recovery steps
+- [READINESS.md](READINESS.md): integration audit, evidence, and institutional-readiness gates
 - [ARCHITECTURE.md](ARCHITECTURE.md): architectural decisions
 - [DESIGN.md](DESIGN.md): components, data flow, and deployment design
 - [STRATEGIES.md](STRATEGIES.md): strategy hypotheses and promotion rules

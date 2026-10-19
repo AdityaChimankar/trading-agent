@@ -63,7 +63,7 @@ class StorageSettings(BaseSettings):
         default=Path("data/parquet"),
         description="Root directory for Parquet files",
     )
-    candle_interval: Literal["1minute", "5minute", "15minute"] = Field(
+    candle_interval: Literal["minute", "1minute", "5minute", "15minute"] = Field(
         default="5minute",
         description="Default candle interval",
     )
@@ -80,7 +80,8 @@ class APISettings(BaseSettings):
         env_prefix="API_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    host: str = Field(default="0.0.0.0", description="Server host")
+    host: str = Field(default="127.0.0.1", description="Server host")
+    auth_token: str = Field(default="", repr=False, description="Optional bearer token for private API access")
     port: int = Field(default=8000, description="Server port")
     reload: bool = Field(default=False, description="Auto-reload on changes")
     workers: int = Field(default=1, description="Number of workers")
@@ -88,6 +89,18 @@ class APISettings(BaseSettings):
         default=["http://localhost:3000", "http://localhost:5173"],
         description="CORS allowed origins",
     )
+
+
+class PaperRiskSettings(BaseSettings):
+    """Limits for database-backed paper positions; never broker orders."""
+
+    model_config = SettingsConfigDict(env_prefix="PAPER_", env_file=".env", extra="ignore")
+    initial_capital: float = Field(default=1_000_000, gt=0, allow_inf_nan=False)
+    entries_enabled: bool = True
+    max_positions: int = Field(default=10, ge=1)
+    max_exposure_pct: float = Field(default=0.5, gt=0, le=1)
+    max_risk_pct: float = Field(default=0.06, gt=0, le=1)
+    max_trade_risk_pct: float = Field(default=0.02, gt=0, le=1)
 
 
 class MLSettings(BaseSettings):
@@ -160,6 +173,7 @@ class Settings(BaseSettings):
     kite: KiteSettings = Field(default_factory=KiteSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     api: APISettings = Field(default_factory=APISettings)
+    paper: PaperRiskSettings = Field(default_factory=PaperRiskSettings)
     ml: MLSettings = Field(default_factory=MLSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)

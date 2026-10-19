@@ -202,29 +202,18 @@ def test_exposure_summary_handles_zero_capital(book, monkeypatch):
     }
 
 
-def test_wallet_endpoint_exposes_the_notional_split(monkeypatch):
-    """The split has to reach the response, not just exist in a helper."""
-    from trading_agent.api.routers import wallet as wallet_router
+def test_sizing_uses_real_price_and_cannot_undo_exposure_cap(book, monkeypatch):
+    # Both constraints apply: exposure allows 20 shares, risk allows 50.
+    monkeypatch.setattr(pr, "get_open_positions", lambda: [_open("A", 45000, risk=5750)])
+    monkeypatch.setattr(pr, "calculate_position", lambda s, a, c: _plan(s, a, entry=250, size=100))
+    plan = pr.calculate_portfolio_adjusted_position("X", "BUY", 100000)
+    assert plan.entry_price == 250
+    assert plan.approved_size == 20
+    assert plan.approved_value == 5000
 
-    class _Conn:
-        def close(self):
-            pass
 
-    monkeypatch.setattr(wallet_router, "get_connection", lambda: _Conn())
-    monkeypatch.setattr(wallet_router, "ensure_wallet_settings", lambda conn: 1.0)
-    monkeypatch.setattr(wallet_router, "wallet_snapshot", lambda conn: {
-        "capital": 500000.0, "total_deposits": 0.0, "total_withdrawals": 0.0,
-        "realized_pnl_total": 1791.0, "book_balance": 501791.0, "unified_equity": 501791.0, "open_positions": [],
-    })
-    monkeypatch.setattr(wallet_router, "_closed_pnl_today", lambda conn: 0.0)
-    monkeypatch.setattr(wallet_router, "_recent_trades_summary", lambda conn, days: {})
-    monkeypatch.setattr(wallet_router, "exposure_summary", lambda capital: {
-        "committed_notional": 99708.0, "free_notional": 402083.0, "exposure_pct": 19.87,
-    })
-
-    result = wallet_router.wallet()
-
-    # Measured against the book balance, so the two views cannot disagree.
-    assert result["fixed"]["committed_notional"] == 99708.0
-    assert result["fixed"]["free_notional"] == 402083.0
-    assert result["fixed"]["exposure_pct"] == 19.87
+def test_duplicate_symbol_is_blocked(book, monkeypatch):
+    monkeypatch.setattr(pr, "get_open_positions", lambda: [_open("X", 1000)])
+    monkeypatch.setattr(pr, "calculate_position", lambda s, a, c: _plan(s, a))
+    plan = pr.calculate_portfolio_adjusted_position("X", "BUY", 100000)
+    assert plan.blocked and plan.approved_size == 0

@@ -3,7 +3,8 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Literal
 
 router = APIRouter()
 
@@ -19,7 +20,7 @@ class PipelineStatus(BaseModel):
 
 class PipelineRunRequest(BaseModel):
     symbols: List[str] | None = None
-    interval: str = "5minute"
+    interval: Literal["minute", "1minute", "5minute", "15minute", "day"] = "5minute"
     force: bool = False
 
 
@@ -42,11 +43,13 @@ async def get_pipeline_status():
 @router.post("/run")
 async def run_pipeline(request: PipelineRunRequest, background_tasks: BackgroundTasks):
     """Run the trading pipeline."""
-    if _pipeline_state["status"] == "running" and not request.force:
+    if _pipeline_state["status"] == "running":
         raise HTTPException(status_code=409, detail="Pipeline already running")
 
     _pipeline_state["status"] = "running"
     _pipeline_state["errors"] = []
+    _pipeline_state["symbols_processed"] = 0
+    _pipeline_state["opportunities_found"] = 0
 
     # Run in background
     background_tasks.add_task(_execute_pipeline, request.symbols, request.interval)
@@ -54,8 +57,8 @@ async def run_pipeline(request: PipelineRunRequest, background_tasks: Background
     return {"status": "started", "message": "Pipeline execution started in background"}
 
 
-async def _execute_pipeline(symbols: List[str] | None, interval: str):
-    """Execute the pipeline."""
+def _execute_pipeline(symbols: List[str] | None, interval: str):
+    """Run synchronous analysis in Starlette's worker thread, not the event loop."""
     try:
         from trading_agent.analysis.opportunity_finder import OpportunityFinder
         from trading_agent.strategy.candidates import CandidateGenerator
@@ -68,7 +71,7 @@ async def _execute_pipeline(symbols: List[str] | None, interval: str):
 
         if not symbols:
             _pipeline_state["status"] = "completed"
-            _pipeline_state["last_run"] = datetime.now()
+            _pipeline_state["last_run"] = datetime.now(UTC)
             return
 
         generator = CandidateGenerator()
@@ -80,16 +83,15 @@ async def _execute_pipeline(symbols: List[str] | None, interval: str):
         _pipeline_state["symbols_processed"] = len(symbols)
         _pipeline_state["opportunities_found"] = len(opportunities)
         _pipeline_state["status"] = "completed"
-        _pipeline_state["last_run"] = datetime.now()
+        _pipeline_state["last_run"] = datetime.now(UTC)
 
     except Exception as e:
         _pipeline_state["status"] = "error"
         _pipeline_state["errors"].append(str(e))
-        _pipeline_state["last_run"] = datetime.now()
+        _pipeline_state["last_run"] = datetime.now(UTC)
 
 
 @router.post("/schedule")
 async def schedule_pipeline(cron: str = "*/5 9-15 * * 1-5"):
     """Schedule pipeline to run periodically."""
-    # This would integrate with APScheduler
-    return {"status": "scheduled", "cron": cron}
+    raise HTTPException(status_code=501, detail="Use the scheduler service; API scheduling is not implemented")

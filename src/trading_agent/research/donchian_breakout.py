@@ -5,18 +5,19 @@ Risk management: 2*ATR stop loss, 4*ATR take profit (1:2 R:R)
 """
 import pandas as pd
 import numpy as np
-from trading_agent.core.quant_indicators import load_candles, compute_atr
-from trading_agent.storage.db import get_connection
+from trading_agent.core.quant_indicators import atr as compute_atr_arr
+from trading_agent.storage.parquet_store import get_parquet_store
 
 
 def prepare_15m_data(symbol: str, candle_limit: int = 20000) -> pd.DataFrame | None:
     """Load and resample to 15-min, compute Donchian channels and ATR."""
-    df = load_candles(symbol, limit=candle_limit)
-    if len(df) < 100:
+    parquet = get_parquet_store()
+    df = parquet.read_latest(symbol, interval="minute", n=candle_limit)
+    if df is None or df.empty or len(df) < 100:
         return None
 
     df_ts = df.copy()
-    df_ts["ts"] = pd.to_datetime(df_ts["timestamp"], format="ISO8601")
+    df_ts["ts"] = pd.to_datetime(df_ts["timestamp"], utc=True)
     df_ts = df_ts.set_index("ts")
     df_15m = df_ts.resample("15min").agg({
         "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
@@ -28,7 +29,12 @@ def prepare_15m_data(symbol: str, candle_limit: int = 20000) -> pd.DataFrame | N
     # Donchian channels (20-period)
     df_15m["high_20"] = df_15m["high"].rolling(20).max()
     df_15m["low_20"] = df_15m["low"].rolling(20).min()
-    df_15m["atr"] = compute_atr(df_15m, period=14)
+
+    # ATR using current quant_indicators signature: atr(h, l, c, period)
+    h = df_15m["high"].to_numpy(dtype=float)
+    l_ = df_15m["low"].to_numpy(dtype=float)
+    c = df_15m["close"].to_numpy(dtype=float)
+    df_15m["atr"] = compute_atr_arr(h, l_, c, period=14)
 
     # Breakout signals (close crosses above/below prior 20-period high/low)
     df_15m["buy_signal"] = (df_15m["close"] > df_15m["high_20"].shift(1)) & (df_15m["high_20"].notna())

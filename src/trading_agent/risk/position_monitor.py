@@ -336,7 +336,15 @@ def _get_quantity(obj: Any) -> int:
 
 
 async def _get_latest_candle(session, symbol: str, interval: str = "5minute"):
-    """Get the latest candle for a symbol."""
+    """Prefer the canonical ingest store; retain SQLite fallback for legacy books."""
+    from types import SimpleNamespace
+    from starlette.concurrency import run_in_threadpool
+    from trading_agent.core.config import get_settings
+    from trading_agent.storage.parquet_store import get_parquet_store
+    interval = get_settings().storage.candle_interval
+    frame = await run_in_threadpool(get_parquet_store().read_latest, symbol, interval, n=1)
+    if not frame.empty:
+        return SimpleNamespace(**frame.iloc[-1].to_dict())
     repo = CandleRepository(session)
     candles = await repo.get_latest(symbol, interval, limit=1)
     return candles[0] if candles else None
@@ -414,8 +422,8 @@ async def get_position_status(position_row: Any, now: datetime | None = None, fe
                 "symbol": _get_attr(position_row, "symbol"),
                 "action": _get_attr(position_row, "action"),
                 "entry_price": _get_attr(position_row, "entry_price"),
-                "position_size": _get_attr(position_row, "quantity"),
-                "position_value": _get_attr(position_row, "entry_price") * _get_attr(position_row, "quantity"),
+                "position_size": _get_quantity(position_row),
+                "position_value": _get_attr(position_row, "entry_price") * _get_quantity(position_row),
                 "stop_loss": _get_attr(position_row, "stop_loss"),
                 "take_profit": _get_attr(position_row, "take_profit"),
             },

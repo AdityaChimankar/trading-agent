@@ -1,4 +1,4 @@
-# Git
+ # Git
 .git
 .gitignore
 
@@ -26,6 +26,7 @@ __pycache__
 *.pyd
 .pytest_cache
 .test-tmp*
+.audit-tests/
 .mypy_cache
 .ruff_cache
 .coverage

@@ -136,7 +136,11 @@ class CircuitBreaker(Generic[T]):
             self._stats.successful_calls += 1
             self._stats.last_success_time = time.time()
 
-            if self._state == CircuitState.HALF_OPEN:
+            if self._state == CircuitState.CLOSED:
+                # The failure threshold represents consecutive failures. A
+                # successful call proves the dependency recovered.
+                self._failure_count = 0
+            elif self._state == CircuitState.HALF_OPEN:
                 self._success_count += 1
                 if self._success_count >= self.config.success_threshold:
                     self._transition_to_closed()

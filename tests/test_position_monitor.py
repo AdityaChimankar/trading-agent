@@ -10,6 +10,7 @@ The last two tests run the whole surface - get_all_position_statuses() ->
 run_monitor_cycle() -> position_alerts -> /api/wallet - rather than the parts.
 """
 from datetime import datetime, timedelta
+from contextlib import closing
 
 import pytest
 
@@ -267,7 +268,8 @@ def test_monitor_cycle_records_once_and_closes_nothing(db):
     first = run_monitor_cycle_sync(now=SESSION_NOW)
     assert first == {"checked": 1, "alerts": 1, "recorded": 1}
 
-    row = db.get_connection().execute("SELECT * FROM position_alerts").fetchone()
+    with closing(db.get_connection()) as connection:
+        row = connection.execute("SELECT * FROM position_alerts").fetchone()
     assert row["position_id"] == position_id
     assert row["kind"] == "stop"
     assert row["recommendation"] == "SELL"
@@ -293,32 +295,30 @@ def test_monitor_cycle_records_nothing_on_a_clean_book(db):
     conn.close()
 
     assert run_monitor_cycle_sync(now=SESSION_NOW) == {"checked": 1, "alerts": 0, "recorded": 0}
-    assert db.get_connection().execute("SELECT COUNT(*) FROM position_alerts").fetchone()[0] == 0
+    with closing(db.get_connection()) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM position_alerts").fetchone()[0] == 0
 
 
 def test_monitor_cycle_on_an_empty_book(db):
-    assert db.get_connection().execute("SELECT COUNT(*) FROM position_alerts").fetchone()[0] == 0
+    with closing(db.get_connection()) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM position_alerts").fetchone()[0] == 0
 
     assert run_monitor_cycle_sync(now=SESSION_NOW) == {"checked": 0, "alerts": 0, "recorded": 0}
 
 
 # --- the API surface ------------------------------------------------------
 
-from trading_agent.api.routers.wallet import wallet
-
-def test_unreadable_position_cannot_break_the_wallet_sums(db):
-    """The wallet keeps the numbers it had: a position the monitor cannot mark
-    contributed nothing to them before, when the monitor dropped it entirely."""
+def test_unreadable_position_still_consumes_book_exposure(db):
+    """Missing market data must never make a persisted position disappear from risk."""
+    from trading_agent.risk.portfolio_risk import get_open_positions, exposure_summary
     conn = db.get_connection()
     open_position(conn, "NOCANDLES", stop_loss=95.0, take_profit=110.0)
     conn.close()
 
-    payload = wallet()
-
-    assert payload["open_positions"] == []
-    assert payload["today"]["open_pnl"] == 0.0
-    assert payload["today"]["open_positions_count"] == 0
-    assert payload["fixed"]["book_balance"] == 500000.0
+    positions = get_open_positions()
+    assert len(positions) == 1
+    assert positions[0]["symbol"] == "NOCANDLES"
+    assert exposure_summary(500000)["committed_notional"] == positions[0]["position_value"]
 
 
 def test_withheld_mark_does_not_break_the_sidebar_join():

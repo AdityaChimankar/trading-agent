@@ -20,6 +20,12 @@ class SymbolInfo(BaseModel):
     data_range: dict | None = None
 
 
+@router.get("/stored", response_model=list[SymbolInfo])
+def list_stored_symbols():
+    """Offline catalogue for the dashboard; never authenticates with a broker."""
+    return [SymbolInfo(symbol=symbol, has_data=True) for symbol in sorted(get_parquet_store().get_symbols())]
+
+
 @router.get("/", response_model=list[SymbolInfo])
 async def list_symbols(
     search: str | None = Query(None, description="Search query"),

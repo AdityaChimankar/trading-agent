@@ -388,7 +388,8 @@ class PaperWallet:
 
         pnls = [t.net_pnl for t in self.trades]
         wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p <= 0]
+        # Break-even trades are not losses and must not create a zero divisor.
+        losses = [p for p in pnls if p < 0]
 
         # Equity curve
         equity = [self.initial_cash]

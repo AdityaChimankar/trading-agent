@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pandas as pd
@@ -331,15 +331,17 @@ class PortfolioRiskManager:
 
 
 # ============================================================
-# Module-level functions for test compatibility
+# Persisted paper-book sizing helpers (not broker order routing)
 # ============================================================
 
 def _get_risk_config() -> SimpleNamespace:
-    """Get risk configuration for testing."""
+    """Use the same portfolio caps as the paper-entry API."""
+    from trading_agent.core.config import get_settings
+    limits = get_settings().paper
     return SimpleNamespace(
-        total_risk_budget_pct=6.0,
+        total_risk_budget_pct=limits.max_risk_pct * 100,
         max_cluster_exposure_pct=20.0,
-        max_total_exposure_pct=50.0,
+        max_total_exposure_pct=limits.max_exposure_pct * 100,
     )
 
 
@@ -348,31 +350,45 @@ def compute_correlation_matrix(symbols: list[str], lookback: int | None = None) 
     if not symbols:
         return pd.DataFrame()
 
-    # Return identity matrix (no correlation) for testing
-    return pd.DataFrame(np.eye(len(symbols)), index=symbols, columns=symbols)
-
-
-# In-memory store for open positions (used by tests)
-_open_positions_store: list[dict] = []
+    from trading_agent.core.config import get_settings
+    from trading_agent.storage.parquet_store import get_parquet_store
+    series = {}
+    for symbol in symbols:
+        frame = get_parquet_store().read_latest(symbol, get_settings().storage.candle_interval, n=lookback or 252)
+        if not frame.empty:
+            series[symbol] = frame.set_index("timestamp")["close"].pct_change(fill_method=None)
+    # Unknown correlation stays NaN; it is not evidence of diversification.
+    return pd.DataFrame(series).corr(min_periods=20).reindex(index=symbols, columns=symbols)
 
 
 def get_open_positions() -> list[dict]:
-    """Get open positions."""
-    return _open_positions_store
-
-
-def set_open_positions(positions: list[dict]) -> None:
-    """Set open positions for testing."""
-    global _open_positions_store
-    _open_positions_store = positions
+    """Read the supported SQLite ledger; database errors must not imply an empty book."""
+    from trading_agent.storage.db import get_connection
+    connection = get_connection()
+    try:
+        return [dict(row) for row in connection.execute("SELECT * FROM open_positions WHERE lower(status) = 'open'")]
+    finally:
+        connection.close()
 
 
 def calculate_position(symbol: str, action: str, capital: float) -> PositionSizeResult:
     """Calculate base position size (per-trade risk sizing)."""
-    # Default parameters for testing
-    entry_price = 100.0
-    atr_value = 5.0  # Stop distance = 5 * 1.5 = 7.5
-    atr_percentile = 0.5
+    from trading_agent.core.config import get_settings
+    from trading_agent.core.signals import prepare_symbol_data
+    from trading_agent.core.position_sizing import calculate_atr_percentile
+    from trading_agent.storage.parquet_store import get_parquet_store
+    if action not in {"BUY", "SELL"}:
+        raise ValueError("Action must be BUY or SELL")
+    frame = get_parquet_store().read_latest(symbol, get_settings().storage.candle_interval, n=300)
+    if len(frame) < 30:
+        raise ValueError(f"Insufficient stored candles to size {symbol}")
+    prepared = prepare_symbol_data(frame)
+    entry_price = float(frame["close"].iloc[-1])
+    atr_values = prepared["atrs"]
+    atr_value = float(atr_values[-1])
+    if not np.isfinite(atr_value) or atr_value <= 0:
+        raise ValueError(f"Invalid ATR for {symbol}")
+    atr_percentile = calculate_atr_percentile(atr_values, atr_value)
     
     result = calculate_position_size(
         entry_price=entry_price,
@@ -382,6 +398,9 @@ def calculate_position(symbol: str, action: str, capital: float) -> PositionSize
         atr_percentile=atr_percentile,
         existing_positions_value=0.0,
     )
+    if action == "SELL":
+        result = replace(result, stop_price=2 * entry_price - result.stop_price,
+                         take_profit_price=None if result.take_profit_price is None else 2 * entry_price - result.take_profit_price)
     return result
 
 
@@ -410,12 +429,13 @@ def calculate_portfolio_adjusted_position(
     base_size = base_result.shares
     base_value = base_result.position_value
     base_risk = base_result.risk_amount
+    entry_price = base_value / base_size if base_size > 0 else 0.0
     
     if base_size == 0:
         return PositionPlan(
             symbol=symbol,
             action=action,
-            entry_price=100.0,
+            entry_price=entry_price,
             approved_size=0,
             approved_value=0.0,
             blocked=True,
@@ -463,7 +483,7 @@ def calculate_portfolio_adjusted_position(
         if base_value > available_exposure:
             scale = available_exposure / base_value
             approved_size = int(base_size * scale)
-            approved_value = approved_size * 100.0  # entry_price
+            approved_value = approved_size * entry_price
             if approved_size == 0:
                 blocked = True
                 block_reason = "exposure_cap_insufficient"
@@ -478,16 +498,19 @@ def calculate_portfolio_adjusted_position(
         # Check if base risk exceeds available risk
         if base_risk > available_risk:
             scale = available_risk / base_risk
-            approved_size = int(base_size * scale)
-            approved_value = approved_size * 100.0
+            approved_size = min(approved_size, int(base_size * scale))
+            approved_value = approved_size * entry_price
             if approved_size == 0:
                 blocked = True
                 block_reason = "risk_budget_insufficient"
     
+    if any(p["symbol"] == symbol for p in open_positions):
+        blocked, block_reason, approved_size, approved_value = True, "symbol_already_open", 0, 0.0
+
     return PositionPlan(
         symbol=symbol,
         action=action,
-        entry_price=100.0,
+        entry_price=entry_price,
         approved_size=approved_size,
         approved_value=approved_value,
         blocked=blocked,
@@ -508,7 +531,7 @@ def exposure_summary(capital: float) -> dict:
     committed_notional = sum(p.get("position_value", 0) for p in open_positions)
     
     # Calculate free notional based on 50% cap
-    max_exposure = capital * 0.5  # max_total_exposure_pct = 50%
+    max_exposure = capital * _get_risk_config().max_total_exposure_pct / 100
     free_notional = max(0.0, max_exposure - committed_notional)
     exposure_pct = (committed_notional / capital * 100) if capital > 0 else 0.0
     

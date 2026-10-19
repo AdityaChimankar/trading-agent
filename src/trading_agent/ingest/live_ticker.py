@@ -8,6 +8,8 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+import math
 from typing import Callable, Optional
 
 import pandas as pd
@@ -19,6 +21,7 @@ from trading_agent.core.exceptions import KiteAPIError
 from trading_agent.core.circuit_breaker import get_circuit_breaker
 from trading_agent.ingest.kite_auth import get_kite_auth
 from trading_agent.ingest.instrument_lookup import get_instrument_lookup
+from trading_agent.ingest.heartbeat import write_heartbeat
 from trading_agent.storage.parquet_store import get_parquet_store
 
 logger = get_logger(__name__)
@@ -78,8 +81,11 @@ class LiveTicker:
         self._symbol_by_token: dict[int, str] = {}
         self._candle_buffers: dict[int, list[TickData]] = defaultdict(list)
         self._last_candle_time: dict[int, datetime] = {}
+        self._last_volume: dict[int, tuple[object, int]] = {}
+        self._last_tick: dict[int, datetime] = {}
         self._running = False
         self._ticker: KiteTicker | None = None
+        self._last_heartbeat = 0.0
 
         # Circuit breaker for reconnection
         self._reconnect_cb = get_circuit_breaker("kite_ticker_reconnect")
@@ -105,6 +111,7 @@ class LiveTicker:
     def _get_interval_seconds(self) -> int:
         """Get interval in seconds."""
         interval_map = {
+            "minute": 60,
             "1minute": 60,
             "5minute": 300,
             "15minute": 900,
@@ -160,22 +167,50 @@ class LiveTicker:
                 continue
 
             symbol = self._symbol_by_token[token]
-            timestamp = datetime.fromtimestamp(tick["timestamp"], tz=timezone.utc)
+            # Kite full-mode messages carry datetime exchange_timestamp values.
+            raw_timestamp = tick.get("exchange_timestamp", tick.get("timestamp"))
+            if raw_timestamp is None:
+                logger.warning("tick_missing_timestamp", symbol=symbol)
+                continue
+            if isinstance(raw_timestamp, datetime):
+                timestamp = raw_timestamp
+                if timestamp.tzinfo is None:
+                    # SDK uses datetime.fromtimestamp(), which produces host
+                    # local time (UTC in Docker, IST on many workstations).
+                    timestamp = timestamp.astimezone()
+                timestamp = timestamp.astimezone(timezone.utc)
+            else:
+                timestamp = datetime.fromtimestamp(raw_timestamp, tz=timezone.utc)
+            if timestamp < self._last_tick.get(token, timestamp):
+                logger.warning("out_of_order_tick", symbol=symbol)
+                continue
+            price = float(tick["last_price"])
+            if not math.isfinite(price) or price <= 0:
+                continue
+            self._last_tick[token] = timestamp
+            trading_day = timestamp.astimezone(ZoneInfo("Asia/Kolkata")).date()
+            cumulative = max(0, int(tick.get("volume_traded", 0)))
+            previous = self._last_volume.get(token)
+            # On connection/reconnection we cannot attribute the day's prior
+            # trades to this candle. Establish a baseline instead.
+            volume = 0
+            if previous and previous[0] == trading_day:
+                volume = max(0, cumulative - previous[1])
+            self._last_volume[token] = (trading_day, cumulative)
+            depth = tick.get("depth") or {}
+            buys = depth.get("buy") or [{}]
+            sells = depth.get("sell") or [{}]
 
             # Create tick data
             tick_data = TickData(
                 symbol=symbol,
                 token=token,
                 timestamp=timestamp,
-                last_price=tick["last_price"],
-                volume=tick.get("volume_traded", 0),
+                last_price=price,
+                volume=volume,
                 oi=tick.get("oi"),
-                bid_price=tick.get("depth", {}).get("buy", [{}])[0].get("price")
-                if tick.get("depth")
-                else None,
-                ask_price=tick.get("depth", {}).get("sell", [{}])[0].get("price")
-                if tick.get("depth")
-                else None,
+                bid_price=buys[0].get("price"),
+                ask_price=sells[0].get("price"),
             )
 
             # Callback for raw tick
@@ -185,14 +220,12 @@ class LiveTicker:
                 except Exception as e:
                     logger.error("tick_callback_failed", error=str(e))
 
-            # Add to buffer
-            self._candle_buffers[token].append(tick_data)
-
-            # Check if candle is complete
+            # Emit the old candle BEFORE inserting the first tick of the new
+            # interval. The first tick alone never completes a candle.
             candle_start = self._get_candle_start(timestamp)
             last_candle = self._last_candle_time.get(token)
 
-            if last_candle is None or candle_start > last_candle:
+            if last_candle is not None and candle_start > last_candle:
                 # Candle completed, aggregate and emit
                 candle = self._aggregate_candle(token)
                 if candle and self.on_candle:
@@ -200,10 +233,17 @@ class LiveTicker:
                         self.on_candle(candle)
                     except Exception as e:
                         logger.error("candle_callback_failed", error=str(e))
+            self._last_candle_time[token] = candle_start
+            self._candle_buffers[token].append(tick_data)
+        if self._last_tick and time.monotonic() - self._last_heartbeat >= 5:
+            write_heartbeat(True, max(self._last_tick.values()), sum(map(len, self._candle_buffers.values())))
+            self._last_heartbeat = time.monotonic()
 
     def _on_connect(self, ws, response) -> None:
         """Handle WebSocket connect."""
         logger.info("ticker_connected", tokens=len(self._tokens))
+        write_heartbeat(True, None)
+        self._last_volume.clear()
         ws.subscribe(self._tokens)
         ws.set_mode(ws.MODE_FULL, self._tokens)
         self._reconnect_attempts = 0
@@ -211,7 +251,9 @@ class LiveTicker:
     def _on_close(self, ws, code, reason) -> None:
         """Handle WebSocket close."""
         logger.warning("ticker_disconnected", code=code, reason=reason)
-        self._schedule_reconnect()
+        write_heartbeat(False, max(self._last_tick.values(), default=None))
+        # KiteTicker owns reconnect/backoff on its reactor thread. Creating an
+        # asyncio task here fails because this callback has no asyncio loop.
 
     def _on_error(self, ws, code, reason) -> None:
         """Handle WebSocket error."""
@@ -225,26 +267,6 @@ class LiveTicker:
         """Handle max reconnection attempts reached."""
         logger.error("ticker_max_reconnect_reached")
         self._running = False
-
-    def _schedule_reconnect(self) -> None:
-        """Schedule reconnection with backoff."""
-        if self._reconnect_attempts >= self._max_reconnect_attempts:
-            logger.error("max_reconnect_attempts_reached")
-            self._running = False
-            return
-
-        self._reconnect_attempts += 1
-        delay = min(2**self._reconnect_attempts, 60)
-        logger.info("scheduling_reconnect", attempt=self._reconnect_attempts, delay=delay)
-
-        # This would be called from the event loop
-        asyncio.create_task(self._reconnect_after(delay))
-
-    async def _reconnect_after(self, delay: float) -> None:
-        """Reconnect after delay."""
-        await asyncio.sleep(delay)
-        if self._running:
-            await self.start()
 
     def start(self) -> None:
         """Start the ticker."""
@@ -266,17 +288,14 @@ class LiveTicker:
         self._ticker.on_reconnect = self._on_reconnect
         self._ticker.on_noreconnect = self._on_noreconnect
 
-        # Run in background thread
-        import threading
-
-        self._thread = threading.Thread(target=self._ticker.connect, daemon=True)
-        self._thread.start()
+        self._ticker.connect(threaded=True)
 
         logger.info("ticker_started", symbols=self.symbols, interval=self.interval)
 
     def stop(self) -> None:
         """Stop the ticker."""
         self._running = False
+        write_heartbeat(False, max(self._last_tick.values(), default=None))
         if self._ticker:
             self._ticker.close()
         logger.info("ticker_stopped")
@@ -350,12 +369,13 @@ def main() -> None:
     if not symbols:
         raise SystemExit("The watchlist is empty. Add symbols to symbols.txt.")
 
-    ticker = LiveTicker(symbols=symbols, on_candle=create_default_candle_handler())
+    ticker = LiveTicker(symbols=symbols, interval=get_settings().storage.candle_interval,
+                        on_candle=create_default_candle_handler())
     ticker.start()
     try:
-        if ticker._thread is not None:
-            ticker._thread.join()
-    except KeyboardInterrupt:
+        while ticker._running:
+            time.sleep(0.5)
+    finally:
         ticker.stop()
 
 

@@ -152,33 +152,39 @@ def get_freshness_monitor(config: FreshnessConfig | None = None) -> FreshnessMon
 # Market hours utilities
 def in_market_hours(dt: datetime | None = None) -> bool:
     """Check if given time is within NSE market hours (9:15-15:30 IST).
-    
+
     Args:
-        dt: Datetime to check (defaults to now). Assumed to be UTC.
-        
+        dt: Datetime to check (defaults to now). May be timezone-aware or naive UTC.
+
     Returns:
-        True if within market hours.
+        True if within market hours on a weekday.
     """
+    from zoneinfo import ZoneInfo
+
+    IST = ZoneInfo("Asia/Kolkata")
+
     if dt is None:
         dt = datetime.now(UTC)
-    
-    # Convert to IST (UTC+5:30)
-    ist = dt.astimezone() if dt.tzinfo else dt
-    # Simple check: 9:15-15:30 IST
+
+    # Ensure timezone-aware before converting to IST
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+
+    ist = dt.astimezone(IST)
     hour = ist.hour
     minute = ist.minute
-    
+
     if hour < 9 or hour > 15:
         return False
     if hour == 9 and minute < 15:
         return False
     if hour == 15 and minute > 30:
         return False
-    
+
     # Check if weekday (Monday=0, Sunday=6)
     if ist.weekday() >= 5:  # Saturday/Sunday
         return False
-    
+
     return True
 
 
@@ -188,18 +194,5 @@ def ingest_heartbeat() -> dict | None:
     Returns:
         Dict with heartbeat info or None if not available.
     """
-    try:
-        from trading_agent.storage.db import get_database
-        
-        get_database()
-        # Get latest heartbeat from ingest_status table
-        # This is a simplified version - in production would query the actual table
-        return {
-            "connected": False,
-            "last_tick": None,
-            "heartbeat_age_sec": 9999,
-            "buffer_depth": 0,
-            "repairs_queued": 0,
-        }
-    except Exception:
-        return None
+    from trading_agent.ingest.heartbeat import read_heartbeat
+    return read_heartbeat()

@@ -11,6 +11,7 @@ from typing import Callable, Optional
 import pandas as pd
 
 from trading_agent.core.config import get_settings
+from trading_agent.core.exceptions import AuthenticationError, CircuitBreakerError
 from trading_agent.core.logging_config import get_logger
 from trading_agent.core.freshness import get_freshness_monitor, FreshnessStatus
 from trading_agent.ingest.instrument_lookup import get_instrument_lookup
@@ -54,6 +55,8 @@ class GapHealer:
         self._running = False
         self._task: asyncio.Task | None = None
         self._last_check: dict[str, datetime] = {}
+        self.errors: dict[str, str] = {}
+        self.skipped: list[str] = []
         self._gap_callbacks: list[Callable[[Gap], None]] = []
 
     def _get_interval_seconds(self) -> int:
@@ -134,20 +137,9 @@ class GapHealer:
             if last_candle.empty:
                 from_date = to_date - timedelta(days=30)  # Default 30 days
             else:
-                from_date = last_candle["timestamp"].iloc[-1] + timedelta(
-                    seconds=self._get_interval_seconds()
-                )
-
-            if self.interval in {"minute", "1minute"}:
-                available_start = to_date - timedelta(days=7)
-                if from_date < available_start:
-                    logger.warning(
-                        "minute_gap_outside_broker_retention",
-                        symbol=symbol,
-                        requested_from=from_date,
-                        available_from=available_start,
-                    )
-                    from_date = available_start
+                # Replay a day to replace partial/reconnected live bars and
+                # recent interior gaps, not just append after the final row.
+                from_date = last_candle["timestamp"].iloc[-1] - timedelta(days=1)
 
             if from_date >= to_date:
                 return 0
@@ -161,7 +153,12 @@ class GapHealer:
                 store=True,
             )
             return len(df)
+        except (AuthenticationError, CircuitBreakerError):
+            # Stop a batch on account-wide failures instead of reporting zero
+            # candles for every remaining symbol as if they were up to date.
+            raise
         except Exception as e:
+            self.errors[symbol] = str(e)
             logger.error("gap_heal_failed", symbol=symbol, error=str(e))
             return 0
 
@@ -186,8 +183,19 @@ class GapHealer:
     async def heal_to_current(self) -> dict[str, int]:
         """Fetch each symbol from its latest stored candle through now."""
         to_date = datetime.now(timezone.utc)
+        self.errors = {}
+        self.skipped = []
         results: dict[str, int] = {}
         for symbol in self.symbols:
+            if self.instruments.get_token(symbol) is None:
+                self.skipped.append(symbol)
+                logger.warning(
+                    "gap_heal_symbol_skipped",
+                    symbol=symbol,
+                    reason="not_in_current_nse_equity_instruments",
+                )
+                results[symbol] = 0
+                continue
             results[symbol] = await self._heal_symbol(symbol, to_date)
         return results
 

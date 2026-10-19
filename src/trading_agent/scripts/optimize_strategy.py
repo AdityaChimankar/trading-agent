@@ -41,7 +41,6 @@ from trading_agent.research.backtest import run_multi_backtest, get_all_watchlis
 from trading_agent.research.walk_forward_optimizer import run_walk_forward_multi, PARAM_GRID, TRAIN_CANDLES, TEST_CANDLES
 from trading_agent.storage.db import get_connection, get_watchlist_symbols
 from trading_agent.core.quant_indicators import load_candles, compute_atr
-from trading_agent.core.config import get_config
 
 
 def detect_optimal_workers(reserve_cores: int = 2, reserve_ram_gb: float = 4.0) -> int:

@@ -33,6 +33,20 @@ def test_circuit_breaker_opens_after_threshold():
     assert cb.state == CircuitState.OPEN
 
 
+def test_success_resets_consecutive_failure_count():
+    cb = CircuitBreaker("consecutive", CircuitBreakerConfig(failure_threshold=2))
+
+    with pytest.raises(RuntimeError):
+        cb.call(lambda: (_ for _ in ()).throw(RuntimeError("first")))
+
+    assert cb.call(lambda: "recovered") == "recovered"
+
+    with pytest.raises(RuntimeError):
+        cb.call(lambda: (_ for _ in ()).throw(RuntimeError("second")))
+
+    assert cb.state == CircuitState.CLOSED
+
+
 def test_circuit_breaker_blocks_calls_when_open():
     """Test circuit breaker blocks calls when open."""
     cb = CircuitBreaker("test", CircuitBreakerConfig(failure_threshold=1))

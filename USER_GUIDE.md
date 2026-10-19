@@ -4,11 +4,13 @@ This guide covers a first local run, Docker operation, the daily Kite workflow, 
 
 > Safety: the application records paper positions only. It has no real-order execution path.
 
+Read [READINESS.md](READINESS.md) before unattended use. The current console is intentionally paper-only; production readiness, security, accounting, and live-session validation still have open gates.
+
 ## 1. Choose how to run it
 
 | Mode | Best for | Requirements |
 |---|---|---|
-| Local Python | development, research, debugging | Python 3.11/3.12; Node 20+ for UI |
+| Local Python | development, research, debugging | Python 3.11/3.12; Node 22 for UI |
 | Docker Compose | repeatable API/UI and live services | Docker Engine/Desktop with Compose v2 |
 
 Both modes use SQLite at `data/trading.db`, Parquet below `data/parquet`, models below `models`, and the token at `data/.access_token`.
@@ -175,6 +177,16 @@ trading-agent-api
 
 The scheduler uses the Asia/Kolkata timezone. It stores rule, ML, LLM, and shadow outputs independently so the paths can be compared. With `LLM_PROVIDER=mock`, the LLM path records mock HOLD decisions without a network charge.
 
+Set `STORAGE_CANDLE_INTERVAL` consistently for downloads, ticker, scheduler, monitor, and dashboard selection. Its default is `5minute`. Scheduled decision passes skip stale, incomplete, future-dated, and off-session inputs. The weekday/session guard does not know exchange holidays or special sessions.
+
+After downtime, use a bounded replay first:
+
+```bash
+trading-agent heal-gaps --interval 5minute --limit 100
+```
+
+Omit `--limit` only after reviewing the result. This replays a one-day overlap and catches up the trailing gap, not every older interior gap. Read the error/skip summary; an exit code of 1 requires investigation. Run one downloader at a time.
+
 ## 9. Docker Compose
 
 Prepare configuration first:
@@ -190,7 +202,7 @@ The default stack contains:
 | Service | Purpose | Port/profile |
 |---|---|---|
 | `api` | FastAPI backend | 8000 |
-| `frontend` | Vite dashboard | 5173 |
+| `frontend` | Compiled dashboard served by Nginx | loopback 5173 |
 | `tools` | one-shot CLI container | `tools` profile / `docker compose run` |
 | `ticker` | live Kite stream | `live` profile |
 | `scheduler` | scheduled pipeline | `live` profile |
@@ -202,6 +214,7 @@ Common commands:
 docker compose run --rm tools trading-agent --help
 docker compose run --rm tools trading-agent login
 docker compose run --rm tools trading-agent ingest RELIANCE TCS --days 100
+docker compose run --rm tools trading-agent heal-gaps --interval 5minute --limit 100
 docker compose run --rm tools trading-agent backtest RELIANCE --start 2025-01-01 --end 2025-06-30
 
 # Enable long-running broker services only when ready
@@ -222,6 +235,7 @@ docker compose down
 | `trading-agent login` | Refresh Kite token using the automated flow |
 | `trading-agent ingest [SYMBOL...]` | Fetch recent historical candles |
 | `trading-agent backfill [SYMBOL...]` | Fetch a longer history |
+| `trading-agent heal-gaps [SYMBOL...] --interval 5minute --limit 100` | Bounded catch-up with overlap, error summary, and failure exit status |
 | `trading-agent storage-stats` | Summarize Parquet data |
 | `trading-agent compact SYMBOL` | Compact a symbol's Parquet data |
 | `trading-agent diagnose [SYMBOL...]` | Compare signal behavior with baselines |
@@ -247,6 +261,12 @@ alembic upgrade head
 ```
 
 If an initial migration has already been applied elsewhere, create a new revision for schema changes rather than rewriting history.
+
+For a migration-managed fresh database, run Alembic before the API creates tables. Existing auto-created databases need backup and schema comparison before migration adoption; do not stamp an unverified schema. For Docker use `docker compose run --rm tools alembic upgrade head` only under that lifecycle.
+
+Paper book balances now derive from persistent `open_positions` rows (open and closed), not a separate in-memory wallet. They exclude fees, slippage and unrealized P&L. Keep `PAPER_INITIAL_CAPITAL` fixed for an existing book. `PAPER_ENTRIES_ENABLED=false`, followed by an API restart, blocks new entries but allows exits. Exposure/risk limits are documented in the README. Advisory monitoring does not automatically execute stop orders.
+
+Optional `API_AUTH_TOKEN` protects reads and writes. Enter it in the dashboard access-token form; it lasts for the current page session only. The default stack is localhost-only. Do not expose it publicly without TLS, proper identity management, and review.
 
 ## 12. Tests and developer checks
 
@@ -290,6 +310,21 @@ Confirm `DB_URL=sqlite:///data/trading.db`, the `data` directory is writable, an
 - Use `python manual_login.py` when browser automation changes or is blocked.
 - Generate a new request token; request tokens expire quickly.
 
+For developers investigating changed login-form selectors, the optional manual
+diagnostic lives in `src/trading_agent/scripts/inspect_kite_login.py`:
+
+```bash
+python -m trading_agent.scripts.inspect_kite_login --help
+# Contacts Kite and lists input metadata; does not submit credentials by default.
+python -m trading_agent.scripts.inspect_kite_login
+# Optional: submit configured user ID/password to inspect the next form; no TOTP.
+python -m trading_agent.scripts.inspect_kite_login --submit-credentials
+```
+
+Add `--headed` only when you want a visible browser. This is not a daily startup
+step or an automated test. It does not save a session token, print input values,
+or confirm authentication. For normal authentication use `trading-agent login`.
+
 ### Docker service exits
 
 ```bash
@@ -304,9 +339,9 @@ If `ticker` exits, refresh the Kite token and restart only that service.
 
 Stop duplicate local/Docker schedulers or tickers. Keep the database on a local disk, not a network share. PostgreSQL is not yet a drop-in replacement because maintenance and health modules still use SQLite-specific queries.
 
-### Frontend build warning about a large chart chunk
+### Legacy dashboard screens
 
-The build succeeds; Plotly is the large lazy-loaded chart dependency. It is a performance optimization opportunity, not a startup failure.
+The active console uses `/api/v1` contracts. Old chart/research screens remain in source but are not mounted because their API contracts need migration. Their presence is not evidence those features work in the deployed dashboard.
 
 ## 14. Safe shutdown
 
@@ -316,4 +351,4 @@ Use `Ctrl+C` for local processes. For Docker:
 docker compose down
 ```
 
-Avoid `docker compose down -v` unless you intentionally want to remove Docker-managed volumes such as frontend dependencies. Project data is stored in bind-mounted `./data` and `./models`; back those up before manual deletion.
+Project data is stored in bind-mounted `./data` and `./models`; back those up before manual deletion. Routine upgrades need a rebuild and `up -d`, not image pruning or data removal. See the README operating schedule for when each command is needed.

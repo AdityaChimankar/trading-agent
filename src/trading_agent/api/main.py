@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from secrets import compare_digest
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +64,15 @@ def create_app() -> FastAPI:
     )
 
     # CORS
+    @app.middleware("http")
+    async def authenticate(request, call_next):
+        token = settings.api.auth_token
+        if token and request.method != "OPTIONS" and request.url.path not in {"/api/v1/health", "/api/v1/ready"}:
+            supplied = request.headers.get("authorization", "")
+            if not compare_digest(supplied.encode(), f"Bearer {token}".encode()):
+                return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+        return await call_next(request)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.api.cors_origins,

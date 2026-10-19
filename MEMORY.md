@@ -2,6 +2,10 @@
 
 This is a concise historical log. Current operating instructions live in [README.md](README.md) and [USER_GUIDE.md](USER_GUIDE.md); binding decisions live in [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## 2026-10-19: Paper operating-path hardening
+
+The follow-up audit found destructive partition overwrites, incorrect live volume/bucket handling, disconnected wallet/monitor data sources, dummy portfolio sizing, and incompatible frontend endpoints. The operating path now uses immutable Parquet batches, exchange-aware timestamps, persisted paper accounting, serialized entry caps, and a versioned console. Docker serves a compiled UI. Tests and unresolved institutional requirements are recorded in [READINESS.md](READINESS.md). No broker-order execution was added; live-session certification remains outstanding.
+
 ## 2026-10-19: End-to-end contract audit
 
 Findings:

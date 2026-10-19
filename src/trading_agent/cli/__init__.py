@@ -90,9 +90,34 @@ def login():
     typer.echo("Authenticating with Kite Connect...")
     try:
         token = ensure_valid_token()
-        typer.echo(f"Success! Token: {token[:20]}...")
+        typer.echo("Success! Access token saved.")
     except Exception as e:
         typer.echo(f"Failed: {e}")
+        raise typer.Exit(1)
+
+
+@app.command("heal-gaps")
+def heal_gaps(
+    symbols: list[str] = typer.Argument(None),
+    interval: str = typer.Option("minute"),
+    limit: int | None = typer.Option(None, min=1, help="Maximum symbols to check"),
+):
+    """Catch up trailing gaps; return a failing exit status if any symbol fails."""
+    import json
+    from trading_agent.ingest.gap_healer import GapHealer
+
+    selected = list(dict.fromkeys(_resolve_symbols(symbols)))
+    if limit is not None:
+        selected = selected[:limit]
+    healer = GapHealer(selected, interval)
+    try:
+        results = asyncio.run(healer.heal_to_current())
+    except Exception as exc:
+        typer.echo(f"Catch-up stopped: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps({"checked": len(results), "rows_written": sum(results.values()),
+                           "errors": healer.errors, "skipped": healer.skipped}))
+    if healer.errors:
         raise typer.Exit(1)
 
 

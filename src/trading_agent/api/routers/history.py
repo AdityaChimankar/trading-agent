@@ -4,6 +4,7 @@ from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
+import pandas as pd
 
 from trading_agent.storage.parquet_store import get_parquet_store
 
@@ -28,7 +29,7 @@ class HistoryResponse(BaseModel):
 
 
 @router.get("/{symbol}", response_model=HistoryResponse)
-async def get_history(
+def get_history(
     symbol: str,
     interval: str = Query("5minute", description="Candle interval"),
     start: datetime | None = Query(None, description="Start timestamp"),
@@ -62,7 +63,7 @@ async def get_history(
             low=row["low"],
             close=row["close"],
             volume=int(row["volume"]),
-            oi=int(row["oi"]) if row.get("oi") else None,
+            oi=int(row["oi"]) if pd.notna(row.get("oi")) else None,
         )
         for _, row in df.iterrows()
     ]
@@ -76,7 +77,7 @@ async def get_history(
 
 
 @router.get("/{symbol}/latest")
-async def get_latest_candle(
+def get_latest_candle(
     symbol: str,
     interval: str = Query("5minute"),
     n: int = Query(1, ge=1, le=100),

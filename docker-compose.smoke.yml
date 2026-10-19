@@ -1,0 +1,44 @@
+# Isolated validation only: no .env, host data mounts, host ports, or broker egress.
+services:
+  api:
+    image: trading-agent-app:latest
+    command: trading-agent-api
+    environment:
+      ENVIRONMENT: testing
+      API_HOST: 0.0.0.0
+      API_AUTH_TOKEN: smoke-test-only
+      DATA_DIR: /tmp/smoke-data
+      CACHE_DIR: /tmp/cache
+      ML_MODEL_DIR: /tmp/models
+      STORAGE_PARQUET_ROOT: /tmp/smoke-data/parquet
+      DB_URL: sqlite:////tmp/smoke-data/trading.db
+      PAPER_INITIAL_CAPITAL: "1000000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/api/v1/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  frontend:
+    image: trading-agent-frontend:latest
+    depends_on:
+      api:
+        condition: service_healthy
+  smoke:
+    image: trading-agent-app:latest
+    command: python /checks/docker_smoke.py
+    environment:
+      DATA_DIR: /tmp/checks/data
+      CACHE_DIR: /tmp/checks/cache
+      ML_MODEL_DIR: /tmp/checks/models
+      STORAGE_PARQUET_ROOT: /tmp/checks/parquet
+      DB_URL: sqlite:////tmp/checks/data/verification.db
+    volumes:
+      - ./tests/docker_smoke.py:/checks/docker_smoke.py:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+networks:
+  default:
+    internal: true

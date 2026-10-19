@@ -17,6 +17,9 @@ env/
 
 # Testing
 .pytest_cache/
+.test-tmp*/
+coverage.xml
+.audit-tests/
 .coverage
 htmlcov/
 .tox/
@@ -30,6 +33,7 @@ build/
 
 # Data files
 data/parquet/
+data/ticker-heartbeat.json
 *.db
 *.sqlite
 *.sqlite3

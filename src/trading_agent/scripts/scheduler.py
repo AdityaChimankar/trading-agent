@@ -25,12 +25,15 @@ import functools
 import json
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+
+# Explicit trigger objects do not inherit the scheduler timezone.
+CronTrigger = functools.partial(CronTrigger, timezone="Asia/Kolkata")
 
 from trading_agent.analysis.digest import DigestGenerator
 from trading_agent.analysis.sentiment import get_sentiment_analyzer
@@ -120,22 +123,52 @@ def generate_digest():
 
 async def run_decision_cycle():
     """Run rule-based decision cycle for all symbols."""
-    await decide_symbols(get_watchlist_symbols())
+    symbols, interval = _fresh_decision_inputs()
+    if symbols:
+        await decide_symbols(symbols, interval=interval)
 
 
 async def run_llm_decision_cycle():
     """Run LLM decision cycle for all symbols."""
-    await decide_symbols_llm(get_watchlist_symbols())
+    symbols, interval = _fresh_decision_inputs()
+    if symbols:
+        await decide_symbols_llm(symbols, interval=interval)
 
 
 async def run_ml_decision_cycle():
     """Run ML decision cycle for all symbols."""
-    await decide_symbols_ml(get_watchlist_symbols())
+    symbols, interval = _fresh_decision_inputs()
+    if symbols:
+        await decide_symbols_ml(symbols, interval=interval)
 
 
 async def run_shadow_cycle():
     """Run shadow testing cycle."""
-    await run_shadow_symbols(get_watchlist_symbols())
+    symbols, interval = _fresh_decision_inputs()
+    if symbols:
+        await run_shadow_symbols(symbols, interval=interval)
+
+
+def _fresh_decision_inputs():
+    """Fail closed for scheduled decisions outside session or on old/future bars."""
+    from trading_agent.core.config import get_settings
+    from trading_agent.storage.parquet_store import get_parquet_store
+    interval = get_settings().storage.candle_interval
+    if not in_market_hours():
+        return [], interval
+    seconds = {"minute": 60, "1minute": 60, "5minute": 300, "15minute": 900}[interval]
+    now = datetime.now(UTC)
+    symbols = []
+    for symbol in get_watchlist_symbols():
+        frame = get_parquet_store().read_latest(symbol, interval, n=1)
+        if frame.empty:
+            continue
+        age = (now - frame["timestamp"].iloc[-1]).total_seconds()
+        if seconds <= age <= 2 * seconds + 60:
+            symbols.append(symbol)
+        else:
+            logger.warning("scheduled_symbol_withheld", symbol=symbol, candle_age_seconds=age)
+    return symbols, interval
 
 
 async def run_monitor_cycle():
@@ -176,15 +209,21 @@ def monitor_cycle():
 
 def heal_if_feed_down():
     """Check if live feed is down and heal from historical endpoint."""
-    logger.info("heal_if_feed_down: checking feed health")
-    # This would check the live ticker heartbeat and repair gaps
-    # Implementation depends on the gap_healer module
+    from trading_agent.core.freshness import ingest_heartbeat
+    heartbeat = ingest_heartbeat()
+    if in_market_hours() and (not heartbeat or not heartbeat.get("connected")):
+        end_of_session_heal()
 
 
 def end_of_session_heal():
     """End of session gap healing."""
-    logger.info("end_of_session_heal: repairing any gaps")
-    # This would run the gap healer at end of session
+    import asyncio
+    from trading_agent.core.config import get_settings
+    from trading_agent.ingest.gap_healer import GapHealer
+    healer = GapHealer(get_watchlist_symbols(), get_settings().storage.candle_interval)
+    asyncio.run(healer.heal_to_current())
+    if healer.errors:
+        raise RuntimeError(f"Historical repair failed for {len(healer.errors)} symbols")
 
 
 # Create scheduler AFTER all functions are defined

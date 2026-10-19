@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: Validation and image publishing
 
 on:
   push:
@@ -8,7 +8,6 @@ on:
 
 env:
   PYTHON_VERSION: "3.11"
-  POETRY_VERSION: "1.8"
 
 jobs:
   static-checks:
@@ -63,6 +62,12 @@ jobs:
           DB_URL: sqlite:///data/test.db
           ENVIRONMENT: testing
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
       - name: Build frontend
         working-directory: frontend
         run: |
@@ -79,6 +84,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [static-checks, test]
     if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -102,7 +110,33 @@ jobs:
             type=ref,event=pr
             type=sha
 
-      - name: Build and push
+      - name: Build backend for integration test
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          push: false
+          tags: trading-agent-app:latest
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Validate frontend container build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: trading-agent-frontend:latest
+
+      - name: Browser and container integration check
+        run: docker compose -f docker-compose.smoke.yml -p trading-agent-audit up --abort-on-container-exit --exit-code-from smoke
+
+      - name: Remove isolated test stack
+        if: always()
+        run: docker compose -f docker-compose.smoke.yml -p trading-agent-audit down
+
+      - name: Publish validated backend image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -110,28 +144,3 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  deploy-staging:
-    name: Deploy to Staging
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    environment: staging
-    steps:
-      - name: Deploy to staging
-        run: |
-          echo "Deploy to staging environment"
-          # Add your staging deployment commands here
-
-  deploy-production:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    environment: production
-    steps:
-      - name: Deploy to production
-        run: |
-          echo "Deploy to production environment"
-          # Add your production deployment commands here

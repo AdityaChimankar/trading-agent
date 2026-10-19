@@ -8,6 +8,8 @@ Trading Agent is a local-first NSE intraday research and paper-trading workbench
 
 It is not an order execution system and must never imply that simulated fills or balances reflect a broker account.
 
+Institutional readiness is a roadmap, not a current product claim. The tested operating boundary and release gates are maintained in [READINESS.md](READINESS.md). The deployed UI currently supports stored-candle inspection, pipeline status, and persistent manual paper positions; legacy research panels require contract migration before activation.
+
 ## Users
 
 - quantitative researchers testing intraday hypotheses;

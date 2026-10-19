@@ -152,7 +152,7 @@ class AutoLogin:
                     logger.info("found_totp_field")
 
                     totp_code = self.generate_totp()
-                    logger.info("generated_totp", code=totp_code[:2] + "****")
+                    logger.info("generated_totp")
                     await totp_field.fill(totp_code)
                 except Exception:
                     inputs = await page.locator("input").evaluate_all(
@@ -164,12 +164,9 @@ class AutoLogin:
                             autocomplete: element.autocomplete
                         }))"""
                     )
-                    body_text = await page.locator("body").inner_text()
                     logger.warning(
                         "totp_field_not_found",
-                        url=page.url,
                         inputs=inputs,
-                        page_text_preview=body_text[:1000],
                     )
                     raise AuthenticationError("Could not find TOTP input field")
 
@@ -190,11 +187,8 @@ class AutoLogin:
                     await page.wait_for_timeout(100)
 
                 if not redirect_url:
-                    body_text = await page.locator("body").inner_text()
                     logger.warning(
                         "kite_redirect_not_received",
-                        url=page.url,
-                        page_text_preview=body_text[:1000],
                     )
                     raise AuthenticationError("Kite login did not return a request token")
 
@@ -203,11 +197,11 @@ class AutoLogin:
                 match = re.search(r"request_token=([^&]+)", current_url)
                 if not match:
                     raise AuthenticationError(
-                        f"request_token not found in redirect URL: {current_url}"
+                        "request_token not found in redirect URL"
                     )
 
                 request_token = match.group(1)
-                logger.info("got_request_token", token=request_token[:10] + "...")
+                logger.info("got_request_token")
 
             finally:
                 await browser.close()
@@ -259,7 +253,7 @@ if __name__ == "__main__":
         try:
             # Use non-headless mode by default for reliability
             token = await auto_login.login_with_playwright(headless=False)
-            print(f"Success! Access token: {token[:20]}...")
+            print("Success! Access token saved.")
         except Exception as e:
             print(f"Auto-login failed: {e}")
             print("Falling back to manual login...")

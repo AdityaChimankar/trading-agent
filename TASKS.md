@@ -14,20 +14,22 @@ Last reviewed: 2026-10-19
 | ML maintenance | incomplete retraining placeholder replaced with current registry/storage APIs |
 | Docker repair | removed unused PostgreSQL/Redis, added profiles and working frontend proxy |
 | Documentation | local/Docker setup, architecture, design, and operational docs refreshed |
-| Verification | 156 backend tests passed; frontend production build passed |
+| Verification | Current evidence and release gates are recorded in [READINESS.md](READINESS.md) |
+| Data and paper integration | Atomic Parquet replay, live tick normalization, persisted wallet, paper entry caps, canonical monitor candle source |
+| Operating console | Versioned API integration; static Docker frontend; unsupported scheduling fails explicitly |
 
 ## Current priorities
 
 | Priority | Task | Done when |
 |---|---|---|
-| P0 | Add API fresh-database smoke tests | health, readiness, position create/list/close pass in isolation |
+| P0 | Expand critical-path failure tests | fresh-database API/migration tests exist; add sustained concurrency and recovery scenarios |
 | P0 | Add backtest regression fixtures | a deterministic fixture proves no future-candle reads and stop/target handling |
 | P0 | Reconcile legacy schema consumers | every queried table is created through one documented schema path |
-| P1 | Establish a passing lint baseline | selected Ruff rules pass, then expand rule groups incrementally |
+| P1 | Expand passing lint baseline | current selected Ruff rules pass; expand rule groups incrementally |
 | P1 | Establish useful typing baseline | package-local imports resolve and high-risk modules type-check |
 | P1 | Validate live profile | ticker/scheduler run a full market session with recorded heartbeat/errors |
 | P1 | Validate ML retraining | drift report and scheduled training tested on representative stored data |
-| P2 | Reduce Plotly bundle size | chart dependency is split without feature regression |
+| P2 | Migrate legacy research panels | versioned API contracts, browser tests and chart-loading budgets before remounting |
 | P2 | Decide database roadmap | either complete PostgreSQL migration or remove dormant generic claims |
 
 ## Research backlog
@@ -49,7 +51,7 @@ Last reviewed: 2026-10-19
 | Auto-login depends on broker page markup | use the manual browser flow when it changes |
 | Default symbol file can be large | start with explicit symbols to control quota/runtime |
 | LLM integration is optional | default mock prevents unexpected calls/costs |
-| Plotly build chunk is large | build succeeds; performance work remains |
+| Legacy research panels use incompatible API contracts | only the operating console is mounted; migrate and test the remaining panels |
 | Historical research numbers are staleable | rerun experiments before making promotion decisions |
 
 ## Release checklist
@@ -60,8 +62,8 @@ Last reviewed: 2026-10-19
 - [x] Docker Compose configuration resolves.
 - [x] README and user guide match implemented commands.
 - [x] Secrets remain ignored and undocumented.
-- [ ] Docker image build verified on a machine with daemon/network access.
-- [ ] Fresh-container API health verified.
+- [x] Docker backend and static-frontend image builds verified.
+- [x] Isolated fresh-container API, auth, browser paper lifecycle and migrations verified.
 - [ ] Live Kite session verified with current credentials.
 - [ ] Lint/type baselines converted into passing required checks.
 

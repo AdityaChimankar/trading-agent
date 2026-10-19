@@ -17,7 +17,7 @@ COPY src/ ./src/
 RUN pip install --no-cache-dir --prefix=/install .
 
 # Stage 2: Playwright browser installation
-FROM python:3.11-slim AS playwright
+FROM builder AS playwright
 
 # Playwright system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,9 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-RUN pip install --no-cache-dir playwright && \
-    playwright install chromium && \
-    playwright install-deps chromium
+# Use exactly the Playwright package installed for the application.
+RUN PYTHONPATH=/install/lib/python3.11/site-packages python -m playwright install chromium
 
 # Stage 3: Final runtime image
 FROM python:3.11-slim AS runtime
@@ -60,6 +59,12 @@ COPY --from=playwright /opt/playwright /opt/playwright
 COPY --chown=trader:trader src/ ./src/
 COPY --chown=trader:trader pyproject.toml README.md ./
 COPY --chown=trader:trader symbols*.txt ./
+COPY --chown=trader:trader alembic.ini ./
+COPY --chown=trader:trader migrations/ ./migrations/
+
+# Default standalone runs also need writable runtime directories (no bind mounts).
+RUN mkdir -p /app/data /app/models /app/.cache && \
+    chown trader:trader /app/data /app/models /app/.cache
 
 # Environment
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \

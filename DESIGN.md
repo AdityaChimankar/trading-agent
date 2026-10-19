@@ -78,7 +78,7 @@ FastAPI application with routers for health, symbols/history, opportunities, pap
 
 ### `frontend`
 
-React + TypeScript + Vite. Browser calls use same-origin `/api` paths. The local Vite proxy targets `127.0.0.1:8000`; Docker injects `VITE_PROXY_TARGET=http://api:8000`.
+React + TypeScript, built with Vite. `OperatingConsole.tsx` consumes same-origin `/api/v1` contracts. Local development uses a Vite proxy to `127.0.0.1:8000`; Docker serves static assets with unprivileged Nginx and proxies to `api:8000`. Legacy screens remain unmounted until their contracts are migrated.
 
 ### `scripts`
 
@@ -109,7 +109,7 @@ trading-agent-scheduler -> candidates/decisions/monitoring -> SQLite
 ### API/dashboard flow
 
 ```text
-browser -> Vite :5173 -> /api proxy -> FastAPI :8000
+browser -> Vite (local) / Nginx (Docker) -> /api/v1 proxy -> FastAPI :8000
 FastAPI -> SQLite repositories and/or Parquet reads -> JSON
 ```
 
@@ -138,17 +138,21 @@ Parquet range -> chronological timestamps -> historical slice
 | Table | Purpose |
 |---|---|
 | `watchlist` | active symbols and instrument metadata |
-| `candles` | relational candle access where needed |
+| `candles` | legacy relational candles; monitor prefers canonical Parquet |
 | `signals` | independent strategy-tagged decisions |
-| `open_positions` | paper positions and risk fields |
+| `open_positions` | canonical open AND closed paper positions, risk fields, and gross realized PnL |
 | `position_alerts` | monitor findings |
-| `trades` | completed paper trades |
+| `trades` | legacy/research trade records; not the manual console's accounting source |
 | `opportunities` | ranked candidates |
 | `ml_models` | model registry metadata |
-| `wallet` | paper account snapshots |
+| `wallet` | legacy/research snapshots; API derives current book from position records |
 | `system_events` | operational events |
 
 SQLAlchemy/Alembic names must remain aligned. API compatibility properties can expose older names without changing physical columns.
+
+Parquet writes publish immutable batches under a symbol/interval OS lock. Reads normalize timestamps to UTC, deduplicate corrections, then filter. Compaction publishes replacement data before deleting its captured inputs. Catch-up replays a one-day overlap. These are single-host contracts, not a distributed database design.
+
+The API serializes paper entry checks with SQLite `BEGIN IMMEDIATE`. Gross exposure, stop risk, position count, duplicate symbols, bracket direction, and the entry switch are checked before insert. Conditional close updates prevent duplicate close writes. Initial capital remains configuration, not a fully audited cash ledger. See [READINESS.md](READINESS.md) for the remaining financial/security/reliability gates.
 
 ## Startup and shutdown
 

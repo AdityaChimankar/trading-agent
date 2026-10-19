@@ -215,12 +215,18 @@ def add_pattern_features(df: pd.DataFrame, config: FeatureConfig) -> pd.DataFram
 
 
 def add_lag_features(df: pd.DataFrame, columns: list[str], periods: list[int]) -> pd.DataFrame:
-    """Add lagged features."""
-    df = df.copy()
+    """Add lagged features.
+
+    Uses pd.concat instead of iterative column insertion to avoid
+    the PerformanceWarning about highly fragmented DataFrames.
+    """
+    lag_frames = []
     for col in columns:
         if col in df.columns:
             for p in periods:
-                df[f"{col}_lag{p}"] = df[col].shift(p)
+                lag_frames.append(df[col].shift(p).rename(f"{col}_lag{p}"))
+    if lag_frames:
+        return pd.concat([df] + lag_frames, axis=1)
     return df
 
 

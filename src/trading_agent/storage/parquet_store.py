@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
+from uuid import uuid4
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
+from filelock import FileLock
 import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
@@ -15,6 +19,18 @@ from trading_agent.core.config import get_settings
 from trading_agent.core.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _parse_utc_timestamps(values: pd.Series) -> pd.Series:
+    """Parse timestamps written by current and legacy Parquet writers.
+
+    Older candle files can contain ISO-8601 strings with a mixture of ``T`` or
+    space separators and optional fractional seconds. Pandas 2 uses a strict
+    format inferred from the first value unless ``format="mixed"`` is set.
+    """
+    if pd.api.types.is_datetime64_any_dtype(values.dtype):
+        return pd.to_datetime(values, utc=True)
+    return pd.to_datetime(values, utc=True, format="mixed")
 
 
 class ParquetStore:
@@ -28,11 +44,57 @@ class ParquetStore:
 
     def _symbol_path(self, symbol: str) -> Path:
         """Get path for a symbol's partitioned data."""
+        self._validate_key(symbol)
         return self.root_path / "candles" / f"symbol={symbol}"
 
     def _interval_path(self, symbol: str, interval: str) -> Path:
         """Get path for a symbol+interval."""
-        return self.root_path / "candles" / f"symbol={symbol}" / f"interval={interval}"
+        self._validate_key(interval)
+        return self._symbol_path(symbol) / f"interval={interval}"
+
+    @staticmethod
+    def _validate_key(value: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9&_.-]{1,64}", value) or ".." in value:
+            raise ValueError("Invalid candle storage key")
+
+    def _lock(self, symbol: str, interval: str) -> FileLock:
+        self._interval_path(symbol, interval)
+        locks = self.root_path / ".locks"
+        locks.mkdir(parents=True, exist_ok=True)
+        return FileLock(str(locks / f"{symbol}_{interval}.lock"), timeout=30)
+
+    def _read_files(self, files: list[Path]) -> pd.DataFrame:
+        """Read legacy string and Arrow timestamp schemas independently.
+
+        Later committed files win on duplicate candle keys. Filtering must
+        happen after deduplication so an obsolete candle cannot reappear.
+        """
+        frames = []
+        for file in sorted(files, key=lambda p: (p.stat().st_mtime_ns, p.name)):
+            frame = pq.ParquetFile(file).read().to_pandas()
+            frame["timestamp"] = _parse_utc_timestamps(frame["timestamp"])
+            frames.append(frame)
+        if not frames:
+            return pd.DataFrame()
+        return (pd.concat(frames, ignore_index=True)
+                .drop_duplicates("timestamp", keep="last")
+                .sort_values("timestamp").reset_index(drop=True))
+
+    def _commit_frame(self, frame: pd.DataFrame, directory: Path) -> Path:
+        """Publish a complete immutable file; interrupted writes stay invisible."""
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / f"batch-{uuid4().hex}.parquet"
+        temporary = destination.with_suffix(".tmp")
+        try:
+            table = pa.Table.from_pandas(frame, preserve_index=False)
+            with temporary.open("wb") as handle:
+                pq.write_table(table, handle, compression=self.compression)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return destination
 
     def write_candles(
         self,
@@ -66,15 +128,26 @@ class ParquetStore:
         df["symbol"] = symbol
         df["interval"] = interval
 
-        # Ensure timestamp is timezone-aware UTC
-        if df["timestamp"].dt.tz is None:
-            df["timestamp"] = df["timestamp"].dt.tz_localize(UTC)
-        else:
-            df["timestamp"] = df["timestamp"].dt.tz_convert(UTC)
+        df["timestamp"] = _parse_utc_timestamps(df["timestamp"])
+        if df["timestamp"].isna().any():
+            raise ValueError("Candle timestamps cannot be missing")
+        prices = ["open", "high", "low", "close"]
+        for col in prices + ["volume"]:
+            df[col] = pd.to_numeric(df[col], errors="raise")
+        if not np.isfinite(df[prices + ["volume"]].to_numpy()).all():
+            raise ValueError("Candle values must be finite")
+        if (df[prices] <= 0).any().any() or (df["volume"] < 0).any():
+            raise ValueError("Candle prices must be positive and volume nonnegative")
+        if ((df["high"] < df[prices].max(axis=1)) |
+                (df["low"] > df[prices].min(axis=1))).any():
+            raise ValueError("Candle OHLC bounds are inconsistent")
+        df = df.drop_duplicates("timestamp", keep="last").sort_values("timestamp")
 
         # Add partition columns
         if partition_by is None:
             partition_by = ["year", "month"]
+        if len(set(partition_by)) != len(partition_by) or set(partition_by) - {"year", "month", "day"}:
+            raise ValueError("Partitions must be unique year/month/day fields")
         for col in partition_by:
             if col == "year":
                 df[col] = df["timestamp"].dt.year
@@ -83,21 +156,13 @@ class ParquetStore:
             elif col == "day":
                 df[col] = df["timestamp"].dt.day
 
-        # Convert to Arrow table
-        table = pa.Table.from_pandas(df, preserve_index=False)
-
-        # Write partitioned dataset
         path = self._interval_path(symbol, interval)
-        path.mkdir(parents=True, exist_ok=True)
-
-        pq.write_to_dataset(
-            table,
-            root_path=str(path),
-            partition_cols=partition_by,
-            compression=self.compression,
-            existing_data_behavior="overwrite_or_ignore",
-            basename_template=f"{symbol}_{interval}_part-{{i}}.parquet",
-        )
+        with self._lock(symbol, interval):
+            groups = df.groupby(partition_by, sort=True) if partition_by else [((), df)]
+            for keys, group in groups:
+                keys = keys if isinstance(keys, tuple) else (keys,)
+                directory = path.joinpath(*(f"{col}={value}" for col, value in zip(partition_by, keys)))
+                self._commit_frame(group, directory)
 
         logger.info("parquet_write_complete", symbol=symbol, interval=interval, rows=len(df))
         return len(df)
@@ -128,47 +193,22 @@ class ParquetStore:
         if not path.exists():
             return pd.DataFrame()
 
-        # Build filters as pyarrow expressions
-        # Note: timestamps are stored as strings in ISO format, so we need string comparison
-        import pyarrow.compute as pc
-        ds_filter = None
-        
-        # Convert datetime to ISO string for comparison
-        if start:
-            start_str = start.isoformat()
-            ds_filter = pc.field("timestamp") >= start_str
-        if end:
-            end_str = end.isoformat()
-            end_filter = pc.field("timestamp") <= end_str
-            ds_filter = ds_filter & end_filter if ds_filter is not None else end_filter
-        if filters:
-            for f in filters:
-                if isinstance(f, tuple) and len(f) == 3:
-                    col, op, val = f
-                    if op == ">=":
-                        f_expr = pc.field(col) >= val
-                    elif op == "<=":
-                        f_expr = pc.field(col) <= val
-                    elif op == ">":
-                        f_expr = pc.field(col) > val
-                    elif op == "<":
-                        f_expr = pc.field(col) < val
-                    elif op == "==":
-                        f_expr = pc.field(col) == val
-                    else:
-                        continue
-                    ds_filter = ds_filter & f_expr if ds_filter is not None else f_expr
-
-        dataset = ds.dataset(str(path), format="parquet")
-        table = dataset.to_table(columns=columns, filter=ds_filter)
-        df = table.to_pandas()
-
-        if not df.empty:
-            # Convert timestamp from string to datetime
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-            df = df.sort_values("timestamp").reset_index(drop=True)
-
-        return df
+        with self._lock(symbol, interval):
+            df = self._read_files(list(path.rglob("*.parquet")))
+        if df.empty:
+            return df
+        if start is not None:
+            df = df[df["timestamp"] >= pd.to_datetime(start, utc=True)]
+        if end is not None:
+            df = df[df["timestamp"] <= pd.to_datetime(end, utc=True)]
+        operations = {">=": "ge", "<=": "le", ">": "gt", "<": "lt", "==": "eq", "!=": "ne"}
+        for col, op, value in filters or []:
+            if op not in operations:
+                raise ValueError(f"Unsupported candle filter: {op}")
+            if col == "timestamp":
+                value = pd.to_datetime(value, utc=True)
+            df = df[getattr(df[col], operations[op])(value)]
+        return (df if columns is None else df[columns]).reset_index(drop=True)
 
     def read_latest(
         self,
@@ -177,23 +217,9 @@ class ParquetStore:
         n: int = 1,
     ) -> pd.DataFrame:
         """Read the N most recent candles."""
-        path = self._interval_path(symbol, interval)
-        if not path.exists():
-            return pd.DataFrame()
-
-        dataset = ds.dataset(str(path), format="parquet")
-        # Read all and take last N (could be optimized with scanner)
-        table = dataset.to_table()
-        df = table.to_pandas()
-
-        if df.empty:
-            return df
-
-        # Convert timestamp from string to datetime
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-
-        df = df.sort_values("timestamp").tail(n).reset_index(drop=True)
-        return df
+        if n < 1:
+            raise ValueError("n must be positive")
+        return self.read_candles(symbol, interval).tail(n).reset_index(drop=True)
 
     def get_symbols(self) -> list[str]:
         """Get list of symbols with data."""
@@ -225,20 +251,12 @@ class ParquetStore:
         interval: str = "5minute",
     ) -> tuple[datetime | None, datetime | None]:
         """Get min/max timestamps for a symbol+interval."""
-        path = self._interval_path(symbol, interval)
-        if not path.exists():
-            return None, None
-
-        dataset = ds.dataset(str(path), format="parquet")
-        # Only read timestamp column for efficiency
-        table = dataset.to_table(columns=["timestamp"])
-        df = table.to_pandas()
+        df = self.read_candles(symbol, interval, columns=["timestamp"])
 
         if df.empty:
             return None, None
 
-        if df["timestamp"].dt.tz is None:
-            df["timestamp"] = df["timestamp"].dt.tz_localize(UTC)
+        df["timestamp"] = _parse_utc_timestamps(df["timestamp"])
 
         return df["timestamp"].min().to_pydatetime(), df["timestamp"].max().to_pydatetime()
 
@@ -259,33 +277,25 @@ class ParquetStore:
         if not path.exists():
             return 0
 
-        dataset = ds.dataset(str(path), format="parquet")
-        table = dataset.to_table()
-
-        if table.num_rows == 0:
-            return 0
-
-        # Remove old files
-        import shutil
-
-        shutil.rmtree(path)
-        path.mkdir(parents=True, exist_ok=True)
-
-        # Rewrite as single file (or fewer files)
-        pq.write_table(
-            table,
-            path / f"{symbol}_{interval}.parquet",
-            compression=self.compression,
-        )
-
-        logger.info("parquet_compacted", symbol=symbol, interval=interval, rows=table.num_rows)
-        return table.num_rows
+        with self._lock(symbol, interval):
+            originals = list(path.rglob("*.parquet"))
+            frame = self._read_files(originals)
+            if frame.empty:
+                return 0
+            # Publish the replacement before removing only the captured inputs.
+            # A failed write leaves all originals available for recovery.
+            self._commit_frame(frame, path)
+            for original in originals:
+                original.unlink()
+        logger.info("parquet_compacted", symbol=symbol, interval=interval, rows=len(frame))
+        return len(frame)
 
     def get_stats(self, symbol: str | None = None) -> dict:
         """Get storage statistics."""
         symbols = [symbol] if symbol else self.get_symbols()
 
         stats = {
+            "row_count_basis": "physical rows; replay duplicates are deduplicated on reads",
             "symbols": len(symbols),
             "total_rows": 0,
             "total_size_mb": 0.0,

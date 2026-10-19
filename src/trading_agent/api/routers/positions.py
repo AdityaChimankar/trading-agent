@@ -1,7 +1,10 @@
 """Positions router."""
 
 from fastapi import APIRouter, Query, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing import Literal
+from sqlalchemy import select, func, text, update
+from trading_agent.core.config import get_settings
 from typing import Optional, List
 from datetime import UTC, datetime
 
@@ -27,13 +30,28 @@ class PositionResponse(BaseModel):
 
 
 class PositionCreate(BaseModel):
-    symbol: str
-    action: str
-    entry_price: float
-    quantity: int
-    stop_loss: float
-    take_profit: float | None = None
-    strategy: str = "manual"
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
+    symbol: str = Field(min_length=1, max_length=20, pattern=r"^[A-Za-z0-9&_.-]+$")
+    action: Literal["BUY", "SELL"]
+    entry_price: float = Field(gt=0)
+    quantity: int = Field(gt=0, strict=True)
+    stop_loss: float = Field(gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
+    strategy: str = Field(default="manual", min_length=1, max_length=50)
+
+    @field_validator("action", "symbol", mode="before")
+    @classmethod
+    def normalize(cls, value):
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def check_bracket(self):
+        direction = 1 if self.action == "BUY" else -1
+        if direction * (self.entry_price - self.stop_loss) <= 0:
+            raise ValueError("Stop loss must be on the loss side of entry")
+        if self.take_profit is not None and direction * (self.take_profit - self.entry_price) <= 0:
+            raise ValueError("Take profit must be on the profit side of entry")
+        return self
 
 
 @router.get("/", response_model=List[PositionResponse])
@@ -78,6 +96,24 @@ async def create_position(position: PositionCreate):
 
         position_value = position.entry_price * position.quantity
         risk_amount = abs(position.entry_price - position.stop_loss) * position.quantity
+        limits = get_settings().paper
+        if not limits.entries_enabled:
+            raise HTTPException(status_code=409, detail="Paper entries disabled by operator")
+        # Serialize check-and-create in the supported SQLite deployment.
+        if session.bind.dialect.name != "sqlite":
+            raise HTTPException(status_code=503, detail="Paper entry risk locking requires SQLite")
+        await session.execute(text("BEGIN IMMEDIATE"))
+        opened = list((await session.execute(select(Position).where(func.lower(Position.status) == "open"))).scalars())
+        realized = (await session.execute(select(func.coalesce(func.sum(Position.pnl), 0)).where(func.lower(Position.status) == "closed"))).scalar_one()
+        equity = limits.initial_capital + float(realized)
+        if any(p.symbol == position.symbol for p in opened):
+            raise HTTPException(status_code=409, detail="Symbol already has an open paper position")
+        if equity <= 0 or len(opened) >= limits.max_positions:
+            raise HTTPException(status_code=409, detail="Paper capital or position limit reached")
+        if sum(p.position_value for p in opened) + position_value > equity * limits.max_exposure_pct:
+            raise HTTPException(status_code=409, detail="Paper exposure limit exceeded")
+        if risk_amount > equity * limits.max_trade_risk_pct or sum(p.risk_amount for p in opened) + risk_amount > equity * limits.max_risk_pct:
+            raise HTTPException(status_code=409, detail="Paper risk limit exceeded")
         pos = await repo.create(
             symbol=position.symbol.upper(),
             action=position.action.upper(),
@@ -112,7 +148,7 @@ async def create_position(position: PositionCreate):
 @router.post("/{position_id}/close")
 async def close_position(
     position_id: int,
-    exit_price: float = Query(..., description="Exit price"),
+    exit_price: float = Query(..., gt=0, allow_inf_nan=False, description="Exit price"),
 ):
     """Close a position."""
     async with get_database().session() as session:
@@ -131,12 +167,12 @@ async def close_position(
         else:
             pnl = (pos.entry_price - exit_price) * pos.quantity
 
-        # Update position
-        pos.status = "closed"
-        pos.exit_price = exit_price
-        pos.exit_time = datetime.now(UTC)
-        pos.pnl = pnl
-
-        await session.commit()
+        result = await session.execute(
+            update(Position).where(Position.id == position_id, func.lower(Position.status) == "open")
+            .values(status="closed", exit_price=exit_price, exit_time=datetime.now(UTC), pnl=pnl)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Position was already closed")
 
         return {"position_id": position_id, "exit_price": exit_price, "pnl": pnl}
