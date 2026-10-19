@@ -1,194 +1,141 @@
-# Architecture Decision Record (ADR)
+# Architecture decisions
 
-## Project: NSE Intraday Trading Signal Agent
+Last reviewed: 2026-10-19
 
----
+This file records decisions that constrain future changes. [DESIGN.md](DESIGN.md) describes the current components; [README.md](README.md) describes how to run them.
 
-### ADR-001: Package Layering (Strict Stack)
+## ADR-001: Installable `src` package
 
-**Status:** Accepted  
-**Date:** 2024-01-15
+Status: accepted
 
-**Context:** Need clear dependency direction to avoid circular imports and ensure testability.
+All runtime Python code lives below `src/trading_agent` and uses absolute `trading_agent.*` imports. The package is installed with `pip install -e .` for development or `pip install .` in an image.
 
-**Decision:**
+Consequences:
+
+- Imports behave the same in tests, CLI commands, and containers.
+- User-facing entry points are declared in `pyproject.toml`.
+- Root-level scripts are compatibility helpers, not import roots.
+
+## ADR-002: Local-first persistence
+
+Status: accepted
+
+SQLite stores relational state and Parquet stores candles. Runtime data lives below `data/`; model artifacts live below `models/`.
+
+PostgreSQL is not currently a supported drop-in runtime. Some operational modules intentionally use direct `sqlite3` queries and SQLite date functions. A PostgreSQL migration must replace those consumers before a PostgreSQL service is restored to Compose.
+
+Consequences:
+
+- A clean local start has no database server prerequisite.
+- Docker bind-mounts `data` and `models` for persistence.
+- Multiple writers must remain modest and coordinated.
+
+## ADR-003: One canonical relational schema
+
+Status: accepted
+
+SQLAlchemy models in `storage/db.py`, SQLite bootstrap behavior, and Alembic migrations must use the same physical column names. The canonical paper-position fields are:
+
+```text
+position_size, position_value, risk_amount, opened_at,
+signal_source, status, exit_price, exit_time, pnl
 ```
-scripts/              (orchestration: scheduler, pre-flight, supervisor)
-    │
-    ├── strategy/     (turn features into BUY/SELL/HOLD)
-    ├── analysis/     (read stored data, describe it)
-    └── ingest/       (talk to Kite/NSE/RSS, write candles/news)
-         │
-         └── risk/    (allocate capital, cap exposure, monitor positions)
-              │
-              └── core/     (deterministic math: indicators, patterns, sizing, signals)
-                   │
-                   └── storage/  (SQLite connection, schema, migrations, watchlist)
-                        │
-                        └── paths.py  (file locations; no imports at all)
+
+The Python aliases `quantity`, `entry_time`, and `strategy` remain for API compatibility. Fresh local API startup may create missing tables; migration-controlled deployments use `alembic upgrade head`.
+
+## ADR-004: Independent decision paths
+
+Status: accepted
+
+Rule, ML, optional LLM, and shadow/hybrid decisions remain identifiable. They may share prepared market data and risk primitives, but one path must not silently overwrite another path's evidence.
+
+The default LLM provider is `mock`. External LLM calls require explicit provider, URL, key, and model configuration.
+
+## ADR-005: Time-bounded research inputs
+
+Status: accepted
+
+Backtests and historical replays must pass their current historical slice to candidate generation. They must never call a convenience function that reads the newest candles from disk while replaying an older timestamp.
+
+`CandidateGenerator.generate_from_data` is the boundary for historical evaluation; `generate_for_symbol` is for current stored data.
+
+## ADR-006: Paper trading only
+
+Status: accepted
+
+The repository does not place broker orders. Position and wallet records are simulations. Any future order-execution feature requires a separate security/risk ADR, explicit user controls, reconciliation, idempotency, and audit logging.
+
+## ADR-007: Market timezone
+
+Status: accepted
+
+Stored timestamps should be timezone-aware. Scheduled market jobs use `Asia/Kolkata`, regardless of the container host timezone.
+
+## ADR-008: Docker profiles
+
+Status: accepted; revised 2026-10-19
+
+The default Compose stack starts only the API and frontend. Broker/network processes are opt-in under the `live` profile:
+
+```text
+default: api + frontend
+live:    ticker + scheduler
+tools:   one-shot CLI container
 ```
 
-**Rules:**
-- Arrows point DOWN only — a layer imports layers below, never above
-- `research/` sits beside stack: imports core, storage, strategy; nothing imports it
-- `api/` is read-only façade: imports any layer, nothing imports it
-- `frontend/` only talks to `api/` over HTTP
+This prevents a normal dashboard start from consuming broker quota or starting scheduled analysis unexpectedly.
 
-**Consequences:**
-- Clear ownership: each layer has single responsibility
-- Easy testing: mock layers below, test layer in isolation
-- No circular imports possible
+The Python image remains multi-stage:
 
----
+| Stage | Purpose |
+|---|---|
+| `builder` | Build and install runtime Python dependencies |
+| `playwright` | Install Chromium used by automatic Kite login |
+| `runtime` | Copy installed packages/browser; run as non-root user |
 
-### ADR-002: Three Parallel Decision Paths
+Development dependencies are not installed in the runtime image.
 
-**Status:** Accepted  
-**Date:** 2024-01-20
+## ADR-009: Configuration contract
 
-**Context:** Want to compare rule-based, LLM, and ML signals on identical inputs without contamination.
+Status: accepted
 
-**Decision:** Three independent agents write to separate tables:
-| Agent | Module | Output Table | Purpose |
-|-------|--------|--------------|---------|
-| Rule-based | `strategy/decision_agent.py` | `signals` | Tested path, validated by backtest |
-| LLM | `strategy/llm_decision_agent.py` | `llm_signals` | Comparison only |
-| ML v1 | `strategy/ml_decision_agent.py` | `ml_signals` | Comparison only |
-| ML v2 | `strategy/ml_decision_agent_v2.py` | `ml_signals` | Enhanced, walk-forward validated |
+Settings are loaded in this order:
 
-**Rules:**
-- No agent feeds another agent's decision
-- All log against same candle timestamp (not wall clock)
-- Hybrid strategy (`strategy/hybrid_strategy.py`) backtests to pick best mode per symbol
+1. process environment;
+2. `.env`;
+3. code defaults.
 
-**Consequences:**
-- Honest comparison: track records accumulate independently
-- No "consensus" bias — each path stands on its own
-- Promotion rules (STRATEGIES.md) decide when ML/LLM can gate positions
+Nested setting groups read `.env` directly, so flat names such as `DB_URL`, `API_PORT`, and `KITE_API_KEY` work consistently. The generic `DEBUG` value is parsed defensively because developer tools sometimes set it to strings such as `release`.
 
----
+Secrets must never enter Git, logs, generated documentation, or container image layers.
 
-### ADR-003: Inverted Dependency Fix (Strategy → Research)
+## ADR-010: Test and CI contract
 
-**Status:** Accepted (Fixed)  
-**Date:** 2024-03-10
+Status: accepted; revised 2026-10-19
 
-**Problem:** Strategy modules imported from `research/backtest.py` (validation depending on implementation).
+The required functional gate is:
 
-**Fix:** Lifted shared primitives to `core/signals.py`:
-- `SLIPPAGE`, `DEFAULT_PARAMS`, `FORWARD_WINDOW`, `LOOKBACK_MIN`, `MAX_HOLD_CANDLES`, `SWING_ORDER`
-- `prepare_symbol_series()`, `precompute_pattern_bias_codes()`
-- `vectorized_evaluate()`, `simulate_trades()`
-- `--selftest` verification
+```bash
+pytest
+cd frontend && npm run build
+```
 
-**Result:** Both `strategy/` and `research/` import from `core/` — correct layering.
+CI runs on Python 3.11 with SQLite. Style/type tools are valuable, but their configured scope must reflect an achievable baseline; a permanently failing lint gate is not a gate.
 
----
+## Dependency direction
 
-### ADR-004: Live Ticker Architecture (Non-blocking)
+The intended dependency flow is:
 
-**Status:** Accepted  
-**Date:** 2024-02-01
+```text
+api / cli / scripts
+        |
+analysis / strategy / ingest / risk / research
+        |
+core + storage
+```
 
-**Problem:** Kite WebSocket drops connection if `on_ticks` blocks on I/O.
+`core` should stay deterministic where possible. `storage` owns persistence. `api`, CLI, and scripts orchestrate work and should not duplicate domain algorithms.
 
-**Decision:** Two-thread architecture:
-- **Tick thread:** `on_ticks` does ONLY in-memory dict updates (no DB)
-- **Flush thread:** Drains completed minute-buckets every 5s over persistent connection
-- **Heal thread:** Separate thread for gap healing (rate-limited, never blocks flush)
+## Adding a new decision
 
-**Key invariants:**
-- Completed minute handed off to buffer, never overwritten in place
-- Exchange timestamp used for bucketing (not local clock)
-- MODE_QUOTE for >100 symbols (lighter than MODE_FULL)
-
----
-
-### ADR-005: Candle Timestamp Identity
-
-**Status:** Accepted  
-**Date:** 2024-02-15
-
-**Problem:** Historical backfill stored `2026-09-25T09:15:00+05:30`, live ticker wrote `2026-09-25T09:15:00` — same minute, two PKs.
-
-**Decision:** Normalize ALL writes through `core.freshness.candle_timestamp()` → naive IST minute precision. Reads compare 16-char minute prefix (`substr(timestamp, 1, 16)`).
-
----
-
-### ADR-006: SQLite Concurrency Model
-
-**Status:** Accepted  
-**Date:** 2024-01-25
-
-**Decision:**
-- WAL mode + 30s `busy_timeout`
-- Per-symbol commits (not per-watchlist)
-- Four writers during market hours: ticker flush, scheduler, CLI, API
-- `execute_with_retry()` with exponential backoff for transient locks
-
----
-
-### ADR-007: Signal Source Tracking
-
-**Status:** Accepted  
-**Date:** 2024-10-10
-
-**Decision:** Every open position stores `signal_source` (`rule` | `ml` | `hybrid` | `llm`). Position monitor checks reversal in corresponding table:
-- `rule` → `signals`
-- `ml` → `ml_signals`
-- `hybrid` → `hybrid_signals`
-- `llm` → `llm_signals`
-
-**Consequence:** ML/Hybrid/LLM signals can open/manage positions with same rigor as rule-based.
-
----
-
-### ADR-008: Multi-stage Docker Build
-
-**Status:** Accepted  
-**Date:** 2026-10-18
-
-**Problem:** Naive Dockerfile produced 75 GB image.
-
-**Decision:** Three-stage build with `.dockerignore`:
-| Stage | Base | Purpose | Copied to Final |
-|-------|------|---------|-----------------|
-| builder | python:3.11-slim | Install deps with gcc/g++ | `/install` → `/usr/local` |
-| playwright | python:3.11-slim | Install Chromium + deps | `/opt/playwright` → `/opt/playwright` |
-| runtime | python:3.11-slim | Runtime only (no build tools) | App code + artifacts |
-
-**Result:** Build context 3.6 GB → ~1 MB; Final image ~2-3 GB.
-
----
-
-### ADR-009: Exit Logic Standardization
-
-**Status:** Accepted  
-**Date:** 2024-08-15
-
-**Problem:** Backtest used fixed 6-candle hold; live used 1.5×ATR stop + 2:1 target.
-
-**Decision:** Remove take-profit (`USE_TAKE_PROFIT = False`). Stop-only is only change with large, consistent, independently-reproduced evidence (+0.009%/trade).
-
-**Validation:** `diagnose_edge.py --exits` and `strategy_lab.py` agree to 0.0002%.
-
----
-
-### ADR-010: Verification via Self-tests
-
-**Status:** Accepted  
-**Date:** 2024-04-01
-
-**Decision:** No test suite — verification via self-checking entry points:
-
-| Test | Command | Validates |
-|------|---------|-----------|
-| Fast path == reference | `python -m research.backtest --selftest` | Vectorized backtest |
-| Grid combos match | `python -m research.walk_forward_optimizer --selftest` | WF optimizer |
-| No lookahead features | `python -m strategy.session_features` | Causality |
-| Admit-rates plausible | `python -m strategy.candidates` | Gate thresholds |
-| Core signals match | `python -m core.signals --selftest` | Shared primitives |
-
----
-
-*All ADRs are binding. New architectural decisions must be recorded here with status, context, decision, and consequences.*
+Add or revise an ADR when a change affects persistence format, live-vs-backtest parity, external calls, order safety, deployment topology, or strategy promotion rules. Routine refactors do not require an ADR.

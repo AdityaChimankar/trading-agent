@@ -319,18 +319,20 @@ async def run_shadow_cycle(symbols: list[str] | None = None, interval: str = "5m
                 logger.warning("no_data_for_symbol", symbol=symbol)
                 continue
 
-            candidates = generator.generate_for_symbol(df, symbol, interval)
-            if not candidates:
+            candidate = generator.generate_from_data(df, symbol, interval)
+            if candidate is None:
                 logger.debug("no_candidates_generated", symbol=symbol)
                 continue
 
-            for candidate in candidates:
-                decision = tester.process_candidate(candidate)
-                if decision:
-                    logger.info("shadow_test", symbol=symbol, action=decision.action, confidence=decision.confidence)
-                    
-                    # Store shadow signal to database
-                    await _store_shadow_signal(symbol, decision, interval)
+            decision = tester.process_candidate(candidate)
+            if decision:
+                logger.info(
+                    "shadow_test",
+                    symbol=symbol,
+                    action=decision.action,
+                    confidence=decision.confidence,
+                )
+                await _store_shadow_signal(symbol, decision, interval)
                 
         except Exception as e:
             logger.error("shadow_test_failed", symbol=symbol, error=str(e))
@@ -339,18 +341,19 @@ async def run_shadow_cycle(symbols: list[str] | None = None, interval: str = "5m
 async def _store_shadow_signal(symbol: str, decision, interval: str):
     """Store shadow signal to database."""
     try:
-        from trading_agent.storage.db import StrategySignal, get_database
+        from trading_agent.storage.db import Signal, get_database
         from datetime import datetime, UTC
         
         db = get_database()
         async with db.session() as session:
-            signal = StrategySignal(
+            signal = Signal(
                 symbol=symbol,
                 timestamp=datetime.now(UTC),
                 interval=interval,
-                strategy="hybrid",
-                vote=decision.action,
+                strategy="shadow_hybrid",
+                action=decision.action,
                 confidence=decision.confidence,
+                pattern_bias=0,
             )
             session.add(signal)
             await session.commit()

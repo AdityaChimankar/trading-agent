@@ -14,7 +14,7 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
 # Install to /install prefix (not system) for copying to final stage
-RUN pip install --no-cache-dir --prefix=/install ".[dev]"
+RUN pip install --no-cache-dir --prefix=/install .
 
 # Stage 2: Playwright browser installation
 FROM python:3.11-slim AS playwright
@@ -59,6 +59,7 @@ COPY --from=playwright /opt/playwright /opt/playwright
 # Copy application code
 COPY --chown=trader:trader src/ ./src/
 COPY --chown=trader:trader pyproject.toml README.md ./
+COPY --chown=trader:trader symbols*.txt ./
 
 # Environment
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \

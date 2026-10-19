@@ -4,6 +4,7 @@ from datetime import UTC
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+from sqlalchemy import text
 
 router = APIRouter()
 
@@ -37,7 +38,7 @@ async def readiness_check():
     try:
         db = get_database()
         async with db.session() as session:
-            await session.execute("SELECT 1")
+            await session.execute(text("SELECT 1"))
         return {"status": "ready"}
     except Exception as e:
         return {"status": "not ready", "error": str(e)}

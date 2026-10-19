@@ -1,5 +1,7 @@
 # Strategy candidates and promotion rules
 
+> Historical research note, reviewed 2026-10-19. Treat the measurements as experiment records, not promised or current returns. Current commands are in README and USER_GUIDE.
+
 How experimental strategies are added, measured, and — only if they earn it —
 promoted. Read this before adding "a strategy that should make more profit":
 every strategy here is a hypothesis with a number attached, and the numbers so
@@ -60,7 +62,7 @@ and live can never disagree about what a strategy is.
 
 ## How they're measured
 
-`python -m research.strategy_lab` runs every candidate plus three controls on
+`trading-agent optimize strategy-lab SYMBOL` runs the current strategy lab on
 stored candles:
 
 - **baseline** — a trade at *every* candle (the random-entry control; a
@@ -90,9 +92,7 @@ Two self-tests exist because a broken feature and a bad strategy look identical
 in a results table — both print a number:
 
 ```
-python -m strategy.session_features      # no feature depends on a future candle
-python -m strategy.candidates            # no candidate is mis-wired or a no-op
-python -m strategy.session_features --cost-cover   # the distribution behind the cost-gate result
+pytest tests/unit/test_strategy.py
 ```
 
 `session_features` proves causality the only way that can be trusted on real
@@ -115,9 +115,9 @@ rather than as the bug it was.
 ## Measured results (60 symbols, 5-minute candles, 2026)
 
 At the default 1.5×ATR stop-only exit, all eleven candidates plus three
-controls. EV/win%/t come from one `python -m research.strategy_lab --n 60` run
+controls. EV/win%/t come from one historical strategy-lab run
 over 498-symbol/9.19M-candle data; the **admit%** column is the range observed by
-`python -m strategy.candidates` on its own 4-symbol sample, so it is indicative
+the candidate module on its own four-symbol sample, so it is indicative
 of how selective a gate is rather than measured on the same 60 symbols.
 
 | strategy | trades | admit% | win% | EV/trade | t | EV w/target | EV early80 | EV late20 |
@@ -248,9 +248,8 @@ Until then: candidates log, nothing trades differently.
    is a feature nobody has proven cannot see the future.
 2. Register it in `CANDIDATES` with a stable name (it becomes a
    `strategy_signals.strategy_name` value — don't rename once data exists).
-3. Run `python -m strategy.candidates` (admit-rate) and
-   `python -m strategy.session_features` (causality) before trusting anything.
-4. Run `python -m research.strategy_lab --n 60` and compare against baseline
+3. Run `pytest tests/unit/test_strategy.py` before trusting implementation changes.
+4. Run `trading-agent optimize strategy-lab SYMBOL` and compare against baseline
    **and against `trend_pullback`**, since every new filter is measured on top
    of it.
 5. If it beats baseline *and* `trend_pullback` *and* survives the late-20%

@@ -59,11 +59,14 @@ def main():
         session = kite.generate_session(request_token, api_secret=api_secret)
         access_token = session["access_token"]
         
-        # Save to file
-        with open('.access_token', 'w') as f:
+        # Save inside the shared data directory so local and Docker services
+        # use the same token location.
+        token_path = Path(os.getenv("DATA_DIR", "data")) / ".access_token"
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(token_path, 'w') as f:
             f.write(access_token)
         
-        print(f"\n✓ Success! Access token saved to .access_token")
+        print(f"\nSuccess! Access token saved to {token_path}")
         print(f"  Token: {access_token[:20]}...")
         
         # Test the token

@@ -11,6 +11,7 @@ Run once after upgrading from a pre-migration database:
     python -m scripts.migrate_legacy_timestamps
 """
 import sqlite3
+import sys
 from datetime import datetime
 from trading_agent.paths import DB_PATH
 

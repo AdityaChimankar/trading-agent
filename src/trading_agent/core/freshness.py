@@ -191,7 +191,7 @@ def ingest_heartbeat() -> dict | None:
     try:
         from trading_agent.storage.db import get_database
         
-        db = get_database()
+        get_database()
         # Get latest heartbeat from ingest_status table
         # This is a simplified version - in production would query the actual table
         return {

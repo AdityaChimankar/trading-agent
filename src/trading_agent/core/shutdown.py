@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 
@@ -33,6 +34,13 @@ class ShutdownManager:
     def register_signals(self) -> None:
         """Register signal handlers for graceful shutdown."""
         if self._signals_registered:
+            return
+
+        # ASGI test clients and embedded servers may run lifespan in a worker
+        # thread. Python only permits process signal registration in the main
+        # interpreter thread; the host process owns signals in that case.
+        if threading.current_thread() is not threading.main_thread():
+            logger.debug("signal_registration_skipped_non_main_thread")
             return
 
         if sys.platform == "win32":

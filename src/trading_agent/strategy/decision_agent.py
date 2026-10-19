@@ -115,17 +115,20 @@ async def run_decision_cycle(symbols: list[str] | None = None, interval: str = "
                 logger.warning("no_data_for_symbol", symbol=symbol)
                 continue
 
-            candidates = generator.generate_for_symbol(df, symbol, interval)
-            if not candidates:
+            candidate = generator.generate_from_data(df, symbol, interval)
+            if candidate is None:
                 logger.debug("no_candidates_generated", symbol=symbol)
                 continue
 
-            for candidate in candidates:
-                decision = agent.decide(candidate)
-                logger.info("rule_decision", symbol=symbol, action=decision.action, confidence=decision.confidence)
-                
-                # Store decision to database
-                await _store_rule_signal(symbol, decision, interval)
+            decision = agent.decide(candidate)
+            logger.info(
+                "rule_decision",
+                symbol=symbol,
+                action=decision.action,
+                confidence=decision.confidence,
+            )
+
+            await _store_rule_signal(symbol, decision, interval)
                 
         except Exception as e:
             logger.error("rule_decision_failed", symbol=symbol, error=str(e))

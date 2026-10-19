@@ -1,221 +1,109 @@
-# Project Rules & Conventions
+# Contributor rules
 
-## Project: NSE Intraday Trading Signal Agent
+Last reviewed: 2026-10-19
 
----
+## Safety and scope
 
-### Code Style & Quality
+- This repository is paper-trading and research software.
+- Do not add broker order placement under the guise of a refactor.
+- Never log or commit API keys, passwords, TOTP seeds, request tokens, access tokens, or account data.
+- Keep `.env` and `data/.access_token` ignored.
+- Validate strategy claims out of sample and after costs before changing any promotion status.
 
-#### Python
-- **Version:** 3.11+ (type hints required)
-- **Formatter:** `black` (line-length=100)
-- **Linter:** `ruff` (target-version=py311)
-- **Type Checker:** `mypy` (strict-optional, basic mode)
-- **Import Sort:** `isort` (known-first-party=["trading_agent"])
+## Source layout
+
+- Runtime modules belong under `src/trading_agent`.
+- Use absolute `trading_agent.*` imports.
+- Keep orchestration in API/CLI/scripts and reusable logic in domain modules.
+- Avoid new root-level patch/helper scripts; add an installed CLI command or a package module.
+- Frontend code belongs under `frontend/src` and talks to the backend through `/api`.
+
+## Configuration
+
+- Add settings to the correct `BaseSettings` group in `core/config.py`.
+- Use the established flat environment prefix (`DB_`, `API_`, `KITE_`, `LLM_`, etc.).
+- Document user-facing settings in `.env.example`, README, and the user guide.
+- Configuration must not make package import fail because an unrelated generic environment variable exists.
+
+## Data and migrations
+
+- SQLite and Parquet are the supported stores.
+- Keep SQLAlchemy, `init_db`, and Alembic physical column names aligned.
+- Never edit an initial migration that has already shipped to a deployed database; add a new revision.
+- Store timezone-aware timestamps; scheduler market rules use Asia/Kolkata.
+- Treat Parquet candles as immutable time-series input except for explicit deduplication/compaction.
+- Backtests must consume time-bounded frames and must not read the newest store state from inside a historical loop.
+
+## Strategy discipline
+
+- Keep rule, ML, LLM, hybrid, and shadow results attributable.
+- A fallback must be explicit; do not disguise a mock result as a real model result.
+- Use realistic costs and explain any fill assumptions.
+- Compare entry logic with an unconditional/random baseline.
+- Keep backtest and paper-monitor stop/target semantics aligned.
+- Preserve conservative behavior for missing, stale, or invalid market data.
+
+## Python style
+
+- Target Python 3.11+.
+- Prefer typed dataclasses/Pydantic models at boundaries.
+- Use `pathlib.Path`, timezone-aware datetimes, and context managers.
+- Raise domain-specific errors at external boundaries and retain the original exception as the cause.
+- Do not perform network or expensive filesystem work at module import time.
+- Public CLI commands must provide useful `--help` output and non-zero failure exits.
+
+## API style
+
+- Keep response models explicit.
+- Health means the process is alive; readiness checks required dependencies.
+- Use SQLAlchemy `text()` for textual SQL.
+- Validate actions, prices, quantities, and ranges at request boundaries.
+- A background task must update observable status on success and failure.
+
+## Frontend style
+
+- Keep API paths relative (`/api/...`).
+- Configure the development proxy with `VITE_PROXY_TARGET`; do not bake container-only hostnames into browser code.
+- Run TypeScript checking and the production build before merging UI changes.
+- Large visualization dependencies should be lazy-loaded where practical.
+
+## Docker
+
+- Keep build context small through `.dockerignore`.
+- Install runtime dependencies only in the final Python image.
+- Run the application as a non-root user.
+- Persist `data` and `models` through mounts.
+- The default Compose profile must not start broker-connected or paid-call workloads.
+- Do not reintroduce PostgreSQL/Redis services until runtime code uses them.
+
+## Tests
+
+Minimum functional checks:
 
 ```bash
-# Run all checks
-ruff check && black --check && mypy src/trading_agent
+pytest
+python -m compileall -q src migrations
+cd frontend && npm run build
 ```
 
-#### Type Hints
-- All public functions must have type hints
-- Use `from __future__ import annotations` for forward refs
-- Prefer `list[str]` over `List[str]` (Python 3.9+)
-- Use `Optional[X]` not `X | None` for consistency
+Add a regression test for every fixed defect when the behavior is reasonably isolatable. Tests must use workspace/system temp facilities and must not depend on a developer's `.env`, account, network, or existing data.
 
-#### Naming Conventions
-| Type | Convention | Example |
-|------|------------|---------|
-| Modules | snake_case | `quant_indicators.py` |
-| Classes | PascalCase | `PositionPlan` |
-| Functions | snake_case | `compute_atr()` |
-| Constants | UPPER_SNAKE | `SLIPPAGE = 0.0005` |
-| Private | _leading_underscore | `_write_candles()` |
-| Type vars | PascalCase + T | `T_co = TypeVar("T_co", covariant=True)` |
+Lint and typing are incremental quality tools. Tighten their CI gates only after the selected baseline passes; do not declare a known-failing job required.
 
----
+## Documentation
 
-### Git & Commits
+- README is the canonical quick start.
+- USER_GUIDE contains detailed operation and recovery.
+- ARCHITECTURE records binding decisions.
+- DESIGN explains the current implementation.
+- Historical experiment documents must state that their numbers are point-in-time results.
+- Never state a test count, image size, performance result, or strategy return as current unless it was just verified.
+- Use `docker compose`, not the deprecated `docker-compose` form.
 
-#### Branch Strategy
-- `main` — protected, only via PR
-- Feature branches: `feature/<short-desc>`
-- Fix branches: `fix/<issue-number>-<short-desc>`
-- No direct commits to main
+## Before a pull request
 
-#### Commit Messages
-```
-<type>(<scope>): <imperative summary>
-
-<body if needed>
-
-<footer if needed>
-```
-
-Types: `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `chore`, `revert`
-
-Examples:
-```
-feat(ml): add walk-forward validation to train_ml_model_v2
-fix(ticker): handle stale connection in flush_loop
-perf(docker): multi-stage build reduces image 75GB -> 3GB
-```
-
-#### Pre-commit Hooks
-```yaml
-# .pre-commit-config.yaml (enforced)
-- ruff (lint + format)
-- black (format)
-- mypy (type check)
-- pytest (unit tests)
-```
-
----
-
-### Architecture Rules (Binding)
-
-1. **Layering** — Import DOWN only (see ARCHITECTURE.md ADR-001)
-2. **Three Decision Paths** — Parallel, separate tables (ADR-002)
-3. **Core Signals Single Source** — `core/signals.py` only (ADR-003)
-4. **Non-blocking Ticker** — No I/O in `on_ticks` (ADR-004)
-5. **Timestamp Identity** — Normalize via `candle_timestamp()` (ADR-005)
-6. **Per-symbol Commits** — Never hold transaction across watchlist (ADR-006)
-7. **Signal Source Tracking** — Every position stores source (ADR-007)
-7. **No Relative Paths** — Use `paths.py` for all file locations
-
----
-
-### Data & Storage Rules
-
-#### Database (SQLite)
-- WAL mode mandatory
-- `busy_timeout=30000`
-- `synchronous=NORMAL`
-- All timestamps naive IST minute precision
-- Compare minute prefixes: `substr(timestamp, 1, 16)`
-
-#### Parquet Storage
-- Partitioned by `symbol`/`interval`
-- Migrate with `python -m storage.parquet_store migrate`
-- Read via `core.quant_indicators.load_candles()` (auto-detects Parquet)
-
-#### Watchlist
-- Single source of truth: `watchlist` table
-- Seed via `ingest/build_nifty500_symbols.py`
-- No module hardcodes symbol lists
-
----
-
-### Trading Logic Rules
-
-#### Signal Generation
-- All three agents log against **candle timestamp**, not wall clock
-- Rule-based agent is the ONLY validated path
-- LLM/ML agents are comparison artifacts until promoted
-- Promotion rules in STRATEGIES.md (t ≥ 2, 500+ trades, OOS validation)
-
-#### Position Sizing
-- ATR-based, risk-per-trade configurable
-- `USE_TAKE_PROFIT = False` (default, measured worse)
-- Volatility-aware scaling: scales DOWN only, caps at 1.0
-- Max position % of capital enforced
-
-#### Risk Management
-- Portfolio risk budget (default 6%)
-- Same-symbol concentration cap
-- Correlation-cluster cap (20%, measured from returns)
-- Position monitor checks: stop → target → signal reversal → HOLD
-
-#### Backtesting
-- Vectorized (NumPy/Polars), not loop-based
-- SLIPPAGE = 0.05% single source of truth
-- Non-overlapping trades (skip bars after exit)
-- Walk-forward: rolling train/test, no lookahead
-
----
-
-### Ingestion Rules
-
-#### Kite Connect
-- Access token expires ~7:30 AM IST daily
-- Auto-login via `kite_auto_login.py` (Playwright + TOTP)
-- Manual fallback: `kite_auth.py`
-- Rate limit: ~2.5 req/s historical, WebSocket for live
-
-#### Gap Healing
-- Healer compares session timeline vs stored minutes
-- Fetches ONLY holes (cheap when healthy)
-- Runs: on reconnect, every 10min while down, post-close sweep
-- Records ALL gaps in `candle_gaps` (including 0-recovery)
-
----
-
-### Testing & Validation Rules
-
-#### Self-tests (Mandatory Before PR)
-```bash
-python -m research.backtest --selftest
-python -m research.walk_forward_optimizer --selftest 360ONE
-python -m strategy.session_features
-python -m strategy.candidates
-python -m core.signals --selftest 360ONE
-```
-
-#### Research Tools
-- `diagnose_edge.py` — Measures signal vs random baseline
-- `strategy_lab.py` — Candidate grid search with time-split
-- `walk_forward_optimizer.py` — Rolling threshold optimization
-- All report GROSS of slippage (slippage cancels in comparison)
-
-#### No Unit Test Suite
-- Verification via self-tests on REAL data
-- Synthetic fixtures don't catch real-world edge cases
-- Two independent implementations agreeing = trusted
-
----
-
-### Docker Rules
-
-- Multi-stage build (builder → playwright → runtime)
-- `.dockerignore` excludes: data/, models/, node_modules/, .git/, caches/
-- No `COPY . .` — explicit `COPY src/ ./src/`
-- Build context target: ~1 MB
-- Final image target: ~2-3 GB
-- Run with `--no-cache` after Dockerfile changes
-
----
-
-### Security Rules
-
-- `.env` for secrets (never committed)
-- `.access_token` gitignored, written by `kite_auth.py`
-- Kite credentials: API Key, Secret, TOTP, User ID, Password
-- OpenRouter API key for LLM/sentiment
-- No credentials in code, logs, or Docker images
-- Paper trading only — no order placement code
-
----
-
-### Documentation Rules
-
-- Update relevant `.md` with every architectural change
-- ADRs in ARCHITECTURE.md for binding decisions
-- PRD.md for product direction
-- STRATEGIES.md for candidate promotion rules
-- EDGE_ANALYSIS.md for measurement methodology
-- DESIGN.md for bug-forced decisions
-- README.md for user-facing docs
-
----
-
-### CI/CD Rules
-
-- All checks pass locally before push
-- Docker build must succeed
-- Tests run in container: `docker compose exec api pytest`
-- No deployment without manual approval
-
----
-
-*Violations of binding rules (Architecture, Data, Trading Logic) require ADR.*
+1. Review `git diff` for secrets and unrelated edits.
+2. Run backend tests and frontend build.
+3. Exercise changed CLI/API entry points.
+4. Update `.env.example` and docs for any interface change.
+5. Call out migrations, data compatibility, and operational steps in the PR description.

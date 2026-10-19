@@ -118,7 +118,7 @@ def evaluate_llm_vs_rules(symbols: list = None, min_trades: int = MIN_TRADES_FOR
         kill_count = sum(1 for r in all_results if r["kill_recommendation"] == "KILL")
         keep_count = sum(1 for r in all_results if r["kill_recommendation"] == "KEEP")
         
-        print(f"\n=== LLM Evaluation Summary ===")
+        print("\n=== LLM Evaluation Summary ===")
         print(f"Symbols evaluated: {len(all_results)}")
         print(f"Average agreement rate: {avg_agreement:.1%}")
         print(f"Kill recommendation: {kill_count} kill, {keep_count} keep")
@@ -186,7 +186,7 @@ def main():
     
     if args.cost:
         cost_info = estimate_llm_cost_per_decision()
-        print(f"LLM Cost Estimate:")
+        print("LLM Cost Estimate:")
         print(f"  Model: {cost_info['model']}")
         print(f"  Cost per call: ${cost_info['cost_per_call_usd']:.6f}")
         print(f"  Daily calls (est): {cost_info['daily_calls']:,}")

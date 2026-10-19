@@ -141,7 +141,7 @@ def main():
     else:
         if not run_validation():
             print(f"{FAIL_MARK} Validation failed. Fix issues before starting pipeline.")
-            print(f"       Set SKIP_VALIDATION=1 to bypass (not recommended)")
+            print("       Set SKIP_VALIDATION=1 to bypass (not recommended)")
             sys.exit(1)
     
     # Initialize process manager

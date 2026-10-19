@@ -30,14 +30,18 @@ async def list_symbols(
     parquet = get_parquet_store()
     instruments = get_instrument_lookup()
 
-    all_symbols = instruments.get_all_equity_symbols()
+    parquet_symbols = set(parquet.get_symbols())
+    try:
+        all_symbols = instruments.get_all_equity_symbols()
+    except Exception:
+        # A fresh dashboard must still start without Kite credentials/network.
+        all_symbols = sorted(parquet_symbols)
 
     if search:
         search = search.upper()
         all_symbols = [s for s in all_symbols if search in s]
 
     if has_data is not None:
-        parquet_symbols = set(parquet.get_symbols())
         if has_data:
             all_symbols = [s for s in all_symbols if s in parquet_symbols]
         else:
@@ -47,9 +51,13 @@ async def list_symbols(
 
     result = []
     for symbol in symbols:
-        token = instruments.get_token(symbol)
-        lot_size = instruments.get_lot_size(symbol)
-        sym_has_data = symbol in parquet.get_symbols()
+        try:
+            token = instruments.get_token(symbol)
+            lot_size = instruments.get_lot_size(symbol)
+        except Exception:
+            token = None
+            lot_size = 1
+        sym_has_data = symbol in parquet_symbols
 
         data_range = None
         if sym_has_data:
@@ -77,12 +85,15 @@ async def get_symbol(symbol: str):
     parquet = get_parquet_store()
     instruments = get_instrument_lookup()
 
-    token = instruments.get_token(symbol)
-    if not token:
-        raise HTTPException(status_code=404, detail="Symbol not found")
-
-    lot_size = instruments.get_lot_size(symbol)
     has_data = symbol in parquet.get_symbols()
+    try:
+        token = instruments.get_token(symbol)
+        lot_size = instruments.get_lot_size(symbol)
+    except Exception:
+        token = None
+        lot_size = 1
+    if not token and not has_data:
+        raise HTTPException(status_code=404, detail="Symbol not found")
 
     data_range = None
     if has_data:

@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from trading_agent.core.llm_client import LLMClient, LLMRequest, LLMResponse, MockLLMClient
+from trading_agent.core.llm_client import (
+    LLMClient,
+    LLMRequest,
+    LLMResponse,
+    MockLLMClient,
+    create_llm_client,
+)
 from trading_agent.core.logging_config import get_logger
 from trading_agent.strategy.candidates import Candidate
 
@@ -74,8 +80,10 @@ class LLMDecisionAgent:
         user_template: str = USER_PROMPT_TEMPLATE,
         use_mock: bool = False,
     ):
-        if use_mock or client is None:
+        if use_mock:
             self.client = MockLLMClient()
+        elif client is None:
+            self.client = create_llm_client()
         else:
             self.client = client
         self.system_prompt = system_prompt
@@ -196,17 +204,20 @@ async def run_llm_decision_cycle(symbols: list[str] | None = None, interval: str
                 logger.warning("no_data_for_symbol", symbol=symbol)
                 continue
 
-            candidates = generator.generate_for_symbol(df, symbol, interval)
-            if not candidates:
+            candidate = generator.generate_from_data(df, symbol, interval)
+            if candidate is None:
                 logger.debug("no_candidates_generated", symbol=symbol)
                 continue
 
-            for candidate in candidates:
-                decision = await agent.decide(candidate)
-                logger.info("llm_decision", symbol=symbol, action=decision.action, confidence=decision.confidence)
-                
-                # Store decision to database
-                await _store_llm_signal(symbol, decision, interval)
+            decision = await agent.decide(candidate)
+            logger.info(
+                "llm_decision",
+                symbol=symbol,
+                action=decision.action,
+                confidence=decision.confidence,
+            )
+
+            await _store_llm_signal(symbol, decision, interval)
                 
         except Exception as e:
             logger.error("llm_decision_failed", symbol=symbol, error=str(e))

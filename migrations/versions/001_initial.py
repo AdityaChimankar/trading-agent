@@ -30,9 +30,8 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('symbol'),
     )
-    op.create_index('ix_watchlist_symbol', 'watchlist', ['symbol'])
+    op.create_index('ix_watchlist_symbol', 'watchlist', ['symbol'], unique=True)
 
     # Candles
     op.create_table(
@@ -51,8 +50,8 @@ def upgrade() -> None:
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id'),
     )
-    op.create_index('ix_candles_symbol_timestamp', 'candles', ['symbol', 'timestamp'])
-    op.create_index('ix_candles_symbol_interval_timestamp', 'candles', ['symbol', 'interval', 'timestamp'])
+    op.create_index('ix_candles_symbol', 'candles', ['symbol'])
+    op.create_index('ix_candles_timestamp', 'candles', ['timestamp'])
 
     # Signals
     op.create_table(
@@ -67,35 +66,77 @@ def upgrade() -> None:
         sa.Column('rsi', sa.Float(), nullable=True),
         sa.Column('adx', sa.Float(), nullable=True),
         sa.Column('pattern_bias', sa.Integer(), nullable=False, server_default='0'),
-        sa.Column('metadata', sa.Text(), nullable=True),
+        sa.Column('signal_metadata', sa.Text(), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id'),
     )
-    op.create_index('ix_signals_symbol_timestamp', 'signals', ['symbol', 'timestamp'])
+    op.create_index('ix_signals_symbol', 'signals', ['symbol'])
+    op.create_index('ix_signals_timestamp', 'signals', ['timestamp'])
 
-    # Positions
+    # Positions (table name: open_positions to match model)
     op.create_table(
-        'positions',
+        'open_positions',
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('symbol', sa.String(20), nullable=False),
         sa.Column('action', sa.String(10), nullable=False),
         sa.Column('entry_price', sa.Float(), nullable=False),
-        sa.Column('entry_time', sa.DateTime(timezone=True), nullable=False),
-        sa.Column('quantity', sa.Integer(), nullable=False),
+        sa.Column('position_size', sa.Integer(), nullable=False),
+        sa.Column('position_value', sa.Float(), nullable=False),
+        sa.Column('risk_amount', sa.Float(), nullable=False),
         sa.Column('stop_loss', sa.Float(), nullable=False),
         sa.Column('take_profit', sa.Float(), nullable=True),
-        sa.Column('strategy', sa.String(50), nullable=False, server_default='rule'),
-        sa.Column('status', sa.String(20), nullable=False, server_default='OPEN'),
+        sa.Column('opened_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('status', sa.String(20), nullable=False, server_default='open'),
+        sa.Column('signal_source', sa.String(50), nullable=False, server_default='rule'),
         sa.Column('exit_price', sa.Float(), nullable=True),
         sa.Column('exit_time', sa.DateTime(timezone=True), nullable=True),
         sa.Column('pnl', sa.Float(), nullable=True),
-        sa.Column('metadata', sa.Text(), nullable=True),
+        sa.Column('position_metadata', sa.Text(), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id'),
     )
-    op.create_index('ix_positions_symbol_status', 'positions', ['symbol', 'status'])
+    op.create_index('ix_open_positions_symbol', 'open_positions', ['symbol'])
+
+    # Position Alerts
+    op.create_table(
+        'position_alerts',
+        sa.Column('id', sa.Integer(), nullable=False),
+        sa.Column('position_id', sa.Integer(), nullable=False),
+        sa.Column('symbol', sa.String(20), nullable=False),
+        sa.Column('kind', sa.String(20), nullable=False),
+        sa.Column('recommendation', sa.String(10), nullable=False),
+        sa.Column('candle_timestamp', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.PrimaryKeyConstraint('id'),
+    )
+    op.create_index('ix_position_alerts_position_id', 'position_alerts', ['position_id'])
+    op.create_index('ix_position_alerts_symbol', 'position_alerts', ['symbol'])
+
+    # Trades
+    op.create_table(
+        'trades',
+        sa.Column('id', sa.Integer(), nullable=False),
+        sa.Column('position_id', sa.Integer(), nullable=False),
+        sa.Column('symbol', sa.String(20), nullable=False),
+        sa.Column('action', sa.String(10), nullable=False),
+        sa.Column('entry_price', sa.Float(), nullable=False),
+        sa.Column('exit_price', sa.Float(), nullable=False),
+        sa.Column('quantity', sa.Integer(), nullable=False),
+        sa.Column('gross_pnl', sa.Float(), nullable=False),
+        sa.Column('charges', sa.Float(), nullable=False),
+        sa.Column('net_pnl', sa.Float(), nullable=False),
+        sa.Column('holding_minutes', sa.Integer(), nullable=False),
+        sa.Column('entry_time', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('exit_time', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint('id'),
+    )
+    op.create_index('ix_trades_position_id', 'trades', ['position_id'])
+    op.create_index('ix_trades_symbol', 'trades', ['symbol'])
 
     # Opportunities
     op.create_table(
@@ -104,19 +145,20 @@ def upgrade() -> None:
         sa.Column('symbol', sa.String(20), nullable=False),
         sa.Column('timestamp', sa.DateTime(timezone=True), nullable=False),
         sa.Column('score', sa.Float(), nullable=False),
-        sa.Column('rank', sa.Integer(), nullable=True),
-        sa.Column('rule_signal', sa.String(10), nullable=True),
+        sa.Column('rank', sa.Integer(), nullable=False),
+        sa.Column('rule_signal', sa.String(10), nullable=False),
         sa.Column('llm_signal', sa.String(10), nullable=True),
         sa.Column('ml_signal', sa.String(10), nullable=True),
         sa.Column('ml_confidence', sa.Float(), nullable=False, server_default='0.0'),
         sa.Column('risk_reward', sa.Float(), nullable=True),
         sa.Column('atr', sa.Float(), nullable=True),
-        sa.Column('metadata', sa.Text(), nullable=True),
+        sa.Column('opportunity_metadata', sa.Text(), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id'),
     )
-    op.create_index('ix_opportunities_timestamp_rank', 'opportunities', ['timestamp', 'rank'])
+    op.create_index('ix_opportunities_symbol', 'opportunities', ['symbol'])
+    op.create_index('ix_opportunities_timestamp', 'opportunities', ['timestamp'])
 
     # ML Models
     op.create_table(
@@ -125,22 +167,22 @@ def upgrade() -> None:
         sa.Column('version', sa.String(100), nullable=False),
         sa.Column('symbol', sa.String(20), nullable=False),
         sa.Column('model_type', sa.String(50), nullable=False),
-        sa.Column('feature_version', sa.String(20), nullable=True),
+        sa.Column('feature_version', sa.String(20), nullable=False),
         sa.Column('training_date', sa.DateTime(timezone=True), nullable=False),
-        sa.Column('training_samples', sa.Integer(), nullable=True),
-        sa.Column('features', sa.Text(), nullable=True),
-        sa.Column('hyperparameters', sa.Text(), nullable=True),
-        sa.Column('metrics', sa.Text(), nullable=True),
-        sa.Column('data_hash', sa.String(64), nullable=True),
-        sa.Column('file_path', sa.String(500), nullable=True),
-        sa.Column('tags', sa.Text(), nullable=True),
+        sa.Column('training_samples', sa.Integer(), nullable=False),
+        sa.Column('features', sa.Text(), nullable=False),
+        sa.Column('hyperparameters', sa.Text(), nullable=False),
+        sa.Column('metrics', sa.Text(), nullable=False),
+        sa.Column('data_hash', sa.String(64), nullable=False),
+        sa.Column('file_path', sa.String(500), nullable=False),
+        sa.Column('tags', sa.Text(), nullable=False),
         sa.Column('is_active', sa.Boolean(), nullable=False, server_default='true'),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('version'),
     )
-    op.create_index('ix_ml_models_symbol_type', 'ml_models', ['symbol', 'model_type'])
+    op.create_index('ix_ml_models_symbol', 'ml_models', ['symbol'])
 
     # Wallet
     op.create_table(
@@ -156,7 +198,6 @@ def upgrade() -> None:
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id'),
     )
-    op.create_index('ix_wallet_timestamp', 'wallet', ['timestamp'])
 
     # System Events
     op.create_table(
@@ -166,12 +207,11 @@ def upgrade() -> None:
         sa.Column('level', sa.String(20), nullable=False),
         sa.Column('source', sa.String(50), nullable=False),
         sa.Column('message', sa.Text(), nullable=False),
-        sa.Column('metadata', sa.Text(), nullable=True),
+        sa.Column('event_metadata', sa.Text(), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id'),
     )
-    op.create_index('ix_system_events_timestamp', 'system_events', ['timestamp'])
 
 
 def downgrade() -> None:
@@ -179,7 +219,9 @@ def downgrade() -> None:
     op.drop_table('wallet')
     op.drop_table('ml_models')
     op.drop_table('opportunities')
-    op.drop_table('positions')
+    op.drop_table('trades')
+    op.drop_table('position_alerts')
+    op.drop_table('open_positions')
     op.drop_table('signals')
     op.drop_table('candles')
     op.drop_table('watchlist')

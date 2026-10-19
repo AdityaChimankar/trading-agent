@@ -393,7 +393,7 @@ def run_walkforward_config(symbols: list, params: dict, config_name: str) -> Opt
     start = time.time()
 
     # Temporarily override PARAM_GRID
-    import research.walk_forward_optimizer as wfo
+    import trading_agent.research.walk_forward_optimizer as wfo
     original_grid = wfo.PARAM_GRID
     wfo.PARAM_GRID = {k: [v] if not isinstance(v, list) else v for k, v in params.items()}
 

@@ -37,7 +37,8 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "DB_PATH", test_db_path)
     db_module.init_db(test_db_path)
     db_module.reset_database()
-    return db_module
+    yield db_module
+    db_module.reset_database()
 
 
 def write_candles(conn, symbol, last_bar_at, bars=40, close=100.0,

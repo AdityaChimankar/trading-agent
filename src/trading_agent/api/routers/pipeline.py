@@ -74,7 +74,7 @@ async def _execute_pipeline(symbols: List[str] | None, interval: str):
         generator = CandidateGenerator()
         finder = OpportunityFinder()
 
-        candidates = generator.generate_all(symbols, interval)
+        generator.generate_all(symbols, interval)
         opportunities = finder.find_opportunities(symbols, interval)
 
         _pipeline_state["symbols_processed"] = len(symbols)

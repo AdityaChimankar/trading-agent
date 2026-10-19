@@ -127,8 +127,6 @@ class LiveTicker:
             return None
 
         symbol = self._symbol_by_token[token]
-        interval_sec = self._get_interval_seconds()
-
         # Determine candle timestamp from first tick
         candle_start = self._get_candle_start(ticks[0].timestamp)
 
@@ -336,3 +334,30 @@ def create_default_candle_handler(parquet_store=None) -> Callable[[CandleData], 
         store.write_candles(df, candle.symbol, candle.interval)
 
     return handler
+
+
+def main() -> None:
+    """Start the live Kite ticker and block until it stops."""
+    from trading_agent.core.logging_config import setup_logging
+    from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
+
+    setup_logging()
+    auth = get_kite_auth()
+    if not auth.credentials.access_token and not auth.load_access_token():
+        raise SystemExit("No Kite access token. Run `trading-agent login` first.")
+
+    symbols = get_watchlist_symbols()
+    if not symbols:
+        raise SystemExit("The watchlist is empty. Add symbols to symbols.txt.")
+
+    ticker = LiveTicker(symbols=symbols, on_candle=create_default_candle_handler())
+    ticker.start()
+    try:
+        if ticker._thread is not None:
+            ticker._thread.join()
+    except KeyboardInterrupt:
+        ticker.stop()
+
+
+if __name__ == "__main__":
+    main()

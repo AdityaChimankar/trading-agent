@@ -209,8 +209,10 @@ class AutoLogin:
 
 def ensure_valid_token() -> str:
     """Convenience function to get valid token."""
+    import asyncio
+
     auto_login = AutoLogin()
-    return auto_login.ensure_valid_token()
+    return asyncio.run(auto_login.ensure_valid_token())
 
 
 if __name__ == "__main__":

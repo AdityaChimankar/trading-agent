@@ -120,7 +120,7 @@ class TestPatternDetection:
         close = np.array([100.5, 99.5, 100])
 
         hammers, bull_engulf, bear_engulf = detect_single_candle_patterns(open_, high, low, close)
-        assert hammers[1] == True  # Hammer at index 1
+        assert hammers[1]  # Hammer at index 1
 
     def test_bullish_engulfing(self):
         open_ = np.array([100, 99])
@@ -129,7 +129,7 @@ class TestPatternDetection:
         close = np.array([99, 100.5])  # Second bullish engulfs first bearish
 
         hammers, bull_engulf, bear_engulf = detect_single_candle_patterns(open_, high, low, close)
-        assert bull_engulf[1] == True
+        assert bull_engulf[1]
 
     def test_bearish_engulfing(self):
         open_ = np.array([100, 101])
@@ -138,7 +138,7 @@ class TestPatternDetection:
         close = np.array([101, 99.5])  # Second bearish engulfs first bullish
 
         hammers, bull_engulf, bear_engulf = detect_single_candle_patterns(open_, high, low, close)
-        assert bear_engulf[1] == True
+        assert bear_engulf[1]
 
     def test_compute_pattern_bias(self):
         n = 50

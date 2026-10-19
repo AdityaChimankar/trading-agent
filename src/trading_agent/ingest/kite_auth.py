@@ -46,7 +46,7 @@ class KiteAuth:
             redirect_url=settings.kite.redirect_url,
         )
         self._kite: KiteConnect | None = None
-        self._access_token_path = Path(".access_token")
+        self._access_token_path = settings.data_dir / ".access_token"
 
     @property
     def kite(self) -> KiteConnect:
@@ -78,6 +78,7 @@ class KiteAuth:
 
     def _save_access_token(self, token: str) -> None:
         """Save access token to file."""
+        self._access_token_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._access_token_path, "w") as f:
             f.write(token)
         self.credentials = KiteCredentials(**{**self.credentials.__dict__, "access_token": token})
@@ -89,6 +90,9 @@ class KiteAuth:
                 token = f.read().strip()
             if token:
                 self._kite.set_access_token(token)
+                self.credentials = KiteCredentials(
+                    **{**self.credentials.__dict__, "access_token": token}
+                )
                 return token
         return None
 
@@ -151,12 +155,12 @@ if __name__ == "__main__":
     print("=" * 70)
     print("MANUAL KITE CONNECT LOGIN")
     print("=" * 70)
-    print(f"\n1. Open this URL in your browser:")
+    print("\n1. Open this URL in your browser:")
     print(f"\n   {login_url}\n")
     print("2. Log in with your Kite credentials:")
     print(f"   - User ID: {os.getenv('KITE_USER_ID', 'YOUR_USER_ID')}")
-    print(f"   - Password: ********")
-    print(f"   - TOTP from your authenticator app")
+    print("   - Password: ********")
+    print("   - TOTP from your authenticator app")
     print()
     print("3. After successful login, you'll be redirected to:")
     redirect_url = os.getenv('KITE_REDIRECT_URL', 'http://localhost')
@@ -181,7 +185,7 @@ if __name__ == "__main__":
         with open('.access_token', 'w') as f:
             f.write(access_token)
 
-        print(f"\nSuccess! Access token saved to .access_token")
+        print("\nSuccess! Access token saved to .access_token")
         print(f"Token: {access_token[:20]}...")
 
         # Test the token

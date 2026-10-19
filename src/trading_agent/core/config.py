@@ -11,7 +11,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class DatabaseSettings(BaseSettings):
     """Database configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="DB_")
+    model_config = SettingsConfigDict(
+        env_prefix="DB_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     url: str = Field(
         default="sqlite:///data/trading.db",
@@ -25,7 +27,9 @@ class DatabaseSettings(BaseSettings):
 class KiteSettings(BaseSettings):
     """Kite Connect API configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="KITE_")
+    model_config = SettingsConfigDict(
+        env_prefix="KITE_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     api_key: str = Field(default="", description="Kite API key")
     api_secret: str = Field(default="", description="Kite API secret")
@@ -50,7 +54,9 @@ class KiteSettings(BaseSettings):
 class StorageSettings(BaseSettings):
     """Data storage configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="STORAGE_")
+    model_config = SettingsConfigDict(
+        env_prefix="STORAGE_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     parquet_root: Path = Field(
         default=Path("data/parquet"),
@@ -69,7 +75,9 @@ class StorageSettings(BaseSettings):
 class APISettings(BaseSettings):
     """FastAPI server configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="API_")
+    model_config = SettingsConfigDict(
+        env_prefix="API_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     host: str = Field(default="0.0.0.0", description="Server host")
     port: int = Field(default=8000, description="Server port")
@@ -84,7 +92,9 @@ class APISettings(BaseSettings):
 class MLSettings(BaseSettings):
     """Machine Learning configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ML_")
+    model_config = SettingsConfigDict(
+        env_prefix="ML_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     model_dir: Path = Field(
         default=Path("models"),
@@ -99,7 +109,9 @@ class MLSettings(BaseSettings):
 class LoggingSettings(BaseSettings):
     """Logging configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="LOG_")
+    model_config = SettingsConfigDict(
+        env_prefix="LOG_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO",
@@ -110,6 +122,19 @@ class LoggingSettings(BaseSettings):
         description="Log format",
     )
     file: Path | None = Field(default=None, description="Log file path")
+
+
+class LLMSettings(BaseSettings):
+    """Optional OpenAI-compatible LLM configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="LLM_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    provider: Literal["openai", "anthropic", "mock"] = "mock"
+    base_url: str = "https://api.openai.com"
+    api_key: str = ""
+    model: str = "gpt-4o-mini"
 
 
 class Settings(BaseSettings):
@@ -123,7 +148,7 @@ class Settings(BaseSettings):
     )
 
     # Environment
-    environment: Literal["development", "staging", "production"] = Field(
+    environment: Literal["development", "testing", "staging", "production"] = Field(
         default="development",
         description="Runtime environment",
     )
@@ -136,6 +161,7 @@ class Settings(BaseSettings):
     api: APISettings = Field(default_factory=APISettings)
     ml: MLSettings = Field(default_factory=MLSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
 
     # Paths
     data_dir: Path = Field(default=Path("data"), description="Data directory")
@@ -145,6 +171,23 @@ class Settings(BaseSettings):
     @classmethod
     def _resolve_path(cls, v: str | Path) -> Path:
         return Path(v).expanduser().resolve()
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def _parse_debug(cls, value: object) -> object:
+        """Tolerate common process-level DEBUG values such as ``release``.
+
+        ``DEBUG`` is a generic environment variable used by many developer
+        tools. Treating an unrelated value as a fatal application setting made
+        even imports fail on otherwise valid machines.
+        """
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "production", "prod", "off", "no"}:
+                return False
+            if normalized in {"debug", "development", "dev", "on", "yes"}:
+                return True
+        return value
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

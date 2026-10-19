@@ -1,13 +1,12 @@
 """Main CLI entry point."""
 
-from typing import Optional
+import asyncio
 
 import typer
 
 from trading_agent.api.main import run as run_api
 from trading_agent.core.config import get_settings
 from trading_agent.core.logging_config import get_logger, setup_logging
-from trading_agent.ingest.fetch_historical import fetch_historical
 from trading_agent.ingest.fetch_news import fetch_latest_news
 from trading_agent.ingest.kite_auto_login import ensure_valid_token
 from trading_agent.ingest.watchlist_resolved import resolve_watchlist
@@ -23,6 +22,11 @@ app = typer.Typer(
 )
 
 app.add_typer(optimize_app, name="optimize")
+
+
+def _resolve_symbols(symbols: list[str] | None) -> list[str]:
+    """Resolve explicit symbols or the configured watchlist."""
+    return asyncio.run(resolve_watchlist(symbols=symbols))
 
 
 @app.callback()
@@ -44,7 +48,7 @@ def ingest(
 ):
     """Fetch historical data."""
     if not symbols:
-        symbols = resolve_watchlist()
+        symbols = _resolve_symbols(symbols)
 
     from trading_agent.ingest.fetch_historical import HistoricalFetcher
     fetcher = HistoricalFetcher()
@@ -67,7 +71,7 @@ def backfill(
 ):
     """Backfill historical data."""
     if not symbols:
-        symbols = resolve_watchlist()
+        symbols = _resolve_symbols(symbols)
 
     from trading_agent.ingest.fetch_historical import HistoricalFetcher
 
@@ -125,7 +129,7 @@ def diagnose(
 ):
     """Diagnose signal edge."""
     if not symbols:
-        symbols = resolve_watchlist()
+        symbols = _resolve_symbols(symbols)
 
     typer.echo(f"Diagnosing edge for {len(symbols)} symbols...")
     results = diagnose_edge(symbols, interval)
@@ -177,7 +181,7 @@ def pipeline(
 ):
     """Run trading pipeline once."""
     if not symbols:
-        symbols = resolve_watchlist()
+        symbols = _resolve_symbols(symbols)
 
     typer.echo(f"Running pipeline for {len(symbols)} symbols...")
     from trading_agent.analysis.opportunity_finder import OpportunityFinder

@@ -1,505 +1,319 @@
-# Trading Agent - Complete User Guide
+# Trading Agent User Guide
 
-## Overview
+This guide covers a first local run, Docker operation, the daily Kite workflow, research commands, and common recovery steps. For the shorter path, start with [README.md](README.md).
 
-Trading Agent is a local-first research pipeline for NSE intraday trading signals. It ingests live and historical candle data from Kite Connect, computes deterministic technical indicators and patterns, and runs three independent decision paths (rule-based, LLM, and ML) for comparison.
+> Safety: the application records paper positions only. It has no real-order execution path.
 
-**Key Features:**
-- Multi-path decision making (Rule, LLM, ML)
-- Walk-forward optimization
-- Vectorized backtesting
-- Gap healing for missing candles
-- Paper trading with realistic charges
-- Modern stack: Python 3.11+, FastAPI, SQLAlchemy 2.0, Polars, LightGBM
+## 1. Choose how to run it
 
----
+| Mode | Best for | Requirements |
+|---|---|---|
+| Local Python | development, research, debugging | Python 3.11/3.12; Node 20+ for UI |
+| Docker Compose | repeatable API/UI and live services | Docker Engine/Desktop with Compose v2 |
 
-## Prerequisites
+Both modes use SQLite at `data/trading.db`, Parquet below `data/parquet`, models below `models`, and the token at `data/.access_token`.
 
-| Requirement | Version | Notes |
-|-------------|---------|-------|
-| Python | 3.11+ | Required |
-| Git | Any | For cloning |
-| Kite Connect API | Paid | ₹2000/mo base + ₹500/mo historical |
-| Docker | 24+ | Optional, for containerized deployment |
-| Node.js | 20+ | Optional, for frontend |
+## 2. Local installation
 
----
+From the repository root:
 
-## Installation
-
-### 1. Clone Repository
-
-```bash
-git clone https://github.com/your-org/trading-agent.git
-cd trading-agent
-```
-
-### 2. Create Virtual Environment
-
-```bash
-# Windows
+```powershell
+# Windows PowerShell
 python -m venv .venv
-.venv\Scripts\activate
-
-# Linux/Mac
-python -m venv .venv
-source .venv/bin/activate
-```
-
-### 3. Install Dependencies
-
-```bash
-# Install package in editable mode with dev dependencies
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -e ".[dev]"
-
-# Install Playwright for auto-login (optional)
-playwright install chromium
+Copy-Item .env.example .env
 ```
 
-### 4. Configure Environment
-
 ```bash
-# Copy example environment file
+# macOS/Linux
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-Edit `.env` with your credentials:
+Verify the installation:
 
-```env
-# REQUIRED - Get from https://developers.kite.trade
-KITE_API_KEY=your_api_key
-KITE_API_SECRET=your_api_secret
-KITE_TOTP_SECRET=your_32_char_base32_secret  # From 2FA QR code
-KITE_USER_ID=your_user_id
-KITE_PASSWORD=your_password
-KITE_REDIRECT_URL=http://localhost
-
-# OPTIONAL - For LLM/sentiment analysis
-OPENROUTER_API_KEY=your_openrouter_key
-
-# OPTIONAL - Database (default: SQLite)
-DB_URL=postgresql://user:pass@localhost/trading
-
-# OPTIONAL - API Server
-API_PORT=8000
-LOG_LEVEL=INFO
+```bash
+trading-agent --help
+python -c "import trading_agent; print(trading_agent.__version__)"
+pytest
 ```
 
-**Getting Kite TOTP Secret:**
-1. Enable 2FA on Kite web/app
-2. Scan QR code with authenticator app
-3. Use "Enter key manually" option to see the 32-character base32 secret
-4. Paste that into `KITE_TOTP_SECRET`
+If the console command is not on `PATH`, use `python -m trading_agent.cli` in its place.
 
----
+## 3. Configuration
 
-## Daily Workflow
+Edit `.env`. The API and dashboard need no secrets. Broker ingestion requires at least:
 
-### 1. Generate Access Token (Required Daily)
+```dotenv
+KITE_API_KEY=replace_me
+KITE_API_SECRET=replace_me
+KITE_USER_ID=replace_me
+KITE_PASSWORD=replace_me
+KITE_TOTP_SECRET=replace_me
+KITE_REDIRECT_URL=http://localhost
+```
 
-The Kite access token expires daily at ~7:30 AM IST. You must generate a new one each trading day.
+Keep this local default unless you intentionally move the database:
 
-**Option A: Manual Login (Recommended)**
+```dotenv
+DB_URL=sqlite:///data/trading.db
+```
+
+The optional LLM path defaults to a local mock and makes no paid call:
+
+```dotenv
+LLM_PROVIDER=mock
+LLM_BASE_URL=https://api.openai.com
+LLM_API_KEY=
+LLM_MODEL=gpt-4o-mini
+```
+
+To use an OpenAI-compatible provider, set `LLM_PROVIDER=openai`, its base URL, key, and model. Never commit `.env` or `data/.access_token`.
+
+## 4. Start the local application
+
+Terminal 1:
+
 ```bash
+trading-agent-api
+```
+
+Terminal 2:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Check these URLs:
+
+| URL | Expected result |
+|---|---|
+| http://localhost:8000/api/v1/health | JSON with `status: healthy` |
+| http://localhost:8000/api/v1/ready | JSON with `status: ready` |
+| http://localhost:8000/docs | Interactive API docs |
+| http://localhost:5173 | Dashboard |
+
+The API creates missing tables on startup. Alembic can be used explicitly with `alembic upgrade head` in migration-controlled deployments.
+
+## 5. Authenticate with Kite
+
+Kite access tokens generally need refreshing each trading day.
+
+```bash
+# Automated browser/TOTP path
+playwright install chromium   # first use only
+trading-agent login
+
+# Manual fallback
 python manual_login.py
 ```
-This opens the login URL, you log in via browser, then paste the `request_token` back.
 
-**Option B: CLI Command**
-```bash
-trading-agent login
-```
+Both paths save the token under `data/.access_token`. Do not paste a token into logs, issues, screenshots, or documentation.
 
-**Option C: Docker**
-```bash
-docker compose run --rm ingest python manual_login.py
-```
-
-### 2. Fetch Historical Data
+## 6. Load market data
 
 ```bash
-# Fetch specific symbols (100 days)
+# Specific symbols
 trading-agent ingest RELIANCE TCS INFY --days 100
 
-# Fetch entire watchlist
+# Default watchlist
 trading-agent ingest
 
-# Backfill 2 years
-trading-agent backfill --years 2
+# Longer history
+trading-agent backfill RELIANCE TCS --years 2
 
-# Check storage
+# Inspect local Parquet storage
 trading-agent storage-stats
 ```
 
-### 3. Run Analysis & Backtests
+The default watchlist comes from `symbols.txt`; named Nifty 500 loading uses `symbols_nifty500_plus.txt`. Explicit symbols are safest for the first run and avoid a large broker request.
+
+## 7. Research and analysis
+
+Run these only after the selected symbols have local Parquet data:
 
 ```bash
-# Diagnose signal edge vs random baseline
 trading-agent diagnose RELIANCE TCS
-
-# Vectorized backtest
-trading-agent backtest RELIANCE TCS --start 2024-01-01 --end 2024-06-30
-
-# Walk-forward optimization
+trading-agent backtest RELIANCE TCS --start 2025-01-01 --end 2025-06-30
 trading-agent optimize walk-forward RELIANCE TCS
-
-# Train enhanced ML model (v2)
+trading-agent optimize walk-forward-single RELIANCE
 trading-agent optimize ml-model-v2 RELIANCE TCS
-
-# Strategy lab grid search
 trading-agent optimize strategy-lab RELIANCE
 ```
 
-### 4. Live Trading Pipeline (Market Hours: 9:15-15:30 IST)
+Backtests now generate candidates from the time-bounded historical slice supplied by the engine; they do not read the latest future candle while replaying history.
 
-Run these in separate terminals:
+The measured rule-based edge and strategy promotion constraints are documented in [EDGE_ANALYSIS.md](EDGE_ANALYSIS.md) and [STRATEGIES.md](STRATEGIES.md).
+
+## 8. Run the paper-trading pipeline
+
+For one pass:
 
 ```bash
-# Terminal 1: Live ticker (WebSocket)
-python -m trading_agent.ingest.live_ticker
-
-# Terminal 2: Scheduler (news, decisions, position monitoring)
-python -m trading_agent.scripts.scheduler
-
-# Terminal 3: API server (for dashboard)
-trading-agent api
-
-# Terminal 4 (optional): Run pipeline once
-trading-agent pipeline
+trading-agent pipeline RELIANCE TCS
 ```
 
----
-
-## CLI Command Reference
-
-### Authentication
-| Command | Description |
-|---------|-------------|
-| `trading-agent login` | Authenticate with Kite Connect |
-
-### Data Ingestion
-| Command | Description |
-|---------|-------------|
-| `trading-agent ingest [SYMBOLS...]` | Fetch historical data |
-| `trading-agent backfill [SYMBOLS...]` | Backfill years of data |
-| `trading-agent news [SYMBOLS...]` | Fetch latest financial news |
-
-### Analysis & Backtesting
-| Command | Description |
-|---------|-------------|
-| `trading-agent backtest SYMBOLS...` | Run vectorized backtest |
-| `trading-agent diagnose SYMBOLS...` | Diagnose signal edge |
-| `trading-agent pipeline [SYMBOLS...]` | Run trading pipeline once |
-
-### Optimization
-| Command | Description |
-|---------|-------------|
-| `trading-agent optimize walk-forward [SYMBOLS...]` | Walk-forward optimization |
-| `trading-agent optimize ml-model [SYMBOLS...]` | Train standard ML model |
-| `trading-agent optimize ml-model-v2 [SYMBOLS...]` | Train enhanced ML model |
-| `trading-agent optimize strategy-lab SYMBOL` | Strategy grid search |
-
-### Server & Utilities
-| Command | Description |
-|---------|-------------|
-| `trading-agent api` | Run FastAPI server |
-| `trading-agent storage-stats` | Show storage statistics |
-| `trading-agent compact SYMBOL` | Compact Parquet files |
-
----
-
-## Docker Deployment
-
-### Quick Start
+For market-hours operation, use separate terminals:
 
 ```bash
-# Build and start all services
-docker compose up --build -d
+# Live Kite WebSocket -> Parquet candles
+trading-agent-ticker
 
-# Check status
+# News, decisions, monitoring, maintenance
+trading-agent-scheduler
+
+# API/dashboard backend
+trading-agent-api
+```
+
+The scheduler uses the Asia/Kolkata timezone. It stores rule, ML, LLM, and shadow outputs independently so the paths can be compared. With `LLM_PROVIDER=mock`, the LLM path records mock HOLD decisions without a network charge.
+
+## 9. Docker Compose
+
+Prepare configuration first:
+
+```bash
+cp .env.example .env       # PowerShell: Copy-Item .env.example .env
+docker compose up --build -d
 docker compose ps
 ```
 
-### Daily Login in Container
+The default stack contains:
+
+| Service | Purpose | Port/profile |
+|---|---|---|
+| `api` | FastAPI backend | 8000 |
+| `frontend` | Vite dashboard | 5173 |
+| `tools` | one-shot CLI container | `tools` profile / `docker compose run` |
+| `ticker` | live Kite stream | `live` profile |
+| `scheduler` | scheduled pipeline | `live` profile |
+
+Common commands:
 
 ```bash
-docker compose run --rm ingest python manual_login.py
-```
+# CLI tasks
+docker compose run --rm tools trading-agent --help
+docker compose run --rm tools trading-agent login
+docker compose run --rm tools trading-agent ingest RELIANCE TCS --days 100
+docker compose run --rm tools trading-agent backtest RELIANCE --start 2025-01-01 --end 2025-06-30
 
-### Fetch Data in Container
+# Enable long-running broker services only when ready
+docker compose --profile live up -d ticker scheduler
 
-```bash
-# Full backfill
-docker compose run --rm ingest trading-agent ingest --all
-
-# Specific symbols
-docker compose run --rm ingest trading-agent ingest --symbol RELIANCE TCS INFY --days 100
-
-# Verify data
-docker compose exec api trading-agent storage-stats
-```
-
-### Service Access
-
-| Service | URL | Description |
-|---------|-----|-------------|
-| API | http://localhost:8000 | REST API + WebSocket |
-| API Docs | http://localhost:8000/docs | Swagger UI |
-| Frontend | http://localhost:5173 | React dashboard |
-| PostgreSQL | localhost:5433 | `trading`/`trading`/`trading` |
-| Redis | localhost:6379 | Caching & pub/sub |
-
-### Common Operations
-
-```bash
-# View logs
-docker compose logs -f api        # API server
-docker compose logs -f ingest     # Data ingestion
-docker compose logs -f scheduler  # Periodic tasks
-
-# Run CLI in container
-docker compose exec api trading-agent --help
-docker compose exec api trading-agent diagnose RELIANCE
-
-# Run tests
-docker compose exec api pytest tests/unit/ -v
-
-# Stop services
+# Observe and stop
+docker compose logs -f api
+docker compose logs -f ticker scheduler
 docker compose down
-
-# Clean slate (removes volumes)
-docker compose down -v
-
-# Rebuild after changes
-docker compose up --build -d
 ```
 
----
+`./data` and `./models` are bind-mounted. Stopping or rebuilding containers does not remove those host files. Docker Compose no longer starts unused PostgreSQL or Redis services; the application still has direct SQLite consumers and therefore officially supports SQLite.
 
-## Architecture Overview
+## 10. CLI reference
 
-```
-trading-agent/
-├── src/trading_agent/
-│   ├── core/           # Config, indicators, signals, logging
-│   ├── ingest/         # Kite Connect, historical, live, news
-│   ├── storage/        # SQLite + Parquet storage
-│   ├── strategy/       # Signals, candidates, decision agents
-│   ├── risk/           # Portfolio risk, position monitoring
-│   ├── analysis/       # Opportunities, rankings, digests
-│   ├── api/            # FastAPI REST + WebSocket
-│   ├── research/       # Backtesting, edge diagnosis
-│   ├── optimize/       # Walk-forward optimization
-│   └── cli/            # Main CLI entry point
-├── tests/              # Unit & integration tests
-├── frontend/           # React + Vite dashboard
-└── docker-compose.yml  # Local development stack
-```
+| Command | Purpose |
+|---|---|
+| `trading-agent login` | Refresh Kite token using the automated flow |
+| `trading-agent ingest [SYMBOL...]` | Fetch recent historical candles |
+| `trading-agent backfill [SYMBOL...]` | Fetch a longer history |
+| `trading-agent storage-stats` | Summarize Parquet data |
+| `trading-agent compact SYMBOL` | Compact a symbol's Parquet data |
+| `trading-agent diagnose [SYMBOL...]` | Compare signal behavior with baselines |
+| `trading-agent backtest SYMBOL...` | Replay a period using stored data |
+| `trading-agent pipeline [SYMBOL...]` | Run candidate/opportunity processing once |
+| `trading-agent news [SYMBOL...]` | Fetch current financial headlines |
+| `trading-agent api` | Start the API through the main CLI |
+| `trading-agent optimize ...` | Walk-forward, ML, and strategy-lab commands |
 
----
+Always use `--help` on a command before a long or quota-consuming run.
 
-## Data Flow
+## 11. Data and schema
 
-1. **Ingestion**: Kite Connect REST/WebSocket → Parquet files (partitioned by symbol/interval)
-2. **Processing**: Technical indicators (RSI, ADX, ATR, MACD) + Pattern detection
-3. **Signals**: Rule-based, ML, LLM decision agents run independently
-4. **Risk**: Position sizing, portfolio limits, stop/target monitoring
-5. **Analysis**: Opportunity ranking, sentiment, daily digests
-6. **API**: REST endpoints serve data to frontend
+- SQLite: configuration, paper positions, signals, model metadata, and monitoring records.
+- Parquet: historical and live OHLCV candle series.
+- Model directory: serialized ML models plus `registry.json`.
+- Cache directory: downloaded instruments and derived caches.
 
----
-
-## Configuration
-
-All configuration via `.env` file or environment variables:
-
-```env
-# Kite Connect (required)
-KITE_API_KEY=
-KITE_API_SECRET=
-KITE_TOTP_SECRET=
-KITE_USER_ID=
-KITE_PASSWORD=
-KITE_REDIRECT_URL=http://localhost
-
-# Database
-DB_URL=sqlite:///data/trading.db
-
-# API
-API_HOST=0.0.0.0
-API_PORT=8000
-API_RELOAD=false
-
-# ML
-ML_MODEL_DIR=models
-ML_FEATURE_VERSION=v2
-
-# Logging
-LOG_LEVEL=INFO
-LOG_FORMAT=console
-LOG_FILE=logs/trading.log
-```
-
----
-
-## Testing
+Fresh databases can be created either by API startup or by:
 
 ```bash
-# Run all tests
+alembic upgrade head
+```
+
+If an initial migration has already been applied elsewhere, create a new revision for schema changes rather than rewriting history.
+
+## 12. Tests and developer checks
+
+```bash
+# Backend
 pytest
-
-# Run unit tests only
-pytest tests/unit/ -v
-
-# Run with coverage
 pytest --cov=trading_agent --cov-report=html
+ruff check src migrations
 
-# Run specific module
-pytest tests/test_signals.py -v
+# Frontend
+cd frontend
+npm run typecheck
+npm run build
 ```
 
----
+CI uses Python 3.11, SQLite, the backend tests, and the frontend production build.
 
-## Troubleshooting
+## 13. Troubleshooting
 
-### Common Issues
+### Import or command not found
 
-| Issue | Solution |
-|-------|----------|
-| `Invalid api_key or access_token` | Run `manual_login.py` to generate fresh token |
-| `No data for symbol` | Run `trading-agent ingest SYMBOL` first |
-| `Module not found` errors | `pip install -e ".[dev]"` in project root |
-| Playwright auto-login fails | Use `manual_login.py` instead |
-| Database locked | Only one process should write to SQLite |
-| `Module trading_agent not found` | Run `pip install -e .` from project root |
-
-### Auto-login Issues
+Activate the intended virtual environment and reinstall from the repository root:
 
 ```bash
-# Check TOTP secret is valid
-python -c "import pyotp, os; print(pyotp.TOTP(os.getenv('KITE_TOTP_SECRET')).now())"
-
-# Run with debug
-python -m trading_agent.ingest.kite_auto_login 2>&1 | head -50
+pip install -e ".[dev]"
+python -m trading_agent.cli --help
 ```
 
-### Database Issues
+### API is healthy but dashboard is empty
+
+This is normal on a fresh installation. Authenticate and ingest one or two explicit symbols, then reload the dashboard.
+
+### Readiness says database is unavailable
+
+Confirm `DB_URL=sqlite:///data/trading.db`, the `data` directory is writable, and only one intended stack is running. The readiness query uses SQLAlchemy 2-compatible SQL.
+
+### Kite login fails
+
+- Confirm every `KITE_*` value is set and the redirect URL exactly matches the Kite app.
+- Run `playwright install chromium` for automatic login.
+- Use `python manual_login.py` when browser automation changes or is blocked.
+- Generate a new request token; request tokens expire quickly.
+
+### Docker service exits
 
 ```bash
-# Check DB health
-docker compose exec db pg_isready -U trading -d trading
-
-# View DB logs
-docker compose logs db
+docker compose ps -a
+docker compose logs api
+docker compose run --rm tools trading-agent --help
 ```
 
-### Port Conflicts
+If `ticker` exits, refresh the Kite token and restart only that service.
 
-Change ports in `docker-compose.yml` if 8000/5433/6379/5173 are in use.
+### SQLite lock errors
 
----
+Stop duplicate local/Docker schedulers or tickers. Keep the database on a local disk, not a network share. PostgreSQL is not yet a drop-in replacement because maintenance and health modules still use SQLite-specific queries.
 
-## Development
+### Frontend build warning about a large chart chunk
 
-### Code Quality
+The build succeeds; Plotly is the large lazy-loaded chart dependency. It is a performance optimization opportunity, not a startup failure.
+
+## 14. Safe shutdown
+
+Use `Ctrl+C` for local processes. For Docker:
 
 ```bash
-# Format code
-black src/ tests/
-
-# Lint
-ruff check src/ tests/
-
-# Type check
-mypy src/trading_agent
+docker compose down
 ```
 
-### Pre-commit Hooks
-
-```bash
-pre-commit install
-pre-commit run --all-files
-```
-
----
-
-## Project Structure Details
-
-### Core Modules
-
-| Module | Purpose |
-|--------|---------|
-| `config.py` | Pydantic Settings for all configuration |
-| `quant_indicators.py` | Vectorized RSI, ATR, ADX, MACD, etc. |
-| `pattern_detection.py` | Candlestick and chart patterns |
-| `signals.py` | Rule-based signal evaluation |
-| `position_sizing.py` | ATR-based sizing with Kelly/Optimal f |
-| `circuit_breaker.py` | Resilience for external APIs |
-| `freshness.py` | Data freshness monitoring |
-
-### Ingestion Modules
-
-| Module | Purpose |
-|--------|---------|
-| `kite_auth.py` | Manual Kite login flow |
-| `kite_auto_login.py` | Automated TOTP login (Playwright) |
-| `fetch_historical.py` | Resumable backfill, rate-limited |
-| `live_ticker.py` | WebSocket → 1-min candles |
-| `gap_healer.py` | Missing candle detection/repair |
-| `fetch_news.py` | Multi-source news fetching |
-
-### Strategy Modules
-
-| Module | Purpose |
-|--------|---------|
-| `decision_agent.py` | Rule-based BUY/SELL/HOLD |
-| `ml_decision_agent.py` | ML v1 inference |
-| `ml_decision_agent_v2.py` | ML v2 (walk-forward, regimes) |
-| `llm_decision_agent.py` | LLM decisions via OpenRouter |
-| `candidates.py` | 11 candidate strategies |
-| `hybrid_strategy.py` | Backtest-selects best mode |
-
-### Risk Modules
-
-| Module | Purpose |
-|--------|---------|
-| `portfolio_risk.py` | Risk budget, correlation clusters |
-| `position_monitor.py` | Live P&L, stop/target checks |
-| `wallet.py` | Paper trading accounting |
-
----
-
-## API Endpoints
-
-```
-GET  /api/v1/health              # Health check
-GET  /api/v1/symbols             # List symbols
-GET  /api/v1/symbols/{symbol}    # Symbol details
-GET  /api/v1/history/{symbol}    # Historical candles
-GET  /api/v1/opportunities       # Current opportunities
-GET  /api/v1/positions           # Open positions
-POST /api/v1/positions           # Create position
-POST /api/v1/positions/{id}/close # Close position
-GET  /api/v1/wallet/summary      # Wallet snapshot
-GET  /api/v1/wallet/metrics      # Performance metrics
-GET  /api/v1/watchlist           # Watchlist
-POST /api/v1/watchlist           # Add to watchlist
-GET  /api/v1/liveness/freshness  # Data freshness
-GET  /api/v1/liveness/storage    # Storage stats
-```
-
----
-
-## Disclaimer
-
-**Paper trading only.** This software is for research and educational purposes. Nothing in this repository places real orders. The `positions` table is a manual ledger. Past performance does not guarantee future results. Trade at your own risk.
-
----
-
-## Support
-
-- Run any command with `--help` for options
-- Check logs in `./logs/` directory
-- Run self-tests: `python -m trading_agent.research.backtest --selftest`
-- View API docs at `http://localhost:8000/docs`
+Avoid `docker compose down -v` unless you intentionally want to remove Docker-managed volumes such as frontend dependencies. Project data is stored in bind-mounted `./data` and `./models`; back those up before manual deletion.

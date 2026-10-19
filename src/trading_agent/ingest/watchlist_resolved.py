@@ -13,8 +13,8 @@ logger = get_logger(__name__)
 
 # Default watchlist files
 DEFAULT_WATCHLISTS = {
-    "nifty50": "symbols_nifty50.txt",
-    "nifty500": "symbols_nifty500.txt",
+    "nifty50": "symbols.txt",
+    "nifty500": "symbols_nifty500_plus.txt",
     "nse_all": "symbols_nse_all.txt",
 }
 
@@ -31,6 +31,8 @@ class WatchlistManager:
     def load_from_file(self, filename: str) -> list[str]:
         """Load symbols from a text file."""
         path = self.data_dir / filename
+        if not path.exists():
+            path = Path.cwd() / filename
         if not path.exists():
             logger.warning("watchlist_file_not_found", file=str(path))
             return []
@@ -120,7 +122,8 @@ class WatchlistManager:
             return symbols
 
         if name:
-            return self.load_custom(name)
+            filename = DEFAULT_WATCHLISTS.get(name, f"symbols_{name}.txt")
+            return self.load_from_file(filename)
 
         if use_db:
             db_symbols = await self.get_active_watchlist()

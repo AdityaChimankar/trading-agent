@@ -368,8 +368,22 @@ class PaperWallet:
         if not self.trades:
             return {
                 "total_trades": 0,
+                "winning_trades": 0,
+                "losing_trades": 0,
                 "total_pnl": 0.0,
+                "total_pnl_pct": 0.0,
                 "win_rate": 0.0,
+                "avg_win": 0.0,
+                "avg_loss": 0.0,
+                "largest_win": 0.0,
+                "largest_loss": 0.0,
+                "profit_factor": 0.0,
+                "max_drawdown_pct": 0.0,
+                "avg_holding_minutes": 0.0,
+                "total_charges": 0.0,
+                "current_cash": self.cash,
+                "current_invested": self.invested,
+                "open_positions": len(self.open_positions),
             }
 
         pnls = [t.net_pnl for t in self.trades]

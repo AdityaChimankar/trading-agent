@@ -1,5 +1,7 @@
 # Task: Implement Missing Subsystems for Integration Tests
 
+> Archived implementation brief. Completed and regression-tested as of 2026-10-19. For current work, use [TASKS.md](TASKS.md); for current interfaces, use [DESIGN.md](DESIGN.md).
+
 ## Overview
 Three integration test files require full implementation of subsystems that were designed but never built:
 1. `test_portfolio_exposure.py` - Portfolio risk coordination with exposure caps

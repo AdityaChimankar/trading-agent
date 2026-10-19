@@ -1,11 +1,13 @@
 # Edge analysis: the signal does not beat random entry
 
+> Historical research note, reviewed 2026-10-19. These are point-in-time results, not current performance claims. Re-run them on current data before making a strategy decision.
+
 Measured with `research/diagnose_edge.py`. This document records what was
 measured, what it means, and which changes are worth testing — so nobody
 re-runs the experiment from scratch or, worse, tunes thresholds on a signal that
 has nothing to tune.
 
-Tool: `python -m research.diagnose_edge --n 120` (add `--exits` for §9)
+Original tool: `research/diagnose_edge.py` before the package restructure.
 Sample: 120 symbols, 2,201,290 candles, 6-candle horizon, **gross of costs**
 
 ---
@@ -267,15 +269,9 @@ Ordered by measured evidence, best first.
 ## Reproducing
 
 ```bash
-python -m research.diagnose_edge --n 120          # the tables above (default is 60 symbols)
-python -m research.diagnose_edge --n 40 --exits   # adds the exit-variant section
-python -m research.diagnose_edge --all            # whole watchlist
-python -m research.diagnose_edge RELIANCE TCS     # specific symbols
-
-python -m strategy.session_features               # §7 features: causality proof
-python -m strategy.session_features --cost-cover  # §7: expected move vs the round trip
-python -m strategy.candidates                     # §7 candidates: admit-rate proof
-python -m research.strategy_lab --n 60            # §7 candidate EV table
+trading-agent diagnose RELIANCE TCS
+trading-agent optimize strategy-lab RELIANCE
+pytest tests/test_signals.py tests/unit/test_strategy.py
 ```
 
 Sections: 1 baseline · 2 signal vs baseline · 3 component ablation · 4

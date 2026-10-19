@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, synonym
 
 
 @dataclass
@@ -86,11 +86,6 @@ class Base(DeclarativeBase):
     )
 
 
-# Remove any existing open_positions table from metadata to avoid conflicts
-if "open_positions" in Base.metadata.tables:
-    Base.metadata.remove(Base.metadata.tables["open_positions"])
-
-
 class Watchlist(Base):
     """Watchlist symbols."""
 
@@ -151,16 +146,25 @@ class Position(Base):
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     action: Mapped[str] = mapped_column(String(10), nullable=False)  # BUY, SELL
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
-    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    position_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    position_value: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_amount: Mapped[float] = mapped_column(Float, nullable=False)
     stop_loss: Mapped[float] = mapped_column(Float, nullable=False)
     take_profit: Mapped[float | None] = mapped_column(Float)
-    strategy: Mapped[str] = mapped_column(String(50), default="rule")
-    status: Mapped[str] = mapped_column(String(20), default="OPEN")  # OPEN, CLOSED, STOPPED
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    signal_source: Mapped[str] = mapped_column(String(50), default="rule")
     exit_price: Mapped[float | None] = mapped_column(Float)
     exit_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     pnl: Mapped[float | None] = mapped_column(Float)
     position_metadata: Mapped[str | None] = mapped_column(Text)
+
+    # Backwards-compatible Python names used by the API and risk layer. The
+    # physical schema has one canonical set of names shared with init_db and
+    # Alembic.
+    quantity = synonym("position_size")
+    entry_time = synonym("opened_at")
+    strategy = synonym("signal_source")
 
 
 class Opportunity(Base):
@@ -174,8 +178,8 @@ class Opportunity(Base):
     score: Mapped[float] = mapped_column(Float, nullable=False)
     rank: Mapped[int] = mapped_column(Integer)
     rule_signal: Mapped[str] = mapped_column(String(10))
-    llm_signal: Mapped[str] = mapped_column(String(10))
-    ml_signal: Mapped[str] = mapped_column(String(10))
+    llm_signal: Mapped[str | None] = mapped_column(String(10))
+    ml_signal: Mapped[str | None] = mapped_column(String(10))
     ml_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     risk_reward: Mapped[float | None] = mapped_column(Float)
     atr: Mapped[float | None] = mapped_column(Float)
@@ -280,9 +284,15 @@ class Database:
         self.url = url or settings.database.url
         self.echo = echo or settings.database.echo
 
+        async_url = self.url
+        if async_url.startswith("sqlite://"):
+            async_url = async_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+        elif async_url.startswith("postgresql://"):
+            async_url = async_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
         # Async engine
         self.async_engine: AsyncEngine = create_async_engine(
-            self.url.replace("sqlite://", "sqlite+aiosqlite://"),
+            async_url,
             echo=self.echo,
             pool_pre_ping=True,
         )
@@ -349,8 +359,10 @@ def get_database(url: str | None = None, echo: bool = False) -> Database:
             import sys
             module_globals = sys.modules[__name__].__dict__
             url = module_globals.get("DB_PATH", get_settings().database.url)
-            # Ensure it's a proper SQLite URL
-            if not url.startswith("sqlite"):
+            # A monkeypatched filesystem path is used by tests. Preserve real
+            # database URLs instead of accidentally wrapping PostgreSQL URLs
+            # in a SQLite URL.
+            if "://" not in str(url):
                 url = f"sqlite:///{url}"
         _db = Database(url, echo)
     return _db
@@ -453,7 +465,9 @@ def init_db(db_path: str | None = None) -> None:
                 exit_price REAL,
                 exit_time TIMESTAMP,
                 pnl REAL,
-                position_metadata TEXT
+                position_metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS opportunities (
@@ -540,7 +554,8 @@ def init_db(db_path: str | None = None) -> None:
                 holding_minutes INTEGER NOT NULL,
                 entry_time TIMESTAMP NOT NULL,
                 exit_time TIMESTAMP NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         conn.commit()
@@ -708,6 +723,16 @@ class PositionRepository(BaseRepository):
             positions.append(pos)
         
         return positions
+
+    async def get_by_status(self, status: str, symbol: str | None = None) -> list[Position]:
+        """Get ORM positions by case-insensitive status."""
+        from sqlalchemy import func
+
+        query = select(Position).where(func.lower(Position.status) == status.lower())
+        if symbol:
+            query = query.where(Position.symbol == symbol.upper())
+        result = await self.session.execute(query.order_by(Position.opened_at.desc()))
+        return list(result.scalars().all())
 
 
 class OpportunityRepository(BaseRepository):

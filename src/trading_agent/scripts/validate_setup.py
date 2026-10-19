@@ -67,7 +67,7 @@ def check_kite_auth() -> bool:
         return True
     except Exception as e:
         print(f"  {FAIL_MARK} Kite auth failed: {e}")
-        print(f"        Access tokens expire daily (~7:30 AM IST) - re-run: python -m ingest.kite_auth")
+        print("        Access tokens expire daily (~7:30 AM IST) - re-run: python -m ingest.kite_auth")
         return False
 
 
@@ -85,8 +85,8 @@ def check_kite_data_access() -> bool:
         return False
     except Exception as e:
         print(f"  {FAIL_MARK} Market data request failed: {e}")
-        print(f"        If this says 'permission denied', your Kite Connect subscription "
-              f"may not include market data access (needs the paid plan, not just order APIs)")
+        print("        If this says 'permission denied', your Kite Connect subscription "
+              "may not include market data access (needs the paid plan, not just order APIs)")
         return False
 
 
@@ -102,7 +102,7 @@ def check_watchlist() -> bool:
         return True
     except Exception as e:
         print(f"  {FAIL_MARK} Could not read watchlist: {e}")
-        print(f"        Run: python -m storage.db")
+        print("        Run: python -m storage.db")
         return False
 
 
@@ -132,7 +132,7 @@ def check_openrouter_api() -> bool:
         return True
     except Exception as e:
         print(f"  {FAIL_MARK} OpenRouter API call failed: {e}")
-        print(f"        Check OPENROUTER_API_KEY is valid at https://openrouter.ai/keys")
+        print("        Check OPENROUTER_API_KEY is valid at https://openrouter.ai/keys")
         return False
 
 

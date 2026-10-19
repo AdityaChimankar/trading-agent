@@ -224,22 +224,25 @@ class MockLLMClient(LLMClient):
 
 def create_llm_client(provider: str | None = None) -> LLMClient:
     """Create LLM client based on configuration."""
-    get_settings()
+    settings = get_settings()
 
-    # Try to get provider from settings or environment
     if provider is None:
-        provider = "openai"  # default
+        provider = settings.llm.provider
+
+    if provider == "mock":
+        return MockLLMClient()
+
+    if not settings.llm.api_key:
+        logger.warning("llm_api_key_missing_using_mock", provider=provider)
+        return MockLLMClient()
 
     if provider == "openai":
-        # Use OpenAI-compatible (could be OpenAI, Azure, Ollama, etc.)
-        base_url = "https://api.openai.com/v1"
-        api_key = ""  # Would come from settings/env
-        model = "gpt-4o-mini"
-        return OpenAICompatibleClient(base_url, api_key, model)
+        return OpenAICompatibleClient(
+            settings.llm.base_url,
+            settings.llm.api_key,
+            settings.llm.model,
+        )
     elif provider == "anthropic":
-        api_key = ""  # Would come from settings/env
-        return AnthropicClient(api_key)
-    elif provider == "mock":
-        return MockLLMClient()
+        return AnthropicClient(settings.llm.api_key, settings.llm.model)
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

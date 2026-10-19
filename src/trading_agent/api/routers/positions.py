@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime
+from datetime import UTC, datetime
 
 from trading_agent.storage.db import get_database, PositionRepository, Position
 
@@ -45,11 +45,10 @@ async def list_positions(
     async with get_database().session() as session:
         repo = PositionRepository(session)
 
-        if status == "OPEN":
+        if status.lower() == "open":
             positions = await repo.get_open(symbol)
         else:
-            # Would need additional query for closed positions
-            positions = await repo.get_open(symbol)
+            positions = await repo.get_by_status(status, symbol)
 
         return [
             PositionResponse(
@@ -77,16 +76,20 @@ async def create_position(position: PositionCreate):
     async with get_database().session() as session:
         repo = PositionRepository(session)
 
+        position_value = position.entry_price * position.quantity
+        risk_amount = abs(position.entry_price - position.stop_loss) * position.quantity
         pos = await repo.create(
             symbol=position.symbol.upper(),
             action=position.action.upper(),
             entry_price=position.entry_price,
-            entry_time=datetime.now(),
-            quantity=position.quantity,
+            opened_at=datetime.now(UTC),
+            position_size=position.quantity,
+            position_value=position_value,
+            risk_amount=risk_amount,
             stop_loss=position.stop_loss,
             take_profit=position.take_profit,
-            strategy=position.strategy,
-            status="OPEN",
+            signal_source=position.strategy,
+            status="open",
         )
 
         return PositionResponse(
@@ -119,7 +122,7 @@ async def close_position(
         if not pos:
             raise HTTPException(status_code=404, detail="Position not found")
 
-        if pos.status != "OPEN":
+        if pos.status.lower() != "open":
             raise HTTPException(status_code=400, detail="Position already closed")
 
         # Calculate PnL
@@ -129,9 +132,9 @@ async def close_position(
             pnl = (pos.entry_price - exit_price) * pos.quantity
 
         # Update position
-        pos.status = "CLOSED"
+        pos.status = "closed"
         pos.exit_price = exit_price
-        pos.exit_time = datetime.now()
+        pos.exit_time = datetime.now(UTC)
         pos.pnl = pnl
 
         await session.commit()

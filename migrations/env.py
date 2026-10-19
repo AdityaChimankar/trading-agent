@@ -12,7 +12,10 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Add your model's MetaData object here for 'autogenerate' support
+from trading_agent.core.config import get_settings
 from trading_agent.storage.db import Base
+
+config.set_main_option("sqlalchemy.url", get_settings().database.url.replace("%", "%%"))
 target_metadata = Base.metadata
 
 # Other configurations

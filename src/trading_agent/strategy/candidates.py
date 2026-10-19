@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
+import pandas as pd
 
 from trading_agent.core.logging_config import get_logger
 from trading_agent.core.position_sizing import PositionSizingConfig, calculate_position_size
@@ -74,8 +75,23 @@ class CandidateGenerator:
         portfolio_value: float = 1000000,
     ) -> Candidate | None:
         """Generate candidate for a single symbol."""
-        # Read latest data
+        """Generate a candidate from the latest stored candles."""
         df = self.parquet.read_latest(symbol, interval, n=lookback + 50)
+        return self.generate_from_data(df, symbol, interval, portfolio_value)
+
+    def generate_from_data(
+        self,
+        df: pd.DataFrame,
+        symbol: str,
+        interval: str = "5minute",
+        portfolio_value: float = 1000000,
+    ) -> Candidate | None:
+        """Generate a candidate from an explicit, time-bounded data frame.
+
+        Backtests and scheduled cycles use this method so the decision is based
+        on exactly the candles supplied by the caller and cannot accidentally
+        read future data from the Parquet store.
+        """
         if (
             df.empty
             or len(df)

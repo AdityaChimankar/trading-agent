@@ -44,6 +44,8 @@ class BacktestTrade:
     exit_price: float | None
     quantity: int
     action: str  # BUY, SELL
+    stop_loss: float
+    take_profit: float | None
     gross_pnl: float = 0.0
     commission: float = 0.0
     slippage: float = 0.0
@@ -160,9 +162,7 @@ class BacktestEngine:
                 if len(hist_df) < 50:
                     continue
 
-                candidate = self.generator.generate_for_symbol(
-                    symbol, interval, lookback=len(hist_df)
-                )
+                candidate = self.generator.generate_from_data(hist_df, symbol, interval)
                 if not candidate or candidate.rule_action == "HOLD":
                     continue
 
@@ -206,13 +206,13 @@ class BacktestEngine:
         # Calculate stop loss and take profit
         stop_distance = candidate.atr * self.config.stop_loss_atr_mult
         if candidate.rule_action == "BUY":
-            entry_price - stop_distance
-            entry_price + stop_distance * (
+            stop_loss = entry_price - stop_distance
+            take_profit = entry_price + stop_distance * (
                 self.config.take_profit_atr_mult / self.config.stop_loss_atr_mult
             )
         else:
-            entry_price + stop_distance
-            entry_price - stop_distance * (
+            stop_loss = entry_price + stop_distance
+            take_profit = entry_price - stop_distance * (
                 self.config.take_profit_atr_mult / self.config.stop_loss_atr_mult
             )
 
@@ -227,6 +227,8 @@ class BacktestEngine:
             exit_price=None,
             quantity=quantity,
             action=candidate.rule_action,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
             commission=commission,
             slippage=slippage,
         )

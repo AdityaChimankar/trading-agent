@@ -38,11 +38,11 @@ from trading_agent.core.freshness import in_market_hours
 from trading_agent.core.logging_config import get_logger
 from trading_agent.ingest.fetch_news import fetch_latest_news
 from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
-from trading_agent.risk.position_monitor import PositionMonitor
-from trading_agent.strategy.decision_agent import RuleDecisionAgent
-from trading_agent.strategy.llm_decision_agent import LLMDecisionAgent
-from trading_agent.strategy.ml_decision_agent import MLDecisionAgent
-from trading_agent.strategy.shadow import ShadowTester
+from trading_agent.risk.position_monitor import run_monitor_cycle as monitor_positions
+from trading_agent.strategy.decision_agent import run_decision_cycle as decide_symbols
+from trading_agent.strategy.llm_decision_agent import run_llm_decision_cycle as decide_symbols_llm
+from trading_agent.strategy.ml_decision_agent import run_ml_decision_cycle as decide_symbols_ml
+from trading_agent.strategy.shadow import run_shadow_cycle as run_shadow_symbols
 from trading_agent.scripts.ml_retrain import run_scheduled_job as ml_retrain_scheduled
 
 logger = get_logger(__name__)
@@ -58,6 +58,13 @@ async def fetch_and_store_news():
 def flush_old_news(days: int = 3):
     """Flush old news from database (placeholder)."""
     logger.info("flush_old_news", days=days)
+
+
+def fetch_news_cycle() -> None:
+    """Run the asynchronous news job from APScheduler."""
+    import asyncio
+
+    asyncio.run(fetch_and_store_news())
 
 
 def run_sentiment_pass():
@@ -113,62 +120,28 @@ def generate_digest():
 
 async def run_decision_cycle():
     """Run rule-based decision cycle for all symbols."""
-    symbols = get_watchlist_symbols()
-    agent = RuleDecisionAgent()
-    for symbol in symbols:
-        try:
-            decision = await agent.decide(symbol)
-            logger.info("rule_decision", symbol=symbol, action=decision.action, confidence=decision.confidence)
-        except Exception as e:
-            logger.error("rule_decision_failed", symbol=symbol, error=str(e))
+    await decide_symbols(get_watchlist_symbols())
 
 
 async def run_llm_decision_cycle():
     """Run LLM decision cycle for all symbols."""
-    symbols = get_watchlist_symbols()
-    agent = LLMDecisionAgent()
-    for symbol in symbols:
-        try:
-            decision = await agent.decide(symbol)
-            logger.info("llm_decision", symbol=symbol, action=decision.action, confidence=decision.confidence)
-        except Exception as e:
-            logger.error("llm_decision_failed", symbol=symbol, error=str(e))
+    await decide_symbols_llm(get_watchlist_symbols())
 
 
 async def run_ml_decision_cycle():
     """Run ML decision cycle for all symbols."""
-    symbols = get_watchlist_symbols()
-    agent = MLDecisionAgent()
-    for symbol in symbols:
-        try:
-            decision = await agent.decide(symbol)
-            logger.info("ml_decision", symbol=symbol, action=decision.action, confidence=decision.confidence)
-        except Exception as e:
-            logger.error("ml_decision_failed", symbol=symbol, error=str(e))
+    await decide_symbols_ml(get_watchlist_symbols())
 
 
 async def run_shadow_cycle():
     """Run shadow testing cycle."""
-    symbols = get_watchlist_symbols()
-    tester = ShadowTester()
-    for symbol in symbols:
-        try:
-            result = await tester.test(symbol)
-            logger.info("shadow_test", symbol=symbol, result=result)
-        except Exception as e:
-            logger.error("shadow_test_failed", symbol=symbol, error=str(e))
+    await run_shadow_symbols(get_watchlist_symbols())
 
 
 async def run_monitor_cycle():
     """Run position monitor cycle."""
-    monitor = PositionMonitor()
-    await monitor.initialize()
-    # Check exits for all positions
-    for symbol in monitor.get_all_states():
-        exits = monitor.check_exits(symbol)
-        for exit_info in exits:
-            logger.info("position_exit_signal", symbol=symbol, reason=exit_info["reason"])
-    logger.info("run_monitor_cycle completed", positions=len(monitor.get_all_states()))
+    result = await monitor_positions()
+    logger.info("run_monitor_cycle_completed", **result)
 
 
 def decide_cycle():
@@ -215,7 +188,7 @@ def end_of_session_heal():
 
 
 # Create scheduler AFTER all functions are defined
-scheduler = BlockingScheduler()
+scheduler = BlockingScheduler(timezone="Asia/Kolkata")
 
 
 # Weekly ML model retraining with drift detection.
@@ -234,7 +207,7 @@ def ml_retrain_cycle():
 
 # Add jobs to scheduler
 scheduler.add_job(
-    fetch_and_store_news,
+    fetch_news_cycle,
     CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/5"),
     id="fetch_news",
 )
@@ -306,7 +279,12 @@ scheduler.add_job(
 # Daily pre-flight validation - 8:15 AM on weekdays (before market open)
 # Runs validation and logs results; doesn't stop the scheduler if it fails
 scheduler.add_job(
-    lambda: subprocess.run([sys.executable, "-m", "scripts.validate_setup"], capture_output=True, text=True),
+    lambda: subprocess.run(
+        [sys.executable, "-m", "trading_agent.scripts.validate_setup"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ),
     CronTrigger(day_of_week="mon-fri", hour=8, minute=15),
     id="daily_validation",
 )
@@ -336,7 +314,7 @@ scheduler.add_listener(
 
 
 def run_once_now():
-    fetch_and_store_news()
+    fetch_news_cycle()
     run_sentiment_pass()
     decide_cycle()
     ml_decision_cycle()
@@ -352,7 +330,8 @@ def _shutdown() -> None:
         logger.error("Error stopping scheduler", extra={"error": str(e)})
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Start the scheduled pipeline and block until shutdown."""
     from trading_agent.core.logging_config import setup_logging
     from trading_agent.core.shutdown import register_shutdown_handler
     setup_logging()
@@ -370,3 +349,7 @@ if __name__ == "__main__":
         "weekly ML retraining Sunday 2 AM..."
     )
     scheduler.start()
+
+
+if __name__ == "__main__":
+    main()

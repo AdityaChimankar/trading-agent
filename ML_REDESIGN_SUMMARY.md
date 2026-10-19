@@ -1,5 +1,7 @@
 # ML Pipeline Redesign Summary
 
+> Historical implementation summary, reviewed 2026-10-19. Use the installed CLI commands below and validate metrics again on current data before promotion.
+
 ## Problem
 The original ML model (train_ml_model.py / ml_decision_agent.py) had severe issues:
 - 48% accuracy (near random for 3-class)
@@ -97,24 +99,23 @@ Session/regime features from strategy/session_features.py:
 
 ### Train Enhanced Model
 ```bash
-python -m strategy.train_ml_model_v2 RELIANCE TCS INFY  # Specific symbols
-python -m strategy.train_ml_model_v2 --all               # All watchlist
+trading-agent optimize ml-model-v2 RELIANCE TCS INFY
 ```
 
 ### Run Enhanced ML Agent (Parallel Logging)
 ```bash
-python -m strategy.ml_decision_agent_v2 RELIANCE TCS INFY
-# Logs to ml_signals table for comparison with rule-based signals
+trading-agent-scheduler
+# Runs configured independent comparison cycles during scheduled windows.
 ```
 
 ### Backtest Comparison
 ```bash
-python -m research.backtest --selftest  # verify core.signals fast path
-python -m research.strategy_lab --n 60  # measure candidates vs baselines
+pytest tests/test_signals.py tests/unit/test_strategy.py
+trading-agent optimize strategy-lab RELIANCE
 ```
 
 ## Next Steps for Production
-1. Run full training on all watchlist symbols: `python -m strategy.train_ml_model_v2 --all`
+1. Train in explicit, reviewable batches: `trading-agent optimize ml-model-v2 RELIANCE TCS INFY`
 2. Monitor ml_signals table for live comparison with rule-based signals
 3. When ML track record justifies (STRATEGIES.md promotion criteria), integrate into decision_agent.py
 4. Consider ensemble: combine ML + Rule + LLM signals with weighted voting
@@ -129,5 +130,5 @@ python -m research.strategy_lab --n 60  # measure candidates vs baselines
 - [x] Feature importance analysis
 - [x] Comparison with rule-based baseline
 - [x] Live inference agent (ml_decision_agent_v2.py)
-- [ ] Full watchlist training (--all)
+- [ ] Full watchlist training in explicit batches
 - [ ] Drift monitoring in production

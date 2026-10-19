@@ -219,6 +219,7 @@ async def run_ml_decision_cycle(symbols: list[str] | None = None, interval: str 
     """Run ML decision cycle for all symbols."""
     from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
     from trading_agent.storage.parquet_store import get_parquet_store
+    from trading_agent.strategy.candidates import CandidateGenerator
     from trading_agent.strategy.ml_features import build_features
     
     if symbols is None:
@@ -237,6 +238,7 @@ async def run_ml_decision_cycle(symbols: list[str] | None = None, interval: str 
             return
 
     parquet = get_parquet_store()
+    generator = CandidateGenerator(parquet_store=parquet)
 
     for symbol in symbols:
         try:
@@ -255,19 +257,10 @@ async def run_ml_decision_cycle(symbols: list[str] | None = None, interval: str 
             # Get latest features
             latest_features = features_df.iloc[[-1]]
             
-            # Create a dummy candidate for decision
-            from trading_agent.strategy.candidates import Candidate
-            candidate = Candidate(
-                symbol=symbol,
-                timestamp=latest_features.index[-1],
-                close=df["close"].iloc[-1],
-                volume=df["volume"].iloc[-1],
-                rsi=latest_features.get("rsi", [50])[-1],
-                adx=latest_features.get("adx", [20])[-1],
-                pattern_bias=latest_features.get("pattern_bias", [0])[-1],
-                rule_action="HOLD",
-                rule_confidence=0.0,
-            )
+            candidate = generator.generate_from_data(df, symbol, interval)
+            if candidate is None:
+                logger.debug("no_candidate_generated", symbol=symbol)
+                continue
             
             decision = agent.decide(candidate, latest_features)
             logger.info("ml_decision", symbol=symbol, action=decision.action, confidence=decision.confidence)

@@ -43,6 +43,7 @@ logs/
 
 # Access tokens
 .access_token
+data/.access_token
 
 # Models
 data/indicator_cache/*.pkl
