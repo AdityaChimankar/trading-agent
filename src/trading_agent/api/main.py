@@ -17,6 +17,7 @@ from trading_agent.api.routers import (
     opportunities,
     pipeline,
     positions,
+    research,
     symbols,
     wallet,
     watchlist,
@@ -67,7 +68,7 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def authenticate(request, call_next):
         token = settings.api.auth_token
-        if token and request.method != "OPTIONS" and request.url.path not in {"/api/v1/health", "/api/v1/ready"}:
+        if token and request.method != "OPTIONS" and request.url.path not in {"/api/v1/health", "/api/v1/ready", "/api/v1/auth/status"}:
             supplied = request.headers.get("authorization", "")
             if not compare_digest(supplied.encode(), f"Bearer {token}".encode()):
                 return JSONResponse(status_code=401, content={"detail": "Authentication required"})
@@ -80,6 +81,14 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.get("/api/v1/auth/status", tags=["authentication"])
+    async def auth_status():
+        # Public capability only: never expose the token or broker credentials.
+        return JSONResponse(
+            content={"required": bool(settings.api.auth_token)},
+            headers={"Cache-Control": "no-store"},
+        )
 
     # Exception handlers
     @app.exception_handler(Exception)
@@ -98,6 +107,7 @@ def create_app() -> FastAPI:
     app.include_router(positions.router, prefix="/api/v1/positions", tags=["positions"])
     app.include_router(wallet.router, prefix="/api/v1/wallet", tags=["wallet"])
     app.include_router(pipeline.router, prefix="/api/v1/pipeline", tags=["pipeline"])
+    app.include_router(research.router, prefix="/api/v1/research", tags=["research"])
     app.include_router(digest.router, prefix="/api/v1/digest", tags=["digest"])
     app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["watchlist"])
     app.include_router(liveness.router, prefix="/api/v1/liveness", tags=["liveness"])

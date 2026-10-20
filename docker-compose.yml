@@ -8,9 +8,12 @@ x-app: &app
   environment:
     ENVIRONMENT: production
     API_HOST: 0.0.0.0
+    API_WORKERS: "1"
     KITE_LOGIN_HEADLESS: "true"
     DB_URL: sqlite:////app/data/trading.db
     DATA_DIR: /app/data
+    # Override the local .env log path with a writable, persistent container path.
+    LOG_FILE: /app/data/logs/trading-agent.log
     CACHE_DIR: /app/data/cache
     STORAGE_PARQUET_ROOT: /app/data/parquet
     ML_MODEL_DIR: /app/models

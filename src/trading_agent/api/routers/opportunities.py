@@ -2,14 +2,17 @@
 
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import List, Literal
 from datetime import datetime
+from dataclasses import asdict
 
 from trading_agent.analysis.opportunity_finder import OpportunityFinder, OpportunityConfig
 from trading_agent.strategy.candidates import CandidateGenerator
 from trading_agent.storage.parquet_store import get_parquet_store
+from trading_agent.strategy.hybrid_strategy import HybridStrategy
 
 router = APIRouter()
+Interval = Literal["minute", "1minute", "5minute", "15minute", "day"]
 
 
 class OpportunityResponse(BaseModel):
@@ -30,9 +33,9 @@ class OpportunityResponse(BaseModel):
 
 
 @router.get("/", response_model=List[OpportunityResponse])
-async def get_opportunities(
+def get_opportunities(
     symbols: str | None = Query(None, description="Comma-separated symbols"),
-    interval: str = Query("5minute"),
+    interval: Interval = Query("5minute"),
     min_score: float = Query(0.3, ge=0, le=1),
     max_results: int = Query(20, ge=1, le=100),
 ):
@@ -80,7 +83,7 @@ async def get_opportunities(
 
 
 @router.get("/{symbol}")
-async def get_opportunity_detail(symbol: str, interval: str = Query("5minute")):
+def get_opportunity_detail(symbol: str, interval: Interval = Query("5minute")):
     """Get detailed opportunity analysis for a symbol."""
     symbol = symbol.upper()
     parquet = get_parquet_store()
@@ -95,6 +98,39 @@ async def get_opportunity_detail(symbol: str, interval: str = Query("5minute")):
         return {"symbol": symbol, "opportunity": None}
 
     opp = opportunities[0]
-    details = finder.get_opportunity_details(opp)
+    details = finder.get_opportunity_details(opp, interval)
 
     return details
+
+
+@router.post("/{symbol}/decision")
+def preview_hybrid_decision(symbol: str, interval: Interval = Query("5minute")):
+    """On-demand research preview; never submits orders or invokes external AI.
+
+    The current API has no validated ML feature/model binding or async LLM
+    adapter. Expose that explicitly instead of manufacturing additional votes.
+    """
+    symbol = symbol.strip().upper()
+    parquet = get_parquet_store()
+    if symbol not in parquet.get_symbols():
+        raise HTTPException(status_code=404, detail="No stored data for symbol")
+    candidate = CandidateGenerator(parquet_store=parquet).generate_for_symbol(symbol, interval)
+    if candidate is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Not enough qualifying candles for this interval (history, volume, ADX or indicators).",
+        )
+    decision = HybridStrategy().decide(candidate)
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "timestamp": candidate.timestamp,
+        "mode": "rule_only",
+        "decision": asdict(decision),
+        "limitations": [
+            "Rule-only preview: ML model/feature binding is not connected to this endpoint.",
+            "LLM inference is not connected; no external AI request was made.",
+            "Voting share is not a probability of profit. Stored candles may be stale or incomplete.",
+            "Research only: no order, paper position or portfolio approval is created.",
+        ],
+    }

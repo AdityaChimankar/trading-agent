@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import bisect
 import itertools
-import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict
 
 import numpy as np
 import pandas as pd
@@ -17,8 +17,6 @@ from trading_agent.core.signals import (
     LOOKBACK_MIN,
     SWING_ORDER,
     DEFAULT_PARAMS,
-    prepare_symbol_series,
-    summarize,
 )
 from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
 
@@ -30,8 +28,8 @@ MIN_TRAIN_TRADES = 15
 MAX_WORKERS = 4
 
 PARAM_GRID = {
-    "rsi_oversold": [25, 30, 35],
-    "rsi_overbought": [65, 70, 75],
+    "pattern_confirm_buy_rsi": [35, 45, 50],
+    "pattern_confirm_sell_rsi": [50, 55, 65],
     "adx_threshold": [15, 20, 25],
 }
 
@@ -87,7 +85,7 @@ def precompute_pattern_bias_codes(
 def vectorized_evaluate(
     rsi: np.ndarray, adx: np.ndarray, pattern_codes: np.ndarray, params: dict
 ) -> np.ndarray:
-    p = {**DEFAULT_PARAMS, **(params or {})}
+    p = {**asdict(DEFAULT_PARAMS), **(params or {})}
     with np.errstate(invalid="ignore"):
         adx_ok = adx >= p["adx_threshold"]
         buy = adx_ok & (pattern_codes == 1) & (rsi < p["pattern_confirm_buy_rsi"])
@@ -95,16 +93,18 @@ def vectorized_evaluate(
     actions = np.zeros(len(rsi), dtype=np.int8)
     actions[sell] = 2
     actions[buy] = 1
-    actions[np.isnan(rsi) | np.isnan(adx)] = 0
+    actions[~np.isfinite(rsi) | ~np.isfinite(adx)] = 0
     return actions
 
 
 def vectorized_trades(
-    prepared: dict, pattern_codes: np.ndarray, params: dict, index_range: tuple
+    prepared: dict, pattern_codes: np.ndarray, params: dict | None, index_range: tuple,
+    cost_bps: float = 5.0,
 ) -> list:
     start, end = index_range
     start = max(LOOKBACK_MIN, start)
-    end = min(prepared["length"] - FORWARD_WINDOW, end)
+    # An outcome must close strictly inside its own train/test window.
+    end = min(prepared["length"], end) - FORWARD_WINDOW
     if start >= end:
         return []
 
@@ -119,16 +119,26 @@ def vectorized_trades(
 
     closes, timestamps = prepared["closes"], prepared["timestamps"]
     trades = []
+    next_free = start
     for local_i in trade_idx:
         i = start + local_i
-        entry_price, exit_price = closes[i], closes[i + FORWARD_WINDOW]
+        if i < next_free:
+            continue
+        entry_price, exit_price = prepared["opens"][i + 1], closes[i + FORWARD_WINDOW]
+        if not np.isfinite([entry_price, exit_price]).all() or min(entry_price, exit_price) <= 0:
+            continue
         pct_return = (exit_price - entry_price) / entry_price
         if actions[local_i] == 2:
             pct_return = -pct_return
+        pct_return -= cost_bps / 10000
+        next_free = i + FORWARD_WINDOW
         trades.append(
             {
                 "symbol": prepared["symbol"],
                 "timestamp": timestamps[i],
+                "signal_index": int(i),
+                "entry_index": int(i + 1),
+                "exit_index": int(i + FORWARD_WINDOW),
                 "action": "BUY" if actions[local_i] == 1 else "SELL",
                 "entry": entry_price,
                 "exit": exit_price,
@@ -139,119 +149,130 @@ def vectorized_trades(
 
 
 def vectorized_score(
-    prepared: dict, pattern_codes: np.ndarray, params: dict, index_range: tuple
+    prepared: dict, pattern_codes: np.ndarray, params: dict, index_range: tuple,
+    cost_bps: float = 5.0,
 ) -> tuple:
-    start, end = index_range
-    start = max(LOOKBACK_MIN, start)
-    end = min(prepared["length"] - FORWARD_WINDOW, end)
-    if start >= end:
-        return float("-inf"), 0
-
-    rsi_slice = prepared["rsis"][start:end]
-    adx_slice = prepared["adxs"][start:end]
-    pattern_slice = pattern_codes[start:end]
-    actions = vectorized_evaluate(rsi_slice, adx_slice, pattern_slice, params)
-
-    opens_entry = prepared["opens"][start + 1 : end + 1]
-    closes_exit = prepared["closes"][start + FORWARD_WINDOW : end + FORWARD_WINDOW]
-
-    pct_returns = (closes_exit - opens_entry) / opens_entry
-    pct_returns = np.where(actions == 2, -pct_returns, pct_returns)
-    pct_returns -= 0.0005
-
-    mask = actions != 0
-    count = int(mask.sum())
+    trades = vectorized_trades(prepared, pattern_codes, params, index_range, cost_bps)
+    count = len(trades)
     if count < MIN_TRAIN_TRADES:
         return float("-inf"), count
-    return float(pct_returns[mask].sum()), count
+    return float(sum(trade["return_pct"] for trade in trades)), count
 
 
-def optimize_fold(prepared: dict, pattern_codes: np.ndarray, train_range: tuple) -> dict | None:
+def optimize_fold(prepared: dict, pattern_codes: np.ndarray, train_range: tuple,
+                  cost_bps: float = 5.0) -> dict | None:
     best_params, best_score = None, float("-inf")
     for params in _grid_combinations():
-        score, _ = vectorized_score(prepared, pattern_codes, params, train_range)
+        score, _ = vectorized_score(prepared, pattern_codes, params, train_range, cost_bps)
         if score > best_score:
             best_score, best_params = score, params
     return best_params
 
 
-def run_walk_forward(symbol: str, verbose: bool = True) -> dict:
-    prepared = prepare_symbol_series(symbol)
-    if prepared is None:
-        return {}
+def run_walk_forward(symbol: str, verbose: bool = True, *, interval: str = "minute",
+                     train_candles: int = TRAIN_CANDLES, test_candles: int = TEST_CANDLES,
+                     cost_bps: float = 5.0) -> dict:
+    """Stored-candle, rule-only research. Never fit/promote the installed ML model."""
+    from datetime import UTC, datetime
+    from trading_agent.analysis.research_engine import completed_frame, INTERVAL_SECONDS
+    from trading_agent.storage.parquet_store import get_parquet_store
+    from trading_agent.strategy.research_features import prepare_research_frame
+
+    if interval not in INTERVAL_SECONDS:
+        raise ValueError("Unsupported interval")
+    if not (250 <= train_candles <= 10000 and 100 <= test_candles <= 5000):
+        raise ValueError("Train window must be 250-10000 and test window 100-5000 candles")
+    if not np.isfinite(cost_bps) or not 0 <= cost_bps <= 100:
+        raise ValueError("Round-trip cost must be 0-100 basis points")
+    frame = completed_frame(get_parquet_store(), symbol, interval, datetime.now(UTC))
+    required = train_candles + test_candles
+    if len(frame) < required:
+        return {"symbol": symbol, "interval": interval, "status": "insufficient_history",
+                "candles": len(frame), "required_candles": required, "folds": []}
+    prices = frame[["open", "high", "low", "close"]].to_numpy(dtype=float)
+    if not np.isfinite(prices).all() or (prices <= 0).any():
+        raise ValueError("Invalid OHLC prices in research history")
+    df = prepare_research_frame(frame)
+    prepared = {"symbol": symbol, "length": len(df), "rsis": df.rsi.to_numpy(),
+                "adxs": df.adx.to_numpy(), "opens": df.open.to_numpy(),
+                "closes": df.close.to_numpy(), "timestamps": df.timestamp.to_numpy()}
+    result = evaluate_walk_forward(prepared, df.pattern_code.to_numpy(), train_candles,
+                                   test_candles, cost_bps)
+    result.update({"interval": interval, "candles": len(df), "required_candles": required,
+                   "data_start": df.timestamp.iloc[0].isoformat(),
+                   "data_end": df.timestamp.iloc[-1].isoformat()})
+    if verbose:
+        import json
+        print(json.dumps(result, indent=2, default=str))
+    return result
+
+
+def evaluate_walk_forward(prepared, pattern_codes, train_candles=TRAIN_CANDLES,
+                          test_candles=TEST_CANDLES, cost_bps=5.0):
+    """Rolling train selection followed by disjoint, unseen test windows."""
+    symbol = prepared["symbol"]
 
     n = prepared["length"]
-    fold_size = TRAIN_CANDLES + TEST_CANDLES
-    if n < fold_size:
-        if verbose:
-            print(f"{symbol}: only {n} candles - need at least {fold_size}")
-        return {}
-
-    pattern_codes = precompute_pattern_bias_codes(prepared)
+    fold_size = train_candles + test_candles
 
     optimized_oos_trades, default_oos_trades, fold_params_log = [], [], []
-    start = 0
+    start, folds = 0, []
     while start + fold_size <= n:
-        train_range = (start, start + TRAIN_CANDLES)
-        test_range = (start + TRAIN_CANDLES, start + TRAIN_CANDLES + TEST_CANDLES)
+        train_range = (start, start + train_candles)
+        test_range = (start + train_candles, start + fold_size)
+        fold = {"train_start": train_range[0], "train_end_exclusive": train_range[1],
+                "test_start": test_range[0], "test_end_exclusive": test_range[1],
+                "test_from": str(prepared["timestamps"][test_range[0]]),
+                "test_to": str(prepared["timestamps"][test_range[1] - 1])}
 
-        best_params = optimize_fold(prepared, pattern_codes, train_range)
+        best_params = optimize_fold(prepared, pattern_codes, train_range, cost_bps)
         if best_params is None:
-            if verbose:
-                print(
-                    f"  Fold {len(fold_params_log) + 1}: no combo cleared {MIN_TRAIN_TRADES} min trades"
-                )
-            start += TEST_CANDLES
+            folds.append({**fold, "status": "insufficient_training_trades", "params": None})
+            start += test_candles
             continue
 
-        oos_optimized = vectorized_trades(prepared, pattern_codes, best_params, test_range)
-        oos_default = vectorized_trades(prepared, pattern_codes, None, test_range)
+        oos_optimized = vectorized_trades(prepared, pattern_codes, best_params, test_range, cost_bps)
+        oos_default = vectorized_trades(prepared, pattern_codes, None, test_range, cost_bps)
 
         optimized_oos_trades.extend(oos_optimized)
         default_oos_trades.extend(oos_default)
         fold_params_log.append(best_params)
 
-        if verbose:
-            print(
-                f"  Fold {len(fold_params_log)}: train[{train_range[0]}:{train_range[1]}] "
-                f"test[{test_range[0]}:{test_range[1]}] -> {best_params}, "
-                f"{len(oos_optimized)} OOS trades (optimized) vs {len(oos_default)} (default)"
-            )
-
-        start += TEST_CANDLES
-
-    if not fold_params_log:
-        return {}
-
-    optimized_result = (
-        summarize(f"{symbol} - OPTIMIZED" if verbose else symbol, optimized_oos_trades)
-        if verbose
-        else _summarize_quiet(optimized_oos_trades)
-    )
-    default_result = (
-        summarize(f"{symbol} - DEFAULT" if verbose else symbol, default_oos_trades)
-        if verbose
-        else _summarize_quiet(default_oos_trades)
-    )
+        folds.append({**fold, "status": "evaluated", "params": best_params,
+                      "optimized": _summarize_quiet(oos_optimized),
+                      "default": _summarize_quiet(oos_default)})
+        start += test_candles
 
     return {
         "symbol": symbol,
-        "optimized": optimized_result,
-        "default": default_result,
+        "status": "completed" if fold_params_log else "insufficient_training_trades",
+        "optimized": _summarize_quiet(optimized_oos_trades),
+        "default": _summarize_quiet(default_oos_trades),
         "fold_params": fold_params_log,
+        "folds": folds,
+        "evaluated_folds": len(fold_params_log),
+        "train_candles": train_candles, "test_candles": test_candles,
+        "purge_candles": FORWARD_WINDOW, "round_trip_cost_bps": cost_bps,
+        "grid_size": len(_grid_combinations()), "minimum_training_trades": MIN_TRAIN_TRADES,
+        "scope": "Rules only; no ML training, historical news, model promotion or orders",
+        "method": "Next-bar open entry, exit after 12 bars, non-overlapping positions, same costs in train/test",
+        "limitations": "Additive trade returns are not portfolio returns. No session-boundary exits, stop/target simulation, liquidity, taxes or financing model. Repeated research can overfit; retain a separate final holdout.",
     }
 
 
 def _summarize_quiet(trades: list) -> dict:
     if not trades:
-        return {"trades": 0}
+        return {"trades": 0, "win_rate": None, "total_return_pct": 0.0,
+                "mean_return_pct": None, "max_drawdown_pct": 0.0}
     returns = pd.Series([t["return_pct"] for t in trades])
     wins = returns[returns > 0]
-    returns[returns <= 0]
+    curve = np.r_[0.0, returns.cumsum().to_numpy()]
     return {
         "trades": len(trades),
         "win_rate": round(len(wins) / len(returns) * 100, 1),
-        "total_return_pct": round(((1 + returns).cumprod().iloc[-1] - 1) * 100, 2),
+        "total_return_pct": round(float(returns.sum()) * 100, 4),
+        "mean_return_pct": round(float(returns.mean()) * 100, 4),
+        "max_drawdown_pct": round(float((curve - np.maximum.accumulate(curve)).min()) * 100, 4),
     }
 
 
@@ -298,8 +319,8 @@ def run_walk_forward_multi(symbols: list, parallel: bool = True) -> dict:
     _all_optimized_trades, _all_default_trades = [], []
     helped_count, hurt_count = 0, 0
     for symbol, result in per_symbol_results.items():
-        opt_trades = result["optimized"].get("trades", 0)
-        def_trades = result["default"].get("trades", 0)
+        opt_trades = result.get("optimized", {}).get("trades", 0)
+        def_trades = result.get("default", {}).get("trades", 0)
         if opt_trades > 0 and def_trades > 0:
             if result["optimized"]["total_return_pct"] > result["default"]["total_return_pct"]:
                 helped_count += 1
@@ -316,12 +337,19 @@ def run_walk_forward_multi(symbols: list, parallel: bool = True) -> dict:
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    if not args:
-        run_walk_forward("RELIANCE")
-    elif args[0] == "--all":
-        run_walk_forward_multi(get_watchlist_symbols())
-    elif len(args) == 1:
-        run_walk_forward(args[0])
-    else:
-        run_walk_forward_multi(args)
+    import argparse
+    import json
+    parser = argparse.ArgumentParser(description="Offline rule-only walk-forward evaluation; no model promotion")
+    parser.add_argument("symbols", nargs="*", default=[])
+    parser.add_argument("--all", action="store_true", help="Explicitly evaluate the configured watchlist (expensive)")
+    parser.add_argument("--interval", choices=["minute", "5minute", "15minute", "day"], default="minute")
+    parser.add_argument("--train-candles", type=int, default=TRAIN_CANDLES)
+    parser.add_argument("--test-candles", type=int, default=TEST_CANDLES)
+    parser.add_argument("--cost-bps", type=float, default=5.0, help="Assumed total round-trip friction in basis points")
+    args = parser.parse_args()
+    selected = get_watchlist_symbols() if args.all else (args.symbols or ["RELIANCE"])
+    for symbol in selected:
+        result = run_walk_forward(symbol.strip().upper(), verbose=False, interval=args.interval,
+                                  train_candles=args.train_candles, test_candles=args.test_candles,
+                                  cost_bps=args.cost_bps)
+        print(json.dumps(result, indent=2, default=str))

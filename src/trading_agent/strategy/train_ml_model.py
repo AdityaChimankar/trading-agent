@@ -26,6 +26,7 @@ from trading_agent.core.logging_config import get_logger
 from trading_agent.core.ml_versioning import ModelRegistry, get_model_registry
 from trading_agent.storage.parquet_store import get_parquet_store
 from trading_agent.strategy.ml_features import prepare_features, FeatureConfig, get_feature_names
+from trading_agent.strategy.temporal_validation import METADATA_COLUMNS, three_way, folds, require_binary
 
 logger = get_logger(__name__)
 
@@ -39,7 +40,7 @@ class MLTrainer:
         registry: ModelRegistry | None = None,
         parquet_store=None,
     ):
-        self.feature_config = feature_config or FeatureConfig()
+        self.feature_config = feature_config or FeatureConfig(target_type="direction")
         self.registry = registry or get_model_registry()
         self.parquet = parquet_store or get_parquet_store()
 
@@ -62,7 +63,7 @@ class MLTrainer:
 
                 # Limit to lookback period
                 cutoff = df["timestamp"].max() - pd.Timedelta(days=lookback_days)
-                df = df[df["timestamp"] >= cutoff]
+                df = df[df["timestamp"] >= cutoff].sort_values("timestamp").reset_index(drop=True)
 
                 if len(df) < 100:
                     continue
@@ -72,6 +73,8 @@ class MLTrainer:
                     continue
 
                 X["symbol"] = symbol  # Add symbol as feature
+                X["__timestamp"] = df["timestamp"].loc[X.index]
+                X["__label_end"] = df["timestamp"].shift(-self.feature_config.target_horizon).loc[X.index]
                 all_X.append(X)
                 all_y.append(y)
 
@@ -85,6 +88,9 @@ class MLTrainer:
 
         X_combined = pd.concat(all_X, ignore_index=True)
         y_combined = pd.concat(all_y, ignore_index=True)
+        ordered = X_combined.assign(__target=y_combined).sort_values("__timestamp", kind="stable").reset_index(drop=True)
+        y_combined = ordered.pop("__target")
+        X_combined = ordered
 
         logger.info("training_data_combined", total_samples=len(X_combined), symbols=len(all_X))
         return X_combined, y_combined
@@ -104,13 +110,17 @@ class MLTrainer:
         X, y = self.load_training_data(symbols, interval, lookback_days)
 
         # Time series split
-        split_idx = int(len(X) * (1 - test_size))
-        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+        train_idx, tune_idx, test_idx = three_way(X["__timestamp"], X["__label_end"], test_size)
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        y_tune = y.iloc[tune_idx]
+        for labels in (y_train, y_tune, y_test):
+            require_binary(labels)
 
         # Remove symbol column for training
-        train_features = X_train.drop(columns=["symbol"], errors="ignore")
-        test_features = X_test.drop(columns=["symbol"], errors="ignore")
+        train_features = X_train.drop(columns=METADATA_COLUMNS)
+        test_features = X_test.drop(columns=METADATA_COLUMNS)
+        tune_features = X.iloc[tune_idx].drop(columns=METADATA_COLUMNS)
 
         # Default LightGBM params
         default_params = {
@@ -135,7 +145,7 @@ class MLTrainer:
 
         # Create datasets
         train_data = lgb.Dataset(train_features, label=y_train)
-        test_data = lgb.Dataset(test_features, label=y_test, reference=train_data)
+        test_data = lgb.Dataset(tune_features, label=y_tune, reference=train_data)
 
         # Train
         logger.info("training_started", train_samples=len(X_train), test_samples=len(X_test))
@@ -193,7 +203,10 @@ class MLTrainer:
             metrics=metrics,
             features=list(train_features.columns),
             feature_version=self.feature_config.__class__.__name__,
-            tags={"interval": interval, "lookback_days": str(lookback_days)},
+            tags={"interval": interval, "lookback_days": str(lookback_days),
+                  "split_policy": "global_timestamp_purged_train_tune_holdout",
+                  "training_end": str(X_train["__timestamp"].max()),
+                  "holdout_start": str(X_test["__timestamp"].min())},
         )
 
         return {
@@ -215,16 +228,17 @@ class MLTrainer:
         X, y = self.load_training_data(symbols, interval, lookback_days)
 
         # Remove symbol column
-        features = X.drop(columns=["symbol"], errors="ignore")
+        features = X.drop(columns=METADATA_COLUMNS)
 
-        tscv = TimeSeriesSplit(n_splits=n_splits)
         results = []
 
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(features)):
+        for fold, (train_idx, tune_idx, val_idx) in enumerate(folds(X["__timestamp"], X["__label_end"], n_splits)):
             logger.info("walkforward_fold", fold=fold + 1, train=len(train_idx), val=len(val_idx))
 
             X_train, X_val = features.iloc[train_idx], features.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            for labels in (y_train, y.iloc[tune_idx], y_val):
+                require_binary(labels)
 
             # Train
             fold_params = params or {
@@ -243,7 +257,7 @@ class MLTrainer:
             }
 
             train_data = lgb.Dataset(X_train, label=y_train)
-            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+            val_data = lgb.Dataset(features.iloc[tune_idx], label=y.iloc[tune_idx], reference=train_data)
 
             model = lgb.train(
                 fold_params,

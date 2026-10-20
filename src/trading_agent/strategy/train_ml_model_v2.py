@@ -36,6 +36,7 @@ from trading_agent.strategy.ml_features import (
     add_lag_features,
     create_target,
 )
+from trading_agent.strategy.temporal_validation import three_way, folds, require_binary
 
 logger = get_logger(__name__)
 
@@ -98,9 +99,9 @@ def add_regime_features(df: pd.DataFrame, config: EnhancedFeatureConfig) -> pd.D
     # Discretize regimes
     for col in ["vol_regime_z", "trend_regime", "momentum_regime", "volume_regime"]:
         if col in df.columns:
-            df[f"{col}_quantile"] = pd.qcut(
-                df[col], q=config.regime_n_states, labels=False, duplicates="drop"
-            )
+            # Trailing ranks only: full-frame qcut leaks future regime boundaries.
+            rank = df[col].rolling(252, min_periods=50).rank(pct=True)
+            df[f"{col}_quantile"] = np.minimum(config.regime_n_states - 1, np.floor(rank * config.regime_n_states))
 
     return df
 
@@ -112,6 +113,8 @@ def create_cost_aware_target(
     slippage: float = 0.0005,
 ) -> pd.Series:
     """Create target with transaction costs accounted for."""
+    if not isinstance(horizon, int) or horizon < 1:
+        raise ValueError("horizon must be a positive integer")
     close = df["close"]
     future_close = close.shift(-horizon)
 
@@ -123,7 +126,7 @@ def create_cost_aware_target(
     net_return = gross_return - total_cost
 
     # Binary target: profitable after costs
-    target = (net_return > 0).astype(int)
+    target = (net_return > 0).astype(float).where(net_return.notna())
 
     return target
 
@@ -134,38 +137,29 @@ def create_triple_barrier_target(
     atr_multiplier: float = 1.5,
     take_profit_multiplier: float = 2.0,
 ) -> pd.Series:
-    """Create triple barrier labels (simplified)."""
-    # This is a simplified version - full implementation would need
-    # path-dependent analysis of high/low during holding period
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
+    """Binary next-open long outcome, first-touch stops/targets, costs included.
 
-    # For now, use simple return with ATR-based barriers
-    future_high = high.shift(-horizon)
-    future_low = low.shift(-horizon)
-
-    atr_col = [c for c in df.columns if c.startswith("atr_")]
-    if atr_col:
-        atr = df[atr_col[0]]
-        stop_dist = atr * atr_multiplier
-        tp_dist = atr * take_profit_multiplier
-
-        # Hit stop loss
-        hit_stop = future_low < close - stop_dist
-        # Hit take profit
-        hit_tp = future_high > close + tp_dist
-        # Neither hit - use close return
-        neither = ~hit_stop & ~hit_tp
-
-        target = pd.Series(0, index=df.index)
-        target[hit_tp] = 1
-        target[hit_stop] = -1
-        target[neither] = np.sign(close.shift(-horizon)[neither] - close[neither])
-
-        return target
-    else:
-        return np.sign(close.shift(-horizon) - close)
+    take_profit_multiplier is reward/risk, not a second ATR multiple.
+    Unobserved/missing-bar outcomes remain NaN and are excluded from training.
+    """
+    from trading_agent.research.trade_outcomes import TradePolicy, trade_outcome
+    atr_columns = [c for c in df.columns if c == "atr" or c.startswith("atr_")]
+    if not atr_columns:
+        raise ValueError("Triple-barrier labels require a causal ATR column")
+    frame = df.copy()
+    frame["atr"] = frame[atr_columns[0]]
+    frame["timestamp"] = pd.to_datetime(frame.timestamp, utc=True)
+    seconds = frame.timestamp.diff().dt.total_seconds().median()
+    if not np.isfinite(seconds) or seconds <= 0 or seconds > 900:
+        raise ValueError("Triple-barrier labels support intraday candles up to 15 minutes")
+    policy = TradePolicy(horizon=horizon, stop_atr=atr_multiplier, reward_risk=take_profit_multiplier)
+    labels = pd.Series(np.nan, index=df.index)
+    # Require a complete horizon even when an early barrier touch is observed.
+    for i in range(len(frame)-horizon):
+        outcome = trade_outcome(frame, i, "BUY", policy, seconds)
+        if outcome is not None:
+            labels.iloc[i] = outcome["win"]
+    return labels
 
 
 class EnhancedMLTrainer:
@@ -200,7 +194,7 @@ class EnhancedMLTrainer:
 
         return df
 
-    def create_targets(self, df: pd.DataFrame) -> dict[str, pd.Series]:
+    def create_targets(self, df: pd.DataFrame, target_type: str | None = None) -> dict[str, pd.Series]:
         """Create multiple target types."""
         targets = {}
 
@@ -220,10 +214,10 @@ class EnhancedMLTrainer:
             )
 
         # Triple barrier target
-        targets["triple_barrier"] = create_triple_barrier_target(
-            df,
-            self.feature_config.target_horizon,
-        )
+        if target_type in (None, "triple_barrier") and any(c == "atr" or c.startswith("atr_") for c in df.columns):
+            targets["triple_barrier"] = create_triple_barrier_target(
+                df, self.feature_config.target_horizon,
+            )
 
         return targets
 
@@ -272,7 +266,7 @@ class EnhancedMLTrainer:
         df = self.prepare_enhanced_features(df)
 
         # Create targets
-        targets = self.create_targets(df)
+        targets = self.create_targets(df, target_type)
         if target_type not in targets:
             raise ValueError(f"Unknown target type: {target_type}")
 
@@ -318,9 +312,13 @@ class EnhancedMLTrainer:
             raise ValueError(f"Insufficient valid samples after cleaning: {len(X)}")
 
         # Time series split
-        split_idx = int(len(X) * 0.8)
-        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+        stamps = df["timestamp"].loc[X.index]
+        ends = df["timestamp"].shift(-self.feature_config.target_horizon).loc[X.index]
+        train_idx, tune_idx, test_idx = three_way(stamps, ends)
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        for labels in (y_train, y.iloc[tune_idx], y_test):
+            require_binary(labels)
 
         # Default params optimized for financial data
         default_params = {
@@ -347,7 +345,7 @@ class EnhancedMLTrainer:
 
         # Train
         train_data = lgb.Dataset(X_train, label=y_train)
-        test_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
+        test_data = lgb.Dataset(X.iloc[tune_idx], label=y.iloc[tune_idx], reference=train_data)
 
         model = lgb.train(
             default_params,
@@ -386,7 +384,8 @@ class EnhancedMLTrainer:
         }
 
         # Calculate optimal confidence threshold
-        test_precision, test_recall, thresholds = precision_recall_curve(y_test, test_pred)
+        tune_pred = model.predict(X.iloc[tune_idx], num_iteration=model.best_iteration)
+        test_precision, test_recall, thresholds = precision_recall_curve(y.iloc[tune_idx], tune_pred)
         f1_scores = 2 * test_precision * test_recall / (test_precision + test_recall + 1e-10)
         best_idx = np.argmax(f1_scores)
         optimal_threshold = float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
@@ -397,6 +396,10 @@ class EnhancedMLTrainer:
         )
 
         metrics["optimal_threshold"] = optimal_threshold
+        selected_binary = (test_pred > optimal_threshold).astype(int)
+        metrics["test_selected_threshold_precision"] = precision_score(y_test, selected_binary, zero_division=0)
+        metrics["test_selected_threshold_recall"] = recall_score(y_test, selected_binary, zero_division=0)
+        metrics["test_selected_threshold_f1"] = f1_score(y_test, selected_binary, zero_division=0)
 
         logger.info("symbol_training_completed", symbol=symbol, **metrics)
 
@@ -424,6 +427,9 @@ class EnhancedMLTrainer:
                 "lookback_days": str(lookback_days),
                 "target_type": target_type,
                 "optimal_threshold": str(optimal_threshold),
+                "split_policy": "timestamp_purged_train_tune_holdout",
+                "training_end": str(stamps.iloc[train_idx].max()),
+                "holdout_start": str(stamps.iloc[test_idx].min()),
             },
         )
 
@@ -456,7 +462,7 @@ class EnhancedMLTrainer:
                 df = df[df["timestamp"] >= cutoff].copy()
 
                 df = self.prepare_enhanced_features(df)
-                targets = self.create_targets(df)
+                targets = self.create_targets(df, target_type)
                 y = targets[target_type]
 
                 exclude = {"timestamp", "open", "high", "low", "close", "volume", "oi"}
@@ -494,12 +500,15 @@ class EnhancedMLTrainer:
                 if len(X) < 200:
                     continue
 
-                tscv = TimeSeriesSplit(n_splits=n_splits)
+                stamps = df["timestamp"].loc[X.index]
+                ends = df["timestamp"].shift(-self.feature_config.target_horizon).loc[X.index]
                 symbol_results = []
 
-                for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+                for fold, (train_idx, tune_idx, val_idx) in enumerate(folds(stamps, ends, n_splits)):
                     X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
                     y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+                    for labels in (y_train, y.iloc[tune_idx], y_val):
+                        require_binary(labels)
 
                     params = {
                         "objective": "binary",
@@ -520,7 +529,7 @@ class EnhancedMLTrainer:
                     }
 
                     train_data = lgb.Dataset(X_train, label=y_train)
-                    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+                    val_data = lgb.Dataset(X.iloc[tune_idx], label=y.iloc[tune_idx], reference=train_data)
 
                     model = lgb.train(
                         params,

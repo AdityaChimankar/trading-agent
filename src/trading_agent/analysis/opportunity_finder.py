@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 
@@ -65,7 +65,10 @@ class StrategyMode(Enum):
 
 def _score_conviction(symbol: str, action: str, score: float) -> tuple[float, list, list]:
     """Score conviction for a symbol/action."""
-    return (score, [], [])
+    from trading_agent.analysis.research_engine import analyze_symbol
+    row, _ = analyze_symbol(symbol)
+    return (row["score"] if row["action"] == action else 0.0,
+            row["agreements"], row["disagreements"])
 
 
 def _get_best_mode(
@@ -83,7 +86,9 @@ def _get_hybrid_signal(
     mode: StrategyMode,
 ) -> tuple[str, float, str, None, float]:
     """Get hybrid signal for a symbol."""
-    return ("BUY", 0.8, "test", None, 100.0)
+    from trading_agent.analysis.research_engine import analyze_symbol
+    row, _ = analyze_symbol(symbol, mode=mode.value)
+    return (row["action"], row["confidence"], row["reasoning"], row["timestamp"], row["price"])
 
 
 class OpportunityFinder:
@@ -142,8 +147,7 @@ class OpportunityFinder:
         opportunities.sort(key=lambda o: o.score, reverse=True)
 
         # Assign ranks
-        for i, opp in enumerate(opportunities):
-            opp.rank = i + 1
+        opportunities = [replace(opp, rank=i + 1) for i, opp in enumerate(opportunities)]
 
         # Limit
         return opportunities[: self.config.max_opportunities]
@@ -205,10 +209,10 @@ class OpportunityFinder:
 
         return reward / risk if risk > 0 else 0.0
 
-    def get_opportunity_details(self, opportunity: Opportunity) -> dict:
+    def get_opportunity_details(self, opportunity: Opportunity, interval: str = "5minute") -> dict:
         """Get detailed analysis for an opportunity."""
         # Fetch recent candles for context
-        df = self.parquet.read_latest(opportunity.symbol, "5minute", n=50)
+        df = self.parquet.read_latest(opportunity.symbol, interval, n=50)
 
         details = {
             "symbol": opportunity.symbol,
@@ -271,11 +275,7 @@ def rank_watchlist_with_sizing(
     if symbols is None:
         ranked_symbols = _rank_watchlist(max_symbols=n)
     else:
-        # If symbols provided directly, create mock ranking
-        ranked_symbols = [
-            {"symbol": sym, "bullish_score": 5.0, "bearish_score": 1.0, "dominant_bias": None, "contradiction": None}
-            for sym in symbols[:n]
-        ]
+        ranked_symbols = _rank_watchlist(max_symbols=n, symbols=symbols)
     
     # Get existing positions from portfolio_risk module (can be mocked in tests)
     open_positions_list = get_open_positions()
@@ -306,9 +306,9 @@ def rank_watchlist_with_sizing(
                 "action": action,
                 "bullish_score": bullish_score,
                 "bearish_score": bearish_score,
-                "entry_price": 100.0,
-                "stop_loss": 95.0,
-                "take_profit": 110.0,
+                "entry_price": None,
+                "stop_loss": None,
+                "take_profit": None,
                 "suggested_size": 0,
                 "suggested_value": 0.0,
                 "blocked": True,

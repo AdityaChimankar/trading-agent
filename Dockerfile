@@ -9,12 +9,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy only files needed for dependency installation
-COPY pyproject.toml README.md ./
-COPY src/ ./src/
+# Cache dependencies independently of source and documentation changes.
+COPY pyproject.toml ./
+RUN python -c "import subprocess, tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call(['pip', 'install', '--no-cache-dir', '--prefix=/install', *deps])"
 
-# Install to /install prefix (not system) for copying to final stage
-RUN pip install --no-cache-dir --prefix=/install .
+# Install the package/console entry points without re-resolving dependencies.
+FROM builder AS application
+COPY README.md ./
+COPY src/ ./src/
+RUN pip install --no-cache-dir --no-deps --prefix=/install .
 
 # Stage 2: Playwright browser installation
 FROM builder AS playwright
@@ -50,7 +53,7 @@ RUN useradd -m -u 1000 trader
 WORKDIR /app
 
 # Copy installed packages from builder stage
-COPY --from=builder /install /usr/local
+COPY --from=application /install /usr/local
 
 # Copy Playwright browsers from playwright stage
 COPY --from=playwright /opt/playwright /opt/playwright

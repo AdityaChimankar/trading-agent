@@ -8,6 +8,7 @@ services:
       API_HOST: 0.0.0.0
       API_AUTH_TOKEN: smoke-test-only
       DATA_DIR: /tmp/smoke-data
+      LOG_FILE: /tmp/smoke-data/logs/trading-agent.log
       CACHE_DIR: /tmp/cache
       ML_MODEL_DIR: /tmp/models
       STORAGE_PARQUET_ROOT: /tmp/smoke-data/parquet

@@ -8,6 +8,7 @@ import sys
 
 import httpx
 import pandas as pd
+import numpy as np
 from playwright.sync_api import sync_playwright, expect
 from fastapi.testclient import TestClient
 
@@ -18,6 +19,12 @@ from trading_agent.storage.parquet_store import get_parquet_store
 def main():
     settings = get_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    # Windows 1.5.2 Cython pickles use an unqualified loss module name.
+    from trading_agent.strategy.research_features import load_legacy_bundle
+    from sklearn._loss._loss import CyHalfMultinomialLoss
+    legacy_fixture = settings.data_dir / "windows-loss.joblib"
+    legacy_fixture.write_bytes(b"c_loss\nCyHalfMultinomialLoss\n.")
+    assert load_legacy_bundle(legacy_fixture) is CyHalfMultinomialLoss
     for arguments in [("upgrade", "head"), ("check",)]:
         subprocess.run([sys.executable, "-m", "alembic", *arguments], check=True)
     store = get_parquet_store()
@@ -37,6 +44,22 @@ def main():
                            "entry_price": 100, "quantity": 10, "stop_loss": 95}).json()
         assert local.post(f"/api/v1/positions/{paper['id']}/close?exit_price=100").status_code == 200
         assert local.get("/api/v1/wallet/metrics").status_code == 200
+        prices = 100 + np.sin(np.arange(600) / 9) * 3 + np.arange(600) * 0.01
+        store.write_candles(pd.DataFrame({
+            "timestamp": pd.date_range("2026-10-19T03:45:00Z", periods=600, freq="min"),
+            "open": prices - 0.2, "high": prices + 1, "low": prices - 1,
+            "close": prices, "volume": 100000,
+        }), "CHART", "minute")
+        chart_result = local.get("/api/v1/research/symbols/CHART?interval=minute&mode=rule_only")
+        assert chart_result.status_code == 200, chart_result.text
+        chart_fixture = chart_result.json()
+        walk_forward = local.post("/api/v1/research/walk-forward", json={
+            "symbol": "CHART", "train_candles": 250, "test_candles": 100,
+        })
+        assert walk_forward.status_code == 200, walk_forward.text
+        assert len(walk_forward.json()["folds"]) == 3
+        outcomes = local.post("/api/v1/research/outcome-validation", json={"symbol": "CHART"})
+        assert outcomes.status_code == 422 and "1,000" in outcomes.text
     store.compact("SMOKE", "minute")
     assert len(store.read_candles("SMOKE", "minute")) == 2
     with httpx.Client(base_url="http://frontend:8080", timeout=15) as client:
@@ -47,10 +70,39 @@ def main():
         page = browser.new_page()
         failures = []
         page.on("pageerror", lambda error: failures.append(str(error)))
+        # Serve an actual isolated API response to exercise Plotly rendering.
+        page.route("**/api/v1/research/symbols/CHART?*", lambda route: route.fulfill(json=chart_fixture))
         page.goto("http://frontend:8080", wait_until="networkidle")
+        expect(page.get_by_role("heading", name="Watchlist Bias", exact=True)).to_be_visible()
+        expect(page.get_by_role("button", name="Scan entire watchlist", exact=True)).to_be_visible()
+        page.get_by_label("Selected research symbol", exact=True).fill("CHART")
+        expect(page.locator(".js-plotly-plot")).to_be_visible(timeout=30000)
+        expect(page.get_by_role("heading", name="Hybrid Decision Maker", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", name="Stop Loss, Target & Position Sizing", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", name="Walk-Forward Optimizer", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", name="Trade Outcome Validation", exact=True)).to_be_visible()
+        expect(page.get_by_label("Require qualified outcome evidence")).to_be_checked()
+        page.get_by_text("API authentication", exact=True).click()
+        page.get_by_label("Session API token", exact=True).fill("smoke-test-only")
+        page.get_by_role("button", name="Apply session token", exact=True).click()
+        page.get_by_role("button", name="Run walk-forward evaluation", exact=True).click()
+        expect(page.get_by_text("Walk-forward: insufficient_history", exact=False)).to_be_visible(timeout=30000)
+        page.get_by_role("button", name="Validate CHART outcomes", exact=True).click()
+        expect(page.get_by_text("At least 1,000 completed candles are required", exact=True)).to_be_visible(timeout=30000)
+        page.get_by_role("button", name="Paper operations", exact=True).click()
         page.get_by_text("API access token (if enabled on the server)").click()
         page.get_by_label("Bearer token").fill("smoke-test-only")
         page.get_by_role("button", name="Use for this page session").click()
+        # Exercise the actual versioned research routes through the frontend proxy.
+        # The API's isolated store has no candles; missing data must not fabricate picks.
+        for heading in ("Opportunity Finder", "Top Opportunity", "Hybrid Decision Maker"):
+            expect(page.get_by_role("heading", name=heading, exact=True)).to_be_visible()
+        page.get_by_label("Scan symbols (comma-separated; blank scans all stored symbols)").fill("MISSING")
+        page.get_by_role("button", name="Find opportunities", exact=True).click()
+        expect(page.get_by_text("No qualifying opportunities.", exact=False)).to_be_visible()
+        page.get_by_label("Decision symbol", exact=True).fill("MISSING")
+        page.get_by_role("button", name="Preview hybrid decision", exact=True).click()
+        expect(page.get_by_text("No stored data for symbol", exact=True)).to_be_visible()
         page.locator('input[name="symbol"]').fill("SMOKE")
         page.get_by_label("Entry price", exact=True).fill("100")
         page.get_by_label("Quantity", exact=True).fill("10")
@@ -61,6 +113,7 @@ def main():
         page.get_by_role("button", name="Close paper position", exact=True).click()
         expect(page.get_by_role("status")).to_have_text("Paper position closed.")
         page.reload(wait_until="networkidle")
+        page.get_by_role("button", name="Paper operations", exact=True).click()
         # Tokens are deliberately not stored across reloads.
         page.get_by_text("API access token (if enabled on the server)").click()
         page.get_by_label("Bearer token").fill("smoke-test-only")
@@ -72,7 +125,7 @@ def main():
         book = client.get("/api/v1/wallet/summary").json()
         assert book["cash"] == 1000050 and book["open_positions"] == 0, book
         assert len(client.get("/api/v1/wallet/trades").json()) == 1
-    print("PASS: migrations, Parquet replay/compaction, nginx proxy, authentication, browser paper lifecycle and persistence")
+    print("PASS: migrations, Parquet replay/compaction, nginx proxy, authentication, research panels, browser paper lifecycle and persistence")
 
 
 if __name__ == "__main__":

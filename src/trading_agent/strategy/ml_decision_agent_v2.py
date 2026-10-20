@@ -81,12 +81,14 @@ def build_latest_enhanced_features(symbol: str) -> dict | None:
         return None
 
     sf = build_session_features(prepared)
-    pattern_codes = precompute_pattern_bias_codes(prepared)
 
-    # Compute ATR directly from raw OHLC arrays
+    # Extract raw OHLC arrays used for pattern detection and ATR
+    o = raw_df["open"].to_numpy(dtype=float)
     h = raw_df["high"].to_numpy(dtype=float)
     l_ = raw_df["low"].to_numpy(dtype=float)
     c = raw_df["close"].to_numpy(dtype=float)
+
+    pattern_codes = compute_pattern_bias(o, h, l_, c)
     atr_vals = compute_atr_arr(h, l_, c, period=14)
 
     i = prepared["length"] - 1

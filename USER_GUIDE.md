@@ -6,6 +6,28 @@ This guide covers a first local run, Docker operation, the daily Kite workflow, 
 
 Read [READINESS.md](READINESS.md) before unattended use. The current console is intentionally paper-only; production readiness, security, accounting, and live-session validation still have open gates.
 
+## Research panels
+
+The unified dashboard has a searchable watchlist sidebar and four connected steps: **Find opportunities → Inspect selected stock → Validate strategy → Paper review**. The top symbol picker and shared settings coordinate all steps. **Paper operations** uses the same selected symbol and candle interval; the old duplicate scanner has been removed from that console.
+
+1. Set **Sizing capital**, **Candle interval**, **Decision mode**, **Risk per trade** and **Target reward/risk**. The legacy model in `models/ml_model.joblib` uses nine features and minute candles. Its training interval is inferred from the original code, not certified by artifact metadata. Do not interpret historical model metrics as validation of this deployment.
+2. Click **Scan entire watchlist**. Every unique entry in `symbols.txt` is attempted (currently 2,319). Progress, stale counts, skips and failures are shown. Do not run the CLI scan simultaneously with a dashboard scan. Docker uses one API worker; this is not a distributed job system.
+3. **Top Opportunity** shows the best eligible BUY and SELL plans after the complete scan. The sidebar retains directional historical/stale candidates, labelled as such. There may be no eligible pick: stale data, HOLD/conflict, missing model, an existing position or risk limits can prevent a proposal. Nothing is bought automatically.
+4. Selecting a top pick opens **Inspect selected stock** with its Plotly candles, volume and indicators, rule markers, rule/ML evidence and the scan's stop/target/size. Sidebar selection preserves your current step so you can compare stocks inside validation. Changing settings requires another scan. A fresh chart does not make an old sizing snapshot current.
+5. Under **Inspect selected stock**, click **Refresh selected symbol news** when needed. Optional **Analyze with configured LLM** makes one bounded provider request and may incur charges. Without a real provider, headlines are displayed without invented sentiment. Ticker searches can contain irrelevant headlines; review sources. Cached sentiment influences a later scan only if its analysis predates the signal candle and is no more than 48 hours old.
+6. Open **Validate strategy** for the Walk-Forward Optimizer, Trade Outcome Validation and BUY/SELL Outcome Models. Walk-forward compares experimental rule thresholds against a baseline using fixed-horizon exits; it is not the stop/target qualification test and never applies parameters to the scanner. Rule outcome validation uses the shared reward/risk target. Promoted ML instead requires its fixed minute / ML only / 2:1 policy. Buttons offer those shared settings for review without launching a scan or promoting a model.
+7. Open **Paper review** to inspect the persistent ledger or record a manual paper position. The shared stock is preselected, but entry, quantity, stop and target must be supplied explicitly. Switching stocks clears unsubmitted numeric fields to prevent transferring another stock's prices. This book does not substitute for the separate prospective outcome-model paper observer.
+
+Walk-forward results are keyed by symbol, interval, training/test windows and costs; rule-validation results by symbol, interval and bracket policy. They stay available when moving between steps or visiting paper operations, but this browser result cache is not durable across a reload. An in-flight job keeps the inputs submitted with it even if you switch stocks. Navigating never launches a new evaluation. Failed requests remain errors, not a successful qualification.
+
+After a validation completes, news is refreshed or a paper position changes, the workspace marks its existing scan plans as needing a new scan. It does not rewrite old rankings or silently recalculate sizing. A newly qualified report applies only to later candles; wait for those candles and explicitly re-scan. Full-universe scans continue in the background while you inspect or validate. Scores are not profit probabilities, and stale, incomplete, failed or mismatched evidence must not be treated as a current plan.
+
+Sizing uses 1.5×ATR stops, the requested reward/risk target, integer shares, a 10% single-stock notional cap and the paper book's exposure/risk/position-count limits. Both directional lists share reservations. Short-selling leverage, sector/correlation limits, taxes, fees and execution slippage are not modeled in these plans. A score measures rule/model evidence, not probability of profit.
+
+Scan snapshots and news caches live in `data/research/`; they survive Docker replacement. A scan interrupted by an API restart is marked interrupted and must be rerun. It is not resumed or silently reported complete. For an offline operator scan while no dashboard scan is running: `python -m trading_agent.analysis.research_jobs --interval minute --capital 100000` (or prefix with `docker compose run --rm tools` for Docker).
+
+After installing changes to these panels and their API, run `docker compose build api frontend`, then `docker compose up -d api frontend`, and reload the browser. Do not rebuild for each scan.
+
 ## 1. Choose how to run it
 
 | Mode | Best for | Requirements |
@@ -341,7 +363,63 @@ Stop duplicate local/Docker schedulers or tickers. Keep the database on a local 
 
 ### Legacy dashboard screens
 
-The active console uses `/api/v1` contracts. Old chart/research screens remain in source but are not mounted because their API contracts need migration. Their presence is not evidence those features work in the deployed dashboard.
+The restored `ResearchDashboard` uses `/api/v1/research` for aligned rule/ML analysis, full-watchlist scans, Plotly charts and optional cached news sentiment. The older `App.tsx` is not the active entry point. The Paper operations tab retains the compatibility rule-only research panel; use the main Research dashboard for restored hybrid analysis.
+
+### Walk-Forward Optimizer
+
+Use this optional research panel after importing enough history or investigating a rule change. Select the stock and interval at the top of the Research dashboard. Set training candles (250–10,000), test candles (100–5,000), and assumed total round-trip cost (0–100 bps), then click **Run walk-forward evaluation**. Nothing runs on page load. The calculation is bounded to one stock and its latest 20,000 completed stored candles; the API permits one optimizer request at a time per worker. Keep `API_WORKERS=1`.
+
+Each fold selects among 27 combinations of pattern-confirmation BUY RSI, SELL RSI and ADX thresholds using only its training outcomes. At least 15 non-overlapping training trades are required. The next window tests that choice against default rules; test windows do not overlap. The last 12 possible signal bars are purged from each window so no outcome crosses its boundary. Indicators use past candles and confirmed swings. Both train and test enter at the next bar's open, exit 12 bars after the signal, and subtract the same cost assumption.
+
+The table shows out-of-sample trade count, win rate, mean net trade return, additive return sum and additive drawdown. Zero qualifying folds is not a successful validation. Inspect fold dates and chosen parameters in the details section. Changing inputs does not retroactively change results; rerun explicitly. Results stay in the page session and are not promoted into rules, models or paper positions.
+
+Limitations: rules only, no ML fitting or news replay; no stop/target execution, session-boundary exits, historical universe/corporate-action adjustment, liquidity, taxes, short financing or portfolio allocation simulation. Repeatedly tuning after reading test results can still overfit. Do not interpret the additive return sum as a compounded account return. Five bps is a configurable research assumption, not a verified fee schedule. CLI and Docker equivalents are in the README; `--all` is an explicit, potentially expensive offline watchlist evaluation, not a daily startup step.
+
+### Trade Outcome Validation and win estimates
+
+This panel is separate from the Walk-Forward Optimizer. It evaluates the actual fixed-rule stop/target policy, not the optimizer's fixed-horizon exits and not the legacy ML artifact.
+
+1. Import stored intraday history, select a symbol and interval, and set reward/risk in Opportunity Finder.
+2. Click **Validate SYMBOL outcomes**. This runs only on request, uses at most 20,000 completed candles, saves a report under `data/research/validation`, and does not call Kite, an LLM or a broker order API.
+3. Inspect BUY and SELL separately. Qualification needs at least 100 calibration and 100 holdout trades per side, at least 20 winners and 20 non-winners in calibration, at least 10 holdout sessions, a positive session-bootstrap lower expectancy bound, and Brier error below a constant-probability baseline.
+4. If qualified, select **Rules only**, leave **Require qualified outcome evidence** enabled, wait for a later completed candle and run the full-watchlist scan. Evidence cannot qualify candles included in its own evaluation.
+5. Repeat validation after substantial new history, policy changes or expiry. A report expires no later than seven days after its last data candle. Do not keep adjusting inputs until an inspected holdout passes: that creates selection bias.
+
+Defaults: next-open entry, 1.5 ATR stop, selected reward/risk target, 24-bar maximum horizon; 10 bps round-trip cost plus 2 bps adverse slippage on each fill. Gap stops fill at the worse open. If both barriers touch in one candle, the stop wins. Positions exit at the last fully observable bar ending by 15:25 IST; entries stop before 15:20. Larger intervals may require earlier exits. Missing outcome bars are excluded, not counted as losses. These are simulation assumptions, not verified transaction charges or execution guarantees.
+
+The oldest 60% is reference data, the next 20% calibrates the rule score, and the newest 20% is holdout. Label horizons are purged at boundaries and trades do not overlap within each symbol/window. Wilson win-rate intervals describe historical samples, not the uncertainty of an individual prediction. Session-block bootstrapping only partly addresses dependent outcomes. Universe-wide multiple testing, market/sector drift, corporate actions and survivorship bias are not corrected.
+
+The API is `POST /api/v1/research/outcome-validation` (see `/docs`); custom cost/slippage/horizon reports are research-only because the scanner currently accepts the defaults above. One report per symbol/interval is retained, so a new request replaces the previous report. Only one validation runs per API worker; keep the supported single-worker deployment.
+
+Hybrid and ML estimates remain unavailable until an independently trained, time-provenanced model is validated. Disabling the evidence checkbox permits **exploratory** plans, not validated recommendations. Eligibility also requires current session hours, fresh candles, traded volume, an average 20-bar turnover proxy of INR 100,000/bar, no recent same-day gaps, and existing portfolio limits. These filters are not order-book liquidity checks or an official exchange calendar. No eligible result is a valid outcome.
+
+No extra daily startup command is required. After updating this code, rebuild once with `docker compose build api frontend`, then `docker compose up -d api frontend`; for local use restart the API and frontend. Use validation and scan buttons only when their data/policy conditions above require them.
+
+### BUY/SELL outcome models
+
+The new lifecycle is `python -m trading_agent.strategy.outcome_cli`; the older `optimize ml-model-v2` pipeline does not produce this dashboard contract.
+
+The fixed candidate configuration uses two HistGradientBoosting binary classifiers, one per side, with 13 causal features. A separate logistic calibrator per side maps classifier output to the observed after-cost win label. A complete label requires known stop/target/timeout outcomes; missing outcomes are excluded, not relabeled as losses.
+
+All selected symbols share session-based chronological boundaries: oldest 50% training, next 15% probability calibration, next 15% threshold selection, newest 20% final historical evaluation. Full label horizons are purged at boundaries. Fixed model settings do not use early stopping on the test set. Thresholds are selected only from the predeclared 0.60–0.90 grid on tuning data with at least 30 selected trades and five sessions. If no threshold passes, the internal `1.01` sentinel means **abstain**, not a 101% predicted chance. If both sides pass their thresholds on the same candle, the shared policy abstains.
+
+Historical execution, prospective paper and inference share one hashed feature/policy contract:
+
+- Minute candles, completed bars only; no imputation of missing required features.
+- Entry at signal timestamp + two minutes: one full bar of decision latency. Example: the 10:00 candle closes at 10:01, the intent is recorded between 10:01 and 10:02, and entry uses the 10:02 open. Historical replay uses the same delay.
+- Stop distance 1.5 signal ATR, target 2:1, at most 24 bars from entry. Stops win ambiguous bars; gap stops use the worse open.
+- Round-trip cost assumption 10 bps, plus 2 bps adverse slippage per fill. Forced session exit no later than 15:25 IST; no overnight positions.
+- Volume, turnover, recent-bar continuity and session filters shared across training/paper/inference. One position at a time per symbol in evaluation; this is not a capital-constrained multi-symbol portfolio backtest.
+
+Test dates are reserved before fitting and are not reusable as a new holdout, including after interruption or failure. Never tune repeatedly on final test results. Some stored history has already been inspected with older strategies; a fresh split does not erase that research-selection risk. Mandatory **prospective** paper evidence is the final independent confirmation, not a claim that historical market data has never been seen before.
+
+`paper CANDIDATE_ID --watch` uses an internal UTC clock, records immutable signal-time features before the future entry bar opens, then settles from later completed candles into that candidate's own SQLite ledger. It neither writes the normal paper book nor places orders. Stale stored candles cannot create retroactive forward records. Missed observation periods are not backfilled. Missing or corrected outcome data can invalidate evidence and block promotion; incomplete outcomes remain pending. Keep a single observer running during the sessions being evaluated and keep candle ingestion current. No all-universe throughput or order-book-fill guarantee is implied.
+
+Promotion requires both side gates described in the README. It rechecks the artifact checksum, source/policy contract, historical trades and forward ledger; no force override is provided. The active pointer expires within seven days and cannot be renewed using stale forward outcomes. Source-contract changes invalidate older artifacts. A broken/expired active pointer blocks ML inference rather than silently reverting to the legacy model. Without an active pointer the legacy model remains available as unvalidated exploratory inference.
+
+The dashboard shows candidate status and uses only explicitly promoted candidates in **ML only** mode. Rules+ML hybrid remains exploratory because adding rule arbitration would change the evaluated selection policy. Changing the reward/risk from 2:1 also invalidates model evidence for sizing. Outcome-model signal plans expire when their delayed entry bar opens, without the extra 15-second grace used by legacy research.
+
+The initial five-stock experiment failed its tuning gates, so it has no eligible test trades and must not be promoted. Improving features/data is development work; a subsequent experiment still needs a later uninspected test period and future paper sessions. Neither increasing a displayed confidence score nor deleting a failed report establishes a 60% win rate.
 
 ## 14. Safe shutdown
 

@@ -1,6 +1,18 @@
 # System design
 
-Last reviewed: 2026-10-19
+Last reviewed: 2026-10-20
+
+## Outcome-evidence boundary
+
+The BUY/SELL lifecycle adds `outcome_contract.py` (features, policy, calibration/arbitration and gates), `train_outcome_models.py` (four chronological windows and durable holdout reservations), `outcome_paper.py` (prospective intent ledger, settlement and guarded promotion), and `outcome_model.py` (dashboard adapter). Only `outcome_cli promote` selects a candidate; training never replaces `ml_model.joblib`. Model/paper/feature source digests and artifact checksums prevent silently loading incompatible contracts. Locally trained joblib files are trusted objects, not safe imports from arbitrary sources.
+
+`/research/outcome-models` is read-only lifecycle status. The full scanner loads the promoted adapter when an active pointer exists, otherwise the legacy classifier. Invalid active evidence fails closed. Qualified outcome estimates apply only to the evaluated ML-only policy, trained symbols and fixed bracket configuration; hybrid estimates do not inherit qualification. Shadow evidence is separate from the operational paper ledger and does not simulate shared capital or real market fills.
+
+`research/trade_outcomes.py` owns conservative next-open stop/target replay. `analysis/outcome_validation.py` owns fixed-rule chronological calibration/holdout reports, sample/expectancy/Brier gates, policy matching and expiry. `/research/outcome-validation` is an explicit single-symbol action; it never calls brokers or trains the active model. The dashboard distinguishes this from the separate rule-parameter Walk-Forward Optimizer.
+
+`ResearchJobs` scans all configured symbols, attaches evidence, rechecks candle freshness at completion and reads, and defaults to blocking unvalidated sizing. Qualified rule estimates rank by estimated net expectancy; other scores are exploratory. A long scan may outlive minute-candle eligibility. Incremental feature caches/stream-driven recomputation are not implemented.
+
+Training utilities use shared timestamp boundaries across symbols, purge labels whose outcome crosses a partition, and reserve separate tuning windows for early stopping/threshold selection. Direction/cost targets exclude unknown futures; enhanced barrier labels follow the full observed path. Rolling regime ranks replace full-history quantiles. These repairs do not validate or automatically replace the existing ML artifact.
 
 ## System at a glance
 
@@ -30,6 +42,20 @@ The system is local-first and paper-only. It can be useful in three independent 
 3. market-hours ingestion and scheduled paper analysis.
 
 ## Components
+
+### Restored research dashboard
+
+`frontend/src/ResearchDashboard.tsx` is the entry point. It reuses the original Plotly `PriceChart` and panel/layout styling; `OperatingConsole` remains a separate paper-operations tab. New research contracts are versioned under `/api/v1/research`.
+
+| Component | Responsibility |
+|---|---|
+| `strategy/research_features.py` | Original nine-feature formulas and trusted local classifier adapter; explicit schema/class/interval checks |
+| `analysis/research_engine.py` | Completed-candle rule/ML decisions, conflict handling, timestamped evidence, chart payloads and portfolio-bounded plans |
+| `analysis/research_jobs.py` | Full-universe background scan, progress/skips/errors, cancellation and atomic snapshot; one API worker |
+| `analysis/research_news.py` | On-demand ticker news, validated optional LLM sentiment, persistent cache and temporal eligibility |
+| `api/routers/research.py` | Scan/status/cancel, selected-symbol chart/evidence and explicit news actions |
+
+No inference path retrains or overwrites models. No scan makes broker requests, paid AI calls or paper entries. Full scans include every unique configured symbol; the displayed top lists are derived only after coverage is known. Missing data/model/news is not a substitute BUY signal. The old compatibility helpers are not the dashboard's primary engine.
 
 ### `core`
 
@@ -183,6 +209,8 @@ The default stack does not start the live profile. There are no unused Redis/Pos
 - Scheduler job failures are surfaced by an APScheduler listener and do not silently stop unrelated jobs.
 
 ## Known constraints
+
+The research dashboard also exposes a bounded `POST /api/v1/research/walk-forward` action. The rule optimizer shares the restored causal feature formulas; it uses rolling training windows, purged forward outcomes, disjoint test windows, next-bar entries and the same costs in train/test. Only parameters used by neutral-news rules are searched. It does not train/promote ML artifacts or write positions. One synchronous worker-thread calculation is allowed at a time per API process; use one API worker. Results are returned to the page, not durably scheduled. See the user guide for statistical and execution limitations.
 
 - SQLite permits limited write concurrency; avoid duplicate ticker/scheduler processes.
 - Some older operational tables described in historical research documents are not first-class SQLAlchemy models.

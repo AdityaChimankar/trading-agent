@@ -4,15 +4,63 @@ Trading Agent is a local-first research and paper-trading system for NSE intrada
 
 > This project does not place broker orders. It is research and paper-trading software, not financial advice.
 
-The supported operating surface is the versioned API and paper-operations console. This is **not yet an institutional live-trading platform**. See [READINESS.md](READINESS.md) for the integration audit, tested controls, and remaining release gates.
+The supported interface is the restored research dashboard: full-watchlist hybrid rankings, bullish/bearish opportunities, Plotly charts, news sentiment, and risk-based plans. The **Paper operations** tab retains the persistent paper book. This is **not an institutional live-trading platform**. See [READINESS.md](READINESS.md) for limitations and release gates.
+
+## Unified dashboard workflow
+
+One symbol selection and shared settings connect the workspace:
+
+1. **Find opportunities** — explicitly scan the configured universe; inspect progress and completed bullish/bearish plans.
+2. **Inspect selected stock** — selecting a top pick opens its Plotly chart, rule/ML decision, scan-based stop/target/size and cached news.
+3. **Validate strategy** — run the Walk-Forward Optimizer, check fixed-rule trade outcomes, and inspect BUY/SELL model qualification. Results remain tied to their exact inputs while navigating this page session.
+4. **Paper review** — the selected symbol and interval carry into the persistent paper workspace. Entries remain manual; changing symbol clears unsubmitted price/quantity fields.
+
+Walk-forward tuning does **not** automatically apply parameters, qualify a scan or promote ML. Rule and promoted-ML policy buttons explicitly update shared settings for your review; you must still start a fresh scan. New validation evidence, refreshed news or paper-book changes invalidate existing scan plans in this workspace. Refreshing views or changing steps never starts training, scanning, news-provider calls or orders.
+
+After installing this UI update in Docker, run `docker compose build api frontend`, then `docker compose up -d api frontend`, and reload your browser. No image pruning or data reset is needed. Local frontend developers can use `npm.cmd run build` from `frontend` on Windows (or `npm run build` on other shells). See [USER_GUIDE.md](USER_GUIDE.md#research-panels) for the coordinated workflow and evidence boundaries.
 
 ## What works without broker credentials
 
 The API, dashboard, tests, stored-data analysis, and backtests can run without Kite credentials. Kite credentials and a current daily access token are needed only for downloading or streaming broker data.
 
+## Evidence-gated opportunities
+
+The scanner still checks the entire configured watchlist. **Require qualified outcome evidence** is on by default: missing, failed, mismatched or expired evidence gives no eligible plan, not an invented win probability. Legacy ML/hybrid rankings remain exploratory. Separately trained BUY/SELL outcome models can qualify in **ML only** mode only after explicit historical and forward-paper promotion gates.
+
+For a selected stock, use **Trade Outcome Validation** in the dashboard after importing sufficient history (at least 1,000 completed candles; qualifying usually needs much more). It replays fixed rules with next-open entries, ATR stops, targets, costs and session exits. It fits calibration on the middle window and evaluates it on a later untouched holdout. It does not retrain or replace the active model.
+
+A qualified **Rules only** report supplies rule estimates for later candles with the same reward/risk; a promoted outcome model supplies model estimates under its frozen policy in **ML only** mode. Wait for a new completed candle, then scan again. Revalidate when evidence expires (at most seven days, also bounded by the data date) or the policy changes—not on every page refresh. Disabling the gate is explicitly exploratory. A high score or historical win rate does not promise a winning trade.
+
+Freshness is rechecked when scanning finishes and whenever results are fetched. Minute signals expire after 2 minutes 15 seconds from their candle timestamp; other intervals use two bars plus 15 seconds. A long full-universe scan may therefore produce no fresh eligible picks. Incremental streaming scans and independent hybrid validation remain future work. See [USER_GUIDE.md](USER_GUIDE.md#trade-outcome-validation-and-win-estimates) for gates and assumptions.
+
+## BUY/SELL outcome model lifecycle (optional research)
+
+This is separate from legacy `optimize ml-model-v2`. It trains two calibrated profit-outcome classifiers with one shared feature/artifact contract, not a BUY/HOLD/SELL direction classifier.
+
+The first five-stock candidate was trained on 2026-10-20 using 100,000 stored minute candles. **It failed qualification**: neither side found a tuning threshold meeting the win/expectancy/sample requirements. Both sides abstain, so test win rates are unavailable—not 0% or 100%. Nothing was promoted. The dashboard's **BUY / SELL Outcome Models** panel shows candidate results.
+
+| When to run | Local command | Purpose |
+|---|---|---|
+| Inspect candidates or troubleshoot | `python -m trading_agent.strategy.outcome_cli status` | Shows active and candidate status; no training or promotion |
+| Start a new experiment with sufficient history and a genuinely new test period; not daily | `python -m trading_agent.strategy.outcome_cli train RELIANCE TCS HDFCBANK ICICIBANK INFY` | Trains separate side models; saves a candidate without replacing the active model |
+| During market sessions, **after historical gates pass**, with stored candles updating | `python -m trading_agent.strategy.outcome_cli paper CANDIDATE_ID --watch` | Records prospective shadow intents every 10 seconds and settles them as future candles arrive; Ctrl+C stops safely |
+| Once both historical and forward gates pass; repeat only to renew qualified evidence or change candidate | `python -m trading_agent.strategy.outcome_cli promote CANDIDATE_ID` | Verifies evidence and atomically selects the candidate; there is no force flag |
+
+Replace `CANDIDATE_ID` with a qualifying ID from `status`. Do not run the failed first candidate as if it had passed. To run any command in Docker, prefix the same Python command with `docker compose run --rm tools`, for example:
+
+```powershell
+docker compose run --rm tools python -m trading_agent.strategy.outcome_cli status
+```
+
+Rebuild after code changes with `docker compose build api frontend`, then `docker compose up -d api frontend`. No pruning, database reset or credential changes are required. After promotion, use **ML only**, **minute**, **2:1 reward/risk**, keep the evidence gate enabled and run a fresh scan. Predictions apply only to explicitly trained symbols; the first candidate does not cover all 2,319 stocks.
+
+Both directions must independently exceed 60% wins, have Wilson and session-bootstrap 95% lower win bounds above 60%, and have positive bootstrap lower net expectancy. Historical minimum: 100 selected trades across 10 sessions per side. Forward minimum: 100 settled trades across 20 sessions per side. Pending, invalid, stale or missing evidence blocks promotion. These criteria do not guarantee future returns.
+
+Artifacts, reports, reserved test periods and forward evidence live under `models/outcome_candidates/`; the active pointer is `models/outcome-active.json`. Back them up together. Do not delete the test-reservation ledger to rerun an inspected period. The CLI rejects overlapping test dates even if symbols change. See [USER_GUIDE.md](USER_GUIDE.md#buy-sell-outcome-models) for exact execution and evaluation assumptions.
+
 ## Quick start: local
 
-Use Python 3.11 or 3.12 and Node 22 for the frontend. Python 3.13 is also tested locally; Docker and CI use Python 3.11. Only copy `.env.example` on first setup: do not overwrite your existing configuration.
+Use Python 3.11 or 3.12 and Node 22 for the frontend. Docker and CI use Python 3.11. Tests also passed in the existing Python 3.13 environment, but use 3.11/3.12 for fresh installations of the pinned legacy-model dependencies. Only copy `.env.example` on first setup: do not overwrite your existing configuration.
 
 ```powershell
 # Windows PowerShell
@@ -65,7 +113,37 @@ docker compose ps
 
 Open the dashboard at http://localhost:5173 or the API docs at http://localhost:8000/docs.
 
+The dashboard opens in the original research layout: watchlist sidebar, bullish/bearish **Top Opportunity** cards, **Plotly** chart, **Hybrid Decision Maker**, stop/target/position sizing, and news sentiment. Click **Scan entire watchlist** to evaluate every unique symbol in `symbols.txt`; the current file contains 2,319, not a hard-coded 2,270. Skipped symbols and data errors are reported. Refreshing the page does not launch a scan.
+
+The existing `models/ml_model.joblib` is a legacy nine-feature classifier. The restored inference adapter reproduces its original feature formulas and class mapping. Use **1 minute** with this artifact; other intervals must use rules-only until a compatible artifact is supplied. Missing/incompatible models are explicitly unavailable, never fabricated predictions. The artifact lacks training provenance and interval metadata, so its performance must be revalidated; minute data follows the original loader's convention.
+
+The saved classifier embeds scikit-learn **1.5.2**, now pinned in the project dependencies. Its Windows-specific `_loss` class alias is resolved explicitly on Linux without rewriting the model. Version-mismatched artifacts are rejected: [scikit-learn does not support loading persisted estimators across versions](https://scikit-learn.org/stable/model_persistence.html#security-maintainability-limitations). This compatibility fix is not proof of predictive performance. Docker caches dependencies/browser installation separately from source-only edits.
+
+Choose capital, per-trade risk and target reward/risk before scanning. BUY/SELL disagreements produce HOLD. Stops use 1.5×ATR; targets use the selected reward/risk. The ranked basket reserves exposure and risk across both directions and excludes held/stale/over-budget entries from eligible top picks. Older signals remain visible in the sidebar as research only. Plans are snapshots, not executable quotes or broker orders.
+
+**Refresh selected symbol news** fetches up to 10 recent headlines. Tick the LLM checkbox only if you want to invoke your configured provider (charges may apply). Mock mode supplies no real sentiment score. Scans consume cached sentiment only; they do not download candles or call an LLM for thousands of stocks. The **Paper operations** tab manages existing positions.
+
+### Walk-Forward Optimizer (optional research)
+
+Select a stock and interval, then use **Walk-Forward Optimizer → Run walk-forward evaluation**. This tunes rule thresholds on each training window and compares them with default rules on the following unseen test window. It does **not** train ML, change your active configuration, or place orders. Run it after adding history or when researching rule changes, not on every startup. Default windows require 4,500 candles (3,750 training + 750 test); the panel explicitly reports insufficient history or too few training trades.
+
+For the same optional check from a terminal:
+
+```powershell
+# Local, with the virtual environment active
+python -m trading_agent.research.walk_forward_optimizer RELIANCE --interval minute --train-candles 3750 --test-candles 750 --cost-bps 5
+
+# Docker alternative; uses stored data, no login or download
+docker compose run --rm tools python -m trading_agent.research.walk_forward_optimizer RELIANCE --interval minute --train-candles 3750 --test-candles 750 --cost-bps 5
+```
+
+Costs are an adjustable round-trip assumption in basis points, not an exchange/broker fee estimate. Training outcomes cannot cross into the test window. Both paths use next-bar open entry, fixed 12-bar exit and non-overlapping positions. Reported sums of trade returns are **not portfolio performance**. This is rule-only research, not validation of the hybrid ML model; retain a separate final holdout and see [USER_GUIDE.md](USER_GUIDE.md) for limitations.
+
 The build command is required on first setup and after pulling or making application/dependency changes. It is not a daily command.
+
+Compose overrides the local `.env` log-file setting and writes to `data/logs/trading-agent.log` on the host. This keeps file logging writable for the non-root container user and preserves logs across container replacement.
+
+If startup reports `dependency failed to start` or an unhealthy API, run `docker compose logs --tail=100 api` to find the underlying error. For `PermissionError: ... 'logs'` from an older Compose configuration, update the project and run `docker compose up -d api frontend` to apply the corrected log path; no image rebuild or data deletion is needed for this configuration-only fix.
 
 ## Docker operating schedule
 
@@ -209,7 +287,7 @@ Settings come from process environment variables first, then `.env`. Important v
 
 Keep `LLM_PROVIDER=mock` to guarantee that the comparison path makes no external LLM calls. See [.env.example](.env.example) for every supported setting.
 
-The dashboard accepts `API_AUTH_TOKEN` in its access-token form and keeps it in memory only. Do not put secrets in frontend build variables. With authentication enabled, browser Swagger access also requires an Authorization header; ordinary direct navigation does not supply one. Remote access additionally needs TLS, an authenticated gateway, and an operator/security review.
+The dashboard shows its access-token form only when the server has `API_AUTH_TOKEN` configured; it stays hidden for ordinary local use without API authentication. A public `/api/v1/auth/status` endpoint returns only whether authentication is required, never the token. Supplied tokens stay in browser memory only. This is separate from Kite autologin, which handles broker access. Do not put secrets in frontend build variables. With authentication enabled, browser Swagger access also requires an Authorization header; ordinary direct navigation does not supply one. Remote access additionally needs TLS, an authenticated gateway, and an operator/security review.
 
 Paper wallet totals come from persisted `open_positions` records, including closed rows. They are gross entry-cost accounting: no live mark-to-market, fees, slippage, deposits, or broker reconciliation. Manual closes use the price you enter. Stops generate advisory alerts, not guaranteed fills or automatic broker exits. Do not change initial capital to conceal losses.
 

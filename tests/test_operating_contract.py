@@ -129,9 +129,16 @@ def test_force_cannot_bypass_running_pipeline(client, monkeypatch):
 
 
 def test_authentication_protects_reads_and_writes(client, monkeypatch):
+    public_status = client.get("/api/v1/auth/status")
+    assert public_status.json() == {"required": False}
+    assert public_status.headers["cache-control"] == "no-store"
     monkeypatch.setenv("API_AUTH_TOKEN", "test-secret")
     get_settings.cache_clear()
     with TestClient(create_app()) as protected:
+        status = protected.get("/api/v1/auth/status")
+        assert status.status_code == 200 and status.json() == {"required": True}
+        assert "test-secret" not in status.text
+        assert protected.get("/api/v1/auth/status", headers={"Authorization": "Bearer invalid"}).status_code == 200
         assert protected.get("/api/v1/health").status_code == 200
         assert protected.get("/api/v1/wallet/summary").status_code == 401
         assert protected.post("/api/v1/positions/", json=VALID).status_code == 401

@@ -251,28 +251,28 @@ def composite_score(
     ]
 
 
-def rank_watchlist(max_symbols: int = 500) -> list:
-    """Rank watchlist symbols (placeholder for testing).
-    
-    Returns a list of dicts with symbol, bullish_score, bearish_score.
-    """
-    from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
-    
-    symbols = get_watchlist_symbols()[:max_symbols]
-    return [
-        {
-            "symbol": sym,
-            "bullish_score": 5.0,
-            "bearish_score": 1.0,
-            "dominant_bias": None,
-            "contradiction": None,
-        }
-        for sym in symbols
-    ]
+def rank_watchlist(max_symbols: int | None = None, symbols: list[str] | None = None) -> list:
+    """Real hybrid scores. Prefer the background research API for full scans."""
+    from trading_agent.analysis.research_engine import analyze_symbol, model_for_research, universe
+    model = model_for_research()
+    result = []
+    for symbol in (symbols if symbols is not None else universe()):
+        try:
+            row, _ = analyze_symbol(symbol, model=model)
+            if row["action"] == "HOLD":
+                continue
+            result.append({**row, "bullish_score": row["score"] if row["action"] == "BUY" else 0,
+                           "bearish_score": row["score"] if row["action"] == "SELL" else 0,
+                           "dominant_bias": "bullish" if row["action"] == "BUY" else "bearish",
+                           "contradiction": None})
+        except Exception as error:
+            logger.warning("ranking_symbol_skipped", symbol=symbol, reason=type(error).__name__)
+    result.sort(key=lambda row: (-row["score"], row["symbol"]))
+    return result if max_symbols is None else result[:max_symbols]
 
 
 def rank_watchlist_with_sizing(capital: float, n: int = 50, reserve_prior: bool = False) -> dict:
-    """Rank watchlist with position sizing (placeholder for testing)."""
+    """Compatibility wrapper; the restored dashboard uses research_jobs."""
     from trading_agent.analysis.opportunity_finder import rank_watchlist_with_sizing as _rank
     
     return _rank(capital, n, reserve_prior)

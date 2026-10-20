@@ -236,6 +236,8 @@ def create_target(
     target_type: str = "return",
 ) -> pd.Series:
     """Create target variable."""
+    if not isinstance(horizon, int) or horizon < 1:
+        raise ValueError("horizon must be a positive integer")
     close = df["close"]
 
     if target_type == "return":
@@ -243,11 +245,9 @@ def create_target(
         target = close.shift(-horizon) / close - 1
     elif target_type == "direction":
         # Direction: 1=up, 0=down
-        target = (close.shift(-horizon) > close).astype(int)
+        target = (close.shift(-horizon) > close).astype(float).where(close.shift(-horizon).notna() & close.notna())
     elif target_type == "triple_barrier":
-        # Triple barrier labeling (simplified)
-        # Would need ATR for barriers
-        target = close.shift(-horizon) / close - 1
+        raise ValueError("Use the path-dependent enhanced triple-barrier target with ATR")
     else:
         raise ValueError(f"Unknown target type: {target_type}")
 

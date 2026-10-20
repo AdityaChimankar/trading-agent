@@ -134,7 +134,8 @@ class TestMLFeatures:
         from trading_agent.strategy.ml_features import create_target
         target = create_target(self.df, horizon=12, target_type="direction")
         assert len(target) == len(self.df)
-        assert target.isin([0, 1]).all() or target.isna().all()
+        assert target.iloc[:-12].isin([0, 1]).all()
+        assert target.iloc[-12:].isna().all()  # Unknown future is not a losing label.
 
 
 class TestHybridStrategy:

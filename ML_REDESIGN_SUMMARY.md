@@ -1,6 +1,12 @@
 # ML Pipeline Redesign Summary
 
+> Latest outcome-model lifecycle (2026-10-20): separate calibrated BUY/SELL net-profit classifiers now share one training/paper/dashboard contract. The new entry point is `python -m trading_agent.strategy.outcome_cli`, not the older v2 command below. Historical and prospective-paper gates must pass before explicit promotion. The first five-stock candidate trained successfully but **failed** qualification: no tuning threshold passed, so no test trades were selected and no win rate can be reported. No model was promoted. See the README's lifecycle section; historical tables below are not evidence for this candidate.
+
+> Validation update (2026-10-20): direction/cost labels now exclude unobserved futures; enhanced triple-barrier labels are binary next-open long outcomes using the full path and conservative fills. Their take-profit parameter now means reward/risk. Training uses timestamp-based purged train/tuning/holdout partitions; early stopping and threshold selection no longer use the reported holdout. Multi-symbol data is globally time ordered and regime quantiles are causal trailing ranks. Continuous-return labels are rejected by binary trainers. Existing models are unchanged and require a separate retraining/promotion decision. The new dashboard outcome panel validates fixed rules only; it does not establish hybrid profitability.
+
 > Historical implementation summary, reviewed 2026-10-19. Use the installed CLI commands below and validate metrics again on current data before promotion.
+
+> Dashboard restoration (2026-10-20): the active dashboard's **Walk-Forward Optimizer** is a corrected **rule-parameter** evaluator, not the v2 ML trainer described below. It does not retrain or promote the existing nine-feature `ml_model.joblib`. Its train/test outcomes are purged at window boundaries and use consistent entry/cost assumptions. See [README.md](README.md#walk-forward-optimizer-optional-research) for controls and commands. Historical metrics and no-lookahead claims in this document are not fresh validation evidence for the restored hybrid model.
 
 ## Problem
 The original ML model (train_ml_model.py / ml_decision_agent.py) had severe issues:

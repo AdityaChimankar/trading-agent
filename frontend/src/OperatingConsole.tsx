@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPost, setApiToken } from './api/client'
+import { useApiAuth } from './api/useApiAuth'
 import { Panel, Metric } from './components/ui'
 import { inr } from './lib/format'
 
@@ -18,24 +19,29 @@ function ErrorMessage({ error }: { error: Error | null }) {
   return error ? <p className="error" role="alert">{error.message}</p> : null
 }
 
-export default function OperatingConsole() {
+export default function OperatingConsole({ symbol, interval, onSymbolChange, onIntervalChange, onInspect, onBookChanged }: {
+  symbol: string; interval: string
+  onSymbolChange: (symbol: string) => void
+  onIntervalChange: (interval: string) => void
+  onInspect: () => void
+  onBookChanged: () => void
+}) {
   const cache = useQueryClient()
+  const auth = useApiAuth()
   const [token, setToken] = useState('')
-  const [symbol, setSymbol] = useState('RELIANCE')
-  const [interval, setInterval] = useState('minute')
   const [exitPrices, setExitPrices] = useState<Record<number, string>>({})
   const [notice, setNotice] = useState('')
   const ready = useQuery({ queryKey: ['ready'], queryFn: () => apiGet<{ status: string }>('/api/v1/ready'), refetchInterval: 15000 })
   const feed = useQuery({ queryKey: ['feed'], queryFn: () => apiGet<{ connected: boolean; last_tick: string | null }>('/api/v1/liveness/feed'), refetchInterval: 15000 })
-  const book = useQuery({ queryKey: ['book'], queryFn: () => apiGet<Book>('/api/v1/wallet/summary'), refetchInterval: 15000 })
+  const book = useQuery({ queryKey: ['research-book'], queryFn: () => apiGet<Book>('/api/v1/wallet/summary'), refetchInterval: 15000 })
   const positions = useQuery({ queryKey: ['paper-positions'], queryFn: () => apiGet<Position[]>('/api/v1/positions/'), refetchInterval: 15000 })
   const closed = useQuery({ queryKey: ['paper-closed'], queryFn: () => apiGet<Position[]>('/api/v1/positions/?status=closed'), refetchInterval: 15000 })
   const symbols = useQuery({ queryKey: ['stored-symbols'], queryFn: () => apiGet<{ symbol: string }[]>('/api/v1/symbols/stored') })
   const history = useQuery({ queryKey: ['candles', symbol, interval], queryFn: () => apiGet<{ candles: Candle[] }>(`/api/v1/history/${encodeURIComponent(symbol)}?interval=${interval}&limit=30`), enabled: Boolean(symbol), refetchInterval: 30000 })
   const pipeline = useQuery({ queryKey: ['pipeline-status'], queryFn: () => apiGet<{ status: string; symbols_processed: number; errors: string[] }>('/api/v1/pipeline/status'), refetchInterval: 15000 })
   function refresh() { void cache.invalidateQueries() }
-  const create = useMutation({ mutationFn: (body: object) => apiPost('/api/v1/positions/', body), onSuccess: () => { setNotice('Paper position recorded.'); refresh() } })
-  const close = useMutation({ mutationFn: ({ id, price }: { id: number; price: number }) => apiPost(`/api/v1/positions/${id}/close?exit_price=${price}`), onSuccess: () => { setNotice('Paper position closed.'); refresh() } })
+  const create = useMutation({ mutationFn: (body: object) => apiPost('/api/v1/positions/', body), onSuccess: () => { setNotice('Paper position recorded. Re-scan to recalculate available capital and sizing.'); onBookChanged(); refresh() } })
+  const close = useMutation({ mutationFn: ({ id, price }: { id: number; price: number }) => apiPost(`/api/v1/positions/${id}/close?exit_price=${price}`), onSuccess: () => { setNotice('Paper position closed. Re-scan to recalculate available capital and sizing.'); onBookChanged(); refresh() } })
   const run = useMutation({ mutationFn: () => apiPost('/api/v1/pipeline/run', { symbols: [symbol], interval }), onSuccess: refresh })
   function record(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -45,7 +51,7 @@ export default function OperatingConsole() {
       entry_price: Number(form.get('entry_price')), quantity: Number(form.get('quantity')),
       stop_loss: Number(form.get('stop_loss')), take_profit: target ? Number(target) : null, strategy: 'manual' })
   }
-  return <div className="app"><main className="main main-wide">
+  return <main className="main main-wide">
     <Panel title="Trading Agent · Paper operations" subtitle="Research and paper positions. Entries and exits below use prices you supply; no broker orders are sent.">
       <div className="metric-row">
         <Metric label="Database" value={ready.data?.status ?? (ready.error ? 'Unavailable' : 'Checking')} />
@@ -53,14 +59,18 @@ export default function OperatingConsole() {
         <Metric label="Pipeline" value={pipeline.data?.status ?? 'Unknown'} />
       </div>
       <button onClick={refresh}>Refresh</button> <a href="http://localhost:8000/docs" target="_blank" rel="noreferrer">API documentation</a>
-      <details><summary>API access token (if enabled on the server)</summary>
+      {auth.data?.required && <details><summary>API access token (if enabled on the server)</summary>
         <form onSubmit={event => { event.preventDefault(); setApiToken(token); setToken(''); refresh() }}>
           <label>Bearer token <input type="password" autoComplete="off" value={token} onChange={event => setToken(event.target.value)} /></label>
           <button type="submit">Use for this page session</button>
         </form>
-      </details>
+      </details>}
       <ErrorMessage error={ready.error} /><ErrorMessage error={feed.error} /><ErrorMessage error={pipeline.error} />
       <p role="status">{notice}</p>
+    </Panel>
+    <Panel title={`Paper workspace: ${symbol}`} subtitle="Shared symbol and interval with the Opportunity Finder. Manual paper records are separate from prospective outcome-model confirmation.">
+      <p>{symbol} / {interval}. Inspect the current plan, evidence and expiry before entering your own paper prices.</p>
+      <button className="btn" onClick={onInspect}>Inspect selected symbol and plan</button>
     </Panel>
     <Panel title="Persistent paper book" subtitle="Entry-cost accounting. Fees, slippage and unrealized gains/losses are excluded.">
       <ErrorMessage error={book.error} />
@@ -72,10 +82,11 @@ export default function OperatingConsole() {
       </div>}
     </Panel>
     <Panel title="Stored candles" subtitle="Stored timestamps are UTC. Missing data is an error, not a zero price.">
-      <label>Symbol <input list="stored-symbols" value={symbol} onChange={event => setSymbol(event.target.value.trim().toUpperCase())} /></label>
+      <label>Symbol <input aria-label="Paper research symbol" list="stored-symbols" value={symbol} onChange={event => onSymbolChange(event.target.value.trim().toUpperCase())} /></label>
       <datalist id="stored-symbols">{symbols.data?.map(row => <option key={row.symbol} value={row.symbol} />)}</datalist>
-      <label>Interval <select value={interval} onChange={event => setInterval(event.target.value)}>
+      <label>Interval <select aria-label="Paper candle interval" value={interval} onChange={event => onIntervalChange(event.target.value)}>
         <option value="minute">1 minute</option><option value="5minute">5 minutes</option><option value="15minute">15 minutes</option>
+        <option value="day">Daily</option>
       </select></label>
       <button disabled={!symbol || run.isPending || pipeline.data?.status === 'running'} onClick={() => run.mutate()}>Analyze selected symbol</button>
       <ErrorMessage error={symbols.error} /><ErrorMessage error={history.error} /><ErrorMessage error={run.error} />
@@ -85,8 +96,8 @@ export default function OperatingConsole() {
       {history.data?.candles.length === 0 && <p>No candles available for this interval.</p>}
     </Panel>
     <Panel title="Record a paper position" subtitle="The server checks bracket direction, available capital, duplicate symbols, and exposure/risk limits.">
-      <form onSubmit={record} className="metric-row">
-        <label>Symbol <input name="symbol" required maxLength={20} defaultValue="RELIANCE" /></label>
+      <form key={symbol} onSubmit={record} className="metric-row">
+        <label>Symbol <input name="symbol" aria-label="Paper entry symbol" required maxLength={20} value={symbol} readOnly /></label>
         <label>Side <select name="action"><option>BUY</option><option>SELL</option></select></label>
         <label>Entry price <input name="entry_price" type="number" min="0.01" step="any" required /></label>
         <label>Quantity <input name="quantity" type="number" min="1" step="1" required /></label>
@@ -109,5 +120,5 @@ export default function OperatingConsole() {
       {closed.data?.length === 0 && <p>No closed trades.</p>}
       {closed.data?.map(p => <p key={p.id}>{p.symbol} · {p.action} · {p.quantity} · Gross P&L {inr(p.pnl ?? 0)}</p>)}
     </Panel>
-  </main></div>
+  </main>
 }

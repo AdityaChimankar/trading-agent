@@ -34,6 +34,7 @@ build/
 # Data files
 data/parquet/
 data/ticker-heartbeat.json
+data/research/
 *.db
 *.sqlite
 *.sqlite3
@@ -53,6 +54,8 @@ data/.access_token
 data/indicator_cache/*.pkl
 models/*.pkl
 models/registry.json
+models/outcome_candidates/
+models/outcome-active.json
 
 # OS
 .DS_Store
