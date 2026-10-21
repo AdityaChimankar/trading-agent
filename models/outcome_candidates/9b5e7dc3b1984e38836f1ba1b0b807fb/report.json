@@ -1,0 +1,96 @@
+{
+  "schema": "buy-sell-outcome-v1",
+  "contract_hash": "59603a6b5e23b69098d51c1ffa4d5802e67524d8404f29cb52c486d970cd3aca",
+  "candidate_id": "9b5e7dc3b1984e38836f1ba1b0b807fb",
+  "created_at": "2026-10-20T08:09:09.455590+00:00",
+  "features": [
+    "rsi",
+    "adx",
+    "atr_pct",
+    "pattern_code",
+    "return_1",
+    "return_3",
+    "return_6",
+    "volume_ratio",
+    "dist_from_ma20",
+    "time_sin",
+    "time_cos",
+    "dist_ma50",
+    "volatility20"
+  ],
+  "interval": "minute",
+  "policy": {
+    "horizon": 24,
+    "stop_atr": 1.5,
+    "reward_risk": 2.0,
+    "cost_bps": 10.0,
+    "slippage_bps": 2.0,
+    "entry_delay_bars": 2
+  },
+  "symbols": [
+    "HDFCBANK",
+    "ICICIBANK",
+    "INFY",
+    "RELIANCE",
+    "TCS"
+  ],
+  "thresholds": {
+    "BUY": 1.01,
+    "SELL": 1.01
+  },
+  "test_end": "2026-10-19T04:44:00+00:00",
+  "status": "historical_gate_failed",
+  "windows": {
+    "calibration_start": "2026-08-25T18:30:00+00:00",
+    "tuning_start": "2026-09-07T18:30:00+00:00",
+    "test_start": "2026-09-20T18:30:00+00:00"
+  },
+  "test": {
+    "BUY": {
+      "trades": 0,
+      "sessions": 0,
+      "win_rate": null,
+      "win_lower_95": null,
+      "mean_net_return_pct": null,
+      "mean_lower_95_pct": null,
+      "passed": false,
+      "required_win_rate": 0.6,
+      "minimum_trades": 100,
+      "minimum_sessions": 10
+    },
+    "SELL": {
+      "trades": 0,
+      "sessions": 0,
+      "win_rate": null,
+      "win_lower_95": null,
+      "mean_net_return_pct": null,
+      "mean_lower_95_pct": null,
+      "passed": false,
+      "required_win_rate": 0.6,
+      "minimum_trades": 100,
+      "minimum_sessions": 10
+    }
+  },
+  "tuning": {
+    "BUY": {
+      "threshold": 1.01,
+      "trades": 0,
+      "reason": "No tuning threshold met 60%/positive expectancy/sample gates"
+    },
+    "SELL": {
+      "threshold": 1.01,
+      "trades": 0,
+      "reason": "No tuning threshold met 60%/positive expectancy/sample gates"
+    }
+  },
+  "data_rows": {
+    "HDFCBANK": 20000,
+    "ICICIBANK": 20000,
+    "INFY": 20000,
+    "RELIANCE": 20000,
+    "TCS": 20000
+  },
+  "limitations": "Historical holdout excluded from fit/calibration/selection, not proof of market-level pristine data. Existing history was previously inspected with legacy strategies. No portfolio allocation or real execution; survivorship/corporate-action and selection bias remain. Prospective paper confirmation is mandatory.",
+  "data_sha256": "81ff11861f65bac8c8b8dec86c34534972fee89ad96db816c1119169bf5067ee",
+  "artifact_sha256": "574cbf54e2d8bec4856a90e3edb82a1b107affe9ee7febf7e3796d235647952e"
+}

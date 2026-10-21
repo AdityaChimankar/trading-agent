@@ -1,0 +1,6 @@
+[console_scripts]
+trading-agent = trading_agent.cli:app
+trading-agent-api = trading_agent.api.main:run
+trading-agent-optimize = trading_agent.optimize.cli:app
+trading-agent-scheduler = trading_agent.scripts.scheduler:main
+trading-agent-ticker = trading_agent.ingest.live_ticker:main
