@@ -5,6 +5,7 @@ Requires Playwright's Chromium browser to be installed.
 """
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from os import environ
 from pathlib import Path
 from threading import Thread
 
@@ -25,7 +26,7 @@ def main():
         thread.start()
         try:
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
+                browser = playwright.chromium.launch(headless=True, channel=environ.get("PLAYWRIGHT_BROWSER_CHANNEL"))
                 try:
                     for required in (False, True):
                         context = browser.new_context()

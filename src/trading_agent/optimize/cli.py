@@ -74,16 +74,27 @@ def ml_model_v2(
 def strategy_lab(
     symbol: str = typer.Argument(..., help="Symbol to test"),
     interval: str = typer.Option("5minute", help="Candle interval"),
+    max_bars: int = typer.Option(5000, min=250, max=10000, help="Maximum completed local candles"),
 ):
-    """Run strategy lab grid search."""
-    from trading_agent.research.strategy_lab import run_strategy_lab
+    """Compare fixed profiles and unconditional baselines; exploratory only."""
+    from trading_agent.research.strategy_lab import compare_profiles, read_completed
 
-    results = run_strategy_lab(symbol, interval)
-    for r in results[:10]:
-        typer.echo(
-            f"Params: {r.params} | Net EV: {r.net_ev:.4f}% | WR: {r.win_rate:.1f}% | "
-            f"DD: {r.max_drawdown:.2f}% | Sharpe: {r.sharpe:.2f}"
-        )
+    symbol = symbol.strip().upper()
+    try:
+        result = compare_profiles(read_completed(symbol, interval, max_bars), symbol, interval)
+    except ValueError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo("Exploratory comparison; no profile is qualified or promoted.")
+    if result["status"] != "completed":
+        typer.echo(f"Insufficient history: {result['candles']} / {result['required_candles']} candles", err=True)
+        raise typer.Exit(code=1)
+    for profile in result["profiles"] + result["baselines"]:
+        metrics = profile["metrics"]
+        mean = metrics["mean_net_return_pct"]
+        mean_label = "n/a" if mean is None else f"{mean:.4f}%"
+        typer.echo(f"{profile['label']}: {metrics['trades']} trades | Mean net return: {mean_label}")
+    typer.echo(result["limitations"])
 
 
 if __name__ == "__main__":

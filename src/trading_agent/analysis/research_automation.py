@@ -59,7 +59,7 @@ class ResearchAutomation:
     def snapshot(self):
         with self._lock:
             result = copy.deepcopy(self.state)
-            result["running"] = bool(self._thread and self._thread.is_alive())
+            result["running"] = bool(self._thread and self._thread.is_alive() and not self._stop.is_set())
             return result
 
     def enable(self, options, min_scan_seconds=120):
@@ -102,6 +102,8 @@ class ResearchAutomation:
     def start_worker(self):
         with self._lock:
             if self._thread and self._thread.is_alive():
+                if self._stop.is_set():
+                    raise RuntimeError("Previous research worker is still stopping; retry after it exits")
                 return
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="research-automation", daemon=True)
@@ -111,7 +113,7 @@ class ResearchAutomation:
         self.pause("API stopped. Enable research automation again after restarting.")
         self._stop.set()
         self._wake.set()
-        if self._thread:
+        if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
 
     def _run(self):

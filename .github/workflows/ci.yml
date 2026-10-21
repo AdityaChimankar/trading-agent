@@ -2,9 +2,9 @@ name: Validation and image publishing
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, gemini, rework]
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, gemini, rework]
 
 env:
   PYTHON_VERSION: "3.11"
@@ -83,7 +83,7 @@ jobs:
     name: Build Docker Image
     runs-on: ubuntu-latest
     needs: [static-checks, test]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     permissions:
       contents: read
       packages: write

@@ -83,3 +83,20 @@ def test_readiness_route_validates_interval(monkeypatch, inputs):
     with TestClient(app) as client:
         assert client.get("/readiness?interval=minute").status_code == 200
         assert client.get("/readiness?interval=invalid").status_code == 422
+
+
+def test_unreadable_outcome_evidence_never_counts_as_eligible(inputs, monkeypatch):
+    def failed(*args):
+        raise OSError("private artifact path")
+    monkeypatch.setattr(module, "estimate", failed)
+    report = module.readiness("minute", NOW)
+    assert report["coverage"]["eligible"] == 0
+    assert any(check["code"] == "evidence_unavailable" for check in report["checks"])
+    assert "private artifact path" not in str(report)
+
+
+def test_multiple_workers_never_report_eligible_allocations(inputs, monkeypatch):
+    monkeypatch.setattr(module, "get_settings", lambda: SimpleNamespace(api=SimpleNamespace(workers=2)))
+    report = module.readiness("minute", NOW)
+    assert report["coverage"]["eligible"] == 0
+    assert any(check["code"] == "unsupported_workers" for check in report["checks"])

@@ -6,7 +6,7 @@ import App from './ResearchDashboard'
 import './styles.css'
 
 // One shared client for every panel. Individual queries set their own
-// refetchInterval (see api/queries.ts); these are just the defaults.
+// refetchInterval; these are just the defaults.
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

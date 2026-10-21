@@ -182,7 +182,7 @@ def size_opportunities(rows, capital, positions, limits, risk_pct=1.0, reward_ri
         elif stop <= 0 or target <= 0:
             reason = "Invalid price bracket"
         risk_budget = max(0, min(capital * min(risk_pct / 100, limits.max_trade_risk_pct), capital * limits.max_risk_pct - used_risk))
-        notional_budget = max(0, min(capital * 0.10, capital * limits.max_exposure_pct - used_value, capital - used_value))
+        notional_budget = max(0, min(capital * limits.max_single_position_pct, capital * limits.max_exposure_pct - used_value, capital - used_value))
         quantity = max(0, min(int(risk_budget / distance), int(notional_budget / entry))) if direction else 0
         if not reason and (quantity == 0 or quantity * entry < 5000):
             reason = "Insufficient capital or remaining portfolio risk/exposure"

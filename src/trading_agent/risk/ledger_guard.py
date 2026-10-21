@@ -30,7 +30,7 @@ def utc_stamp(value):
 
 def ledger_state(rows, limits, now=None):
     """Pure projection; corrupt/missing closed-trade evidence fails closed."""
-    now = now or datetime.now(UTC)
+    now = utc_stamp(now or datetime.now(UTC))
     today = now.astimezone(ZoneInfo("Asia/Kolkata")).date()
     rows = [dict(row) for row in rows]
     closed, opened = [], []
@@ -43,12 +43,24 @@ def ledger_state(rows, limits, now=None):
                 raise ValueError("Invalid closed paper trade")
             closed.append((stamp, row["id"], pnl))
         elif status == "open":
+            position = dict(row)
             for field in ("entry_price", "position_size", "position_value", "stop_loss"):
-                if not math.isfinite(float(row[field])) or float(row[field]) <= 0:
+                position[field] = float(row[field])
+                if not math.isfinite(position[field]) or position[field] <= 0:
                     raise ValueError("Invalid open paper position")
-            if not math.isfinite(float(row["risk_amount"])) or float(row["risk_amount"]) < 0:
+            position["risk_amount"] = float(row["risk_amount"])
+            if not math.isfinite(position["risk_amount"]) or position["risk_amount"] < 0:
                 raise ValueError("Invalid open paper risk")
-            opened.append(row)
+            if (not position["position_size"].is_integer()
+                    or not isinstance(row.get("symbol"), str) or not row["symbol"].strip()
+                    or str(row.get("action")).upper() not in {"BUY", "SELL"}):
+                raise ValueError("Invalid open paper position identity or quantity")
+            expected_value = position["entry_price"] * position["position_size"]
+            expected_risk = abs(position["entry_price"] - position["stop_loss"]) * position["position_size"]
+            if (not math.isclose(position["position_value"], expected_value, rel_tol=1e-8, abs_tol=1e-6)
+                    or not math.isclose(position["risk_amount"], expected_risk, rel_tol=1e-8, abs_tol=1e-6)):
+                raise ValueError("Inconsistent open paper exposure or risk")
+            opened.append(position)
         else:
             raise ValueError("Unknown paper position state")
     equity = peak = limits.initial_capital

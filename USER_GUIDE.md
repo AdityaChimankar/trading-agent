@@ -10,6 +10,8 @@ Read [READINESS.md](READINESS.md) before unattended use. The current console is 
 
 The unified dashboard has a searchable watchlist sidebar and four connected steps: **Find opportunities → Inspect selected stock → Validate strategy → Paper review**. The top symbol picker and shared settings coordinate all steps. **Paper operations** uses the same selected symbol and candle interval; the old duplicate scanner has been removed from that console.
 
+The opening overview groups paper equity, cash, positions, eligible picks and cached symbol headlines. Expand advanced settings to adjust sizing/evidence controls. Opening the overview or refreshing its views reads stored state; it does not download news, start training or run a new scan.
+
 1. Set **Sizing capital**, **Candle interval**, **Decision mode**, **Risk per trade** and **Target reward/risk**. The legacy model in `models/ml_model.joblib` uses nine features and minute candles. Its training interval is inferred from the original code, not certified by artifact metadata. Do not interpret historical model metrics as validation of this deployment.
 2. Click **Scan entire watchlist**. Every unique entry in `symbols.txt` is attempted (currently 2,319). Progress, stale counts, skips and failures are shown. Do not run the CLI scan simultaneously with a dashboard scan. Docker uses one API worker; this is not a distributed job system.
 3. **Top Opportunity** shows the best eligible BUY and SELL plans after the complete scan. The sidebar retains directional historical/stale candidates, labelled as such. There may be no eligible pick: stale data, HOLD/conflict, missing model, an existing position or risk limits can prevent a proposal. Nothing is bought automatically.
@@ -22,11 +24,41 @@ Walk-forward results are keyed by symbol, interval, training/test windows and co
 
 After a validation completes, news is refreshed or a paper position changes, the workspace marks its existing scan plans as needing a new scan. It does not rewrite old rankings or silently recalculate sizing. A newly qualified report applies only to later candles; wait for those candles and explicitly re-scan. Full-universe scans continue in the background while you inspect or validate. Scores are not profit probabilities, and stale, incomplete, failed or mismatched evidence must not be treated as a current plan.
 
-Sizing uses 1.5×ATR stops, the requested reward/risk target, integer shares, a 10% single-stock notional cap and the paper book's exposure/risk/position-count limits. Both directional lists share reservations. Short-selling leverage, sector/correlation limits, taxes, fees and execution slippage are not modeled in these plans. A score measures rule/model evidence, not probability of profit.
+Sizing uses 1.5×ATR stops, the requested reward/risk target, integer shares, the configured single-stock notional cap (10% by default) and the paper book's exposure/risk/position-count limits. Both directional lists share reservations. Short-selling leverage, sector/correlation limits, taxes, fees and execution slippage are not modeled in these plans. A score measures rule/model evidence, not probability of profit.
+
+`PAPER_MAX_SINGLE_POSITION_PCT=0.10` caps each symbol's notional. `PAPER_MAX_DAILY_LOSS_PCT=0.03` blocks new paper entries once the day's realized loss reaches 3% of IST session-start equity. `PAPER_MAX_DRAWDOWN_PCT=0.15` blocks entries at 15% realized drawdown from the ledger's peak, including previous sessions. These are fractions, not whole percentages. Existing positions can still be closed. The entry API checks the limits and inserts the position in one serialized SQLite transaction. Missing or invalid ledger evidence blocks entries; these limits do not measure unrealized losses or actual execution costs.
+
+Each scan allocation records a fingerprint of the paper ledger, session date and risk settings. A later change from any client blocks that old allocation and asks for a re-scan. The original research result remains available. Keep initial capital fixed for an existing ledger; changing it redefines historical risk.
 
 Scan snapshots and news caches live in `data/research/`; they survive Docker replacement. A scan interrupted by an API restart is marked interrupted and must be rerun. It is not resumed or silently reported complete. For an offline operator scan while no dashboard scan is running: `python -m trading_agent.analysis.research_jobs --interval minute --capital 100000` (or prefix with `docker compose run --rm tools` for Docker).
 
 After installing changes to these panels and their API, run `docker compose build api frontend`, then `docker compose up -d api frontend`, and reload the browser. Do not rebuild for each scan.
+
+## Optional automatic research
+
+The API exposes `GET /api/v1/research/readiness` for storage coverage, feed evidence, scan freshness, model qualification and paper-risk status. `/api/v1/ready` is the smaller database health check; it does not mean a strategy is ready to trade.
+
+Automatic research scans stored candles only and starts disabled after every API restart. In the API docs, call `POST /api/v1/research/automation/enable` with a body such as:
+
+```json
+{
+  "scan": {
+    "interval": "minute",
+    "mode": "rule_only",
+    "capital": 100000,
+    "risk_pct": 1,
+    "reward_risk": 2,
+    "require_validated": true
+  },
+  "min_scan_seconds": 120
+}
+```
+
+Use `GET /api/v1/research/automation` to inspect status and `POST /api/v1/research/automation/pause` to stop new automatic scans. Canceling a scan also pauses automation. The worker requires `API_WORKERS=1`, qualified evidence and the full configured universe; it supports minute, 5-minute and 15-minute data. It checks for completed-candle or ledger changes, waits for the configured weekday session, prevents overlapping scans and pauses after repeated failures. The delay is measured after completion. Settings can change after pausing.
+
+This worker does not start ingestion, fetch news, train, promote or record trades. It uses the same conservative allocation gates as a manual scan. A large universe can still outlast a signal's validity window; automatic rescanning does not make historical or stale candles tradable. Session checks are weekday/time rules, without an exchange holiday calendar.
+
+For a bounded exploratory comparison, `POST /api/v1/strategy-lab/compare` evaluates a fixed set of rule profiles and unconditional long/short baselines with consistent bracket fills and costs. It reads completed stored intraday candles, reports reference and evaluation periods, and permits one request at a time per API worker. The result cannot qualify a scan or promote a model. Returns and drawdown are additive equal-notional trade statistics, not compounded account performance; undefined metrics are `null` (shown as `n/a` in the CLI). Repeated inspection of its evaluation period is research selection, not an independent holdout.
 
 ## 1. Choose how to run it
 
@@ -169,7 +201,7 @@ trading-agent backtest RELIANCE TCS --start 2025-01-01 --end 2025-06-30
 trading-agent optimize walk-forward RELIANCE TCS
 trading-agent optimize walk-forward-single RELIANCE
 trading-agent optimize ml-model-v2 RELIANCE TCS
-trading-agent optimize strategy-lab RELIANCE
+trading-agent optimize strategy-lab RELIANCE --interval minute --max-bars 5000
 ```
 
 Backtests now generate candidates from the time-bounded historical slice supplied by the engine; they do not read the latest future candle while replaying history.
@@ -361,9 +393,13 @@ If `ticker` exits, refresh the Kite token and restart only that service.
 
 Stop duplicate local/Docker schedulers or tickers. Keep the database on a local disk, not a network share. PostgreSQL is not yet a drop-in replacement because maintenance and health modules still use SQLite-specific queries.
 
-### Legacy dashboard screens
+### Research worker still stopping
 
-The restored `ResearchDashboard` uses `/api/v1/research` for aligned rule/ML analysis, full-watchlist scans, Plotly charts and optional cached news sentiment. The older `App.tsx` is not the active entry point. The Paper operations tab retains the compatibility rule-only research panel; use the main Research dashboard for restored hybrid analysis.
+If an in-process API restart reports that the previous research worker is still stopping, wait for its pending local storage read to finish before retrying, or restart the API process. A stopping worker is not reported as running, and automatic research must be enabled again after a successful restart.
+
+### Dashboard entry point
+
+The restored `ResearchDashboard` uses `/api/v1/research` for aligned rule/ML analysis, full-watchlist scans, Plotly charts and optional cached news sentiment. Find, Inspect, Validate and Paper share the current symbol and interval. The Paper tab manages the persistent paper book through `OperatingConsole`; research actions remain in the shared workflow. Unreachable legacy dashboard files have been removed; their historical versions remain available on `rework` and in Git history.
 
 ### Walk-Forward Optimizer
 

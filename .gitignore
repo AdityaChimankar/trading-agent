@@ -70,5 +70,6 @@ frontend/.vite/
 .ipynb_checkpoints/
 
 # Temporary files
+.worktrees/
 *.tmp
 *.temp

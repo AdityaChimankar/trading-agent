@@ -9,8 +9,7 @@ from filelock import FileLock, Timeout
 from trading_agent.analysis.research_engine import analyze_symbol, model_for_research, size_opportunities, universe, refresh_eligibility
 from trading_agent.analysis.outcome_validation import estimate
 from trading_agent.core.config import get_settings
-from trading_agent.risk.portfolio_risk import get_open_positions
-from trading_agent.storage.db import get_connection
+from trading_agent.risk.ledger_guard import read_ledger_state
 
 
 class ResearchJobs:
@@ -32,17 +31,40 @@ class ResearchJobs:
         with self.lock:
             state = copy.deepcopy(self.state)
         now = datetime.now(UTC)
+        allocation_warning = None
+        try:
+            ledger = read_ledger_state(now)
+            if not ledger["entries_allowed"]:
+                allocation_warning = ledger["block_reason"]
+            elif state["rows"] and state.get("ledger_fingerprint") != ledger["fingerprint"]:
+                allocation_warning = "Paper ledger, session or limits changed; re-scan to recompute allocations"
+        except Exception:
+            allocation_warning = "Paper ledger cannot be verified; allocations blocked until a successful re-scan"
+        state["allocation_warning"] = allocation_warning
         for row in state["rows"]:
             refresh_eligibility(row, now)
             if row.get("validation", {}).get("status") == "qualified_research":
-                row["validation"] = estimate(row, state.get("options", {}).get("mode"),
-                                             state.get("options", {}).get("reward_risk", 2), now)
+                try:
+                    validation = estimate(row, state.get("options", {}).get("mode"),
+                                          state.get("options", {}).get("reward_risk", 2), now)
+                    if not isinstance(validation, dict) or not isinstance(validation.get("status"), str):
+                        raise ValueError("Invalid outcome evidence result")
+                    row["validation"] = validation
+                except Exception:
+                    # A failed evidence read must remove the saved qualification,
+                    # without exposing filesystem paths or exception contents.
+                    row["validation"] = {"status": "unavailable", "win_probability": None,
+                                         "expected_net_return_pct": None,
+                                         "reason": "Outcome evidence could not be verified"}
                 if state.get("options", {}).get("require_validated", True) and row["validation"]["status"] != "qualified_research" and row.get("plan"):
                     row["plan"].update(blocked=True, block_reason="Outcome evidence no longer qualified",
                                        quantity=0, position_value=0, risk_amount=0)
             # Old snapshots predate the evidence contract: never promote them.
             if "validation" not in row and row.get("plan"):
                 row["plan"].update(blocked=True, block_reason="Legacy snapshot; rescan for validation gates",
+                                   quantity=0, position_value=0, risk_amount=0)
+            if allocation_warning and row.get("plan"):
+                row["plan"].update(blocked=True, block_reason=allocation_warning,
                                    quantity=0, position_value=0, risk_amount=0)
         state["eligible"] = sum(bool(r.get("plan")) and not r["plan"]["blocked"] for r in state["rows"])
         state["stale"] = sum(r.get("stale", False) for r in state["rows"])
@@ -60,7 +82,10 @@ class ResearchJobs:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def start(self, options):
+    def start(self, options, *, source="manual"):
+        if source not in {"manual", "automation"}:
+            raise ValueError("Scan source must be manual or automation")
+        options = copy.deepcopy(options)
         with self.lock:
             if self.state["status"] == "running":
                 raise RuntimeError("A research scan is already running")
@@ -73,33 +98,28 @@ class ResearchJobs:
                 raise RuntimeError("Another process is scanning this data directory") from error
             self.cancelled.clear()
             self.state = {"status": "running", "processed": 0, "total": len(symbols), "rows": [],
-                          "errors": [], "skipped": [], "started_at": datetime.now(UTC).isoformat(), "options": options}
+                          "errors": [], "skipped": [], "started_at": datetime.now(UTC).isoformat(),
+                          "options": options, "source": source}
             try:
                 self.save()
                 threading.Thread(target=self.run, args=(symbols, options), daemon=True, name="research-scan").start()
             except Exception:
                 self.state["status"] = "error"
+                self.state["errors"].append({"symbol": None, "reason": "Scan could not start"})
                 self.run_lock.release()
                 raise
             return self.snapshot()
 
     def run(self, symbols, options):
         try:
+            # Validate the ledger before scanning. Re-read it for final sizing so
+            # positions and realized equity come from the same SQLite snapshot.
+            read_ledger_state()
             model = model_for_research()
-            positions = get_open_positions()
-            connection = get_connection()
-            try:
-                pnl = connection.execute("SELECT COALESCE(SUM(pnl),0) FROM open_positions WHERE lower(status)='closed'").fetchone()[0]
-            finally:
-                connection.close()
-            equity = max(0, get_settings().paper.initial_capital + float(pnl))
-            capital = min(options["capital"], equity)
-            if capital <= 0:
-                raise ValueError("No positive paper equity available")
             now = datetime.now(UTC)
             rows = []
             with self.lock:
-                self.state.update(model_status=model.status, model_warning=model.warning, effective_capital=capital)
+                self.state.update(model_status=model.status, model_warning=model.warning)
             for symbol in symbols:
                 if self.cancelled.is_set():
                     break
@@ -121,12 +141,19 @@ class ResearchJobs:
             # A long scan must not use its start time to authorize old signals.
             for row in rows:
                 refresh_eligibility(row, datetime.now(UTC))
-            positions = get_open_positions()
-            sized = size_opportunities(rows, capital, positions, get_settings().paper,
+            ledger = read_ledger_state()
+            capital = max(0, min(options["capital"], ledger["realized_equity"]))
+            sized = size_opportunities(rows, capital, ledger["positions"], get_settings().paper,
                                        options["risk_pct"], options["reward_risk"], options.get("require_validated", True))
+            if not ledger["entries_allowed"]:
+                for row in sized:
+                    row["plan"].update(blocked=True, block_reason=ledger["block_reason"],
+                                       quantity=0, position_value=0, risk_amount=0)
             with self.lock:
                 self.state.update(rows=sized, status="cancelled" if self.cancelled.is_set() else "completed",
                                   completed_at=datetime.now(UTC).isoformat(),
+                                  effective_capital=capital, ledger_fingerprint=ledger["fingerprint"],
+                                  allocation_warning=ledger["block_reason"],
                                   evaluated=len(rows), stale=sum(row["stale"] for row in rows),
                                   eligible=sum(not row["plan"]["blocked"] for row in sized))
                 self.save()

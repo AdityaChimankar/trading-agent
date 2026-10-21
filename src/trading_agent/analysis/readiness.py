@@ -119,14 +119,19 @@ def readiness(interval="minute", now=None):
     check("paper_boundary", "info", "Research and paper execution only",
           "No broker-order lifecycle, reconciliation or live-execution certification is implemented.", "paper")
     eligible = 0
-    if fingerprint_matches and paper["entries_allowed"] and full and scanned_interval == interval:
+    if fingerprint_matches and paper["entries_allowed"] and full and scanned_interval == interval and settings.api.workers == 1:
         options = scan.get("options", {})
         for row in rows:
             plan = row.get("plan", {})
             if plan.get("blocked", True) or plan.get("quantity", 0) <= 0 or row.get("stale", True):
                 continue
             if options.get("require_validated", True):
-                evidence = estimate(row, options.get("mode"), options.get("reward_risk", 2), now)
+                try:
+                    evidence = estimate(row, options.get("mode"), options.get("reward_risk", 2), now)
+                except Exception:
+                    check("evidence_unavailable", "blocker", "Outcome evidence cannot be verified",
+                          "Review validation reports before using this symbol's allocation.", "validate")
+                    continue
                 if evidence["status"] != "qualified_research" or (evidence.get("expected_net_return_pct") or 0) <= 0:
                     continue
             eligible += 1

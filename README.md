@@ -10,6 +10,8 @@ The supported interface is the restored research dashboard: full-watchlist hybri
 
 One symbol selection and shared settings connect the workspace:
 
+The opening view puts paper equity, available cash, open positions and the best eligible bullish/bearish picks together. Quick symbol buttons and cached headlines keep routine review on one screen; advanced sizing and evidence controls are available on demand. Research validation remains a separate explicit step.
+
 1. **Find opportunities** — explicitly scan the configured universe; inspect progress and completed bullish/bearish plans.
 2. **Inspect selected stock** — selecting a top pick opens its Plotly chart, rule/ML decision, scan-based stop/target/size and cached news.
 3. **Validate strategy** — run the Walk-Forward Optimizer, check fixed-rule trade outcomes, and inspect BUY/SELL model qualification. Results remain tied to their exact inputs while navigating this page session.
@@ -279,6 +281,9 @@ Settings come from process environment variables first, then `.env`. Important v
 | `PAPER_MAX_POSITIONS` | `10` | Maximum open paper positions |
 | `PAPER_MAX_EXPOSURE_PCT` / `PAPER_MAX_RISK_PCT` | `0.50` / `0.06` | Aggregate notional and stop-risk fractions of gross book equity |
 | `PAPER_MAX_TRADE_RISK_PCT` | `0.02` | Maximum stop risk per paper entry |
+| `PAPER_MAX_SINGLE_POSITION_PCT` | `0.10` | Maximum notional per symbol, applied to both scan sizing and manual entries |
+| `PAPER_MAX_DAILY_LOSS_PCT` | `0.03` | Block entries after realized losses reach 3% of IST session-start equity |
+| `PAPER_MAX_DRAWDOWN_PCT` | `0.15` | Block entries at a 15% realized equity drawdown from the ledger's peak |
 | `API_CORS_ORIGINS` | local frontend origins | JSON list of allowed origins |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `console` | Logging behavior |
 | `LLM_PROVIDER` | `mock` | `mock`, `openai`, or `anthropic` |
@@ -355,6 +360,16 @@ npm run build
 
 The suite includes storage replay/concurrency, broker-message normalization, paper-ledger/API contracts, and fresh-database migration checks. See [READINESS.md](READINESS.md) for validation evidence and limitations; a build alone is not a live-session test.
 
+CI runs on pushes and pull requests for `gemini` and `rework` as well as `main` and `develop`. Container publication remains limited to `main` and `develop` pushes. Tests use temporary stores; do not use your real paper ledger as a test database.
+
+## Moving from rework
+
+Keep the familiar dashboard layout while using the packaged backend. Run `pip install -e ".[dev]"` in a separate virtual environment for each branch, then `trading-agent-api` and the frontend's `npm run dev`. Old `python -m api.main` / flat-package imports are replaced by `trading_agent.*`; browser endpoints use `/api/v1`.
+
+The old `data/trading_agent.db` and the current `data/trading.db` have different contracts. Preserve the old database as a backup and use a separate database for the new branch until its schema and ledger records have been checked. Do not point the new API at the old database simply to recover a balance. Likewise keep interval-specific Parquet history, model metadata and evidence stores together; switching source branches does not migrate stored data. No schema or real-data migration is performed by this repair.
+
+The overview and paper ledger require only the API and frontend. Ingestion, scheduled strategy decisions, validation, retraining and model promotion each remain optional operations. See [the user guide](USER_GUIDE.md#optional-automatic-research) for the separate stored-data scanner and its limits.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -369,7 +384,7 @@ The suite includes storage replay/concurrency, broker-message normalization, pap
 | Rebuilt code appears unchanged | Rerun `docker compose up -d api frontend` (and live services if used); rebuilding alone does not replace running containers |
 | `kite_historical` breaker is OPEN | Review the first underlying failure, check login, wait for broker recovery, then retry a bounded batch; avoid concurrent backfills |
 | API returns 401 | Enter the configured bearer token in the console; never disable authentication to expose a public service |
-| Paper entry returns 409 | Read the error: duplicate symbol, entry switch, capital, position, exposure, or stop-risk limit; closes remain available |
+| Paper entry returns 409 | Read the error: duplicate symbol, entry switch, capital, position, exposure, daily loss, drawdown, or stop-risk limit; closes remain available |
 
 ## Documentation map
 

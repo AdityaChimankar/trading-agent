@@ -4,11 +4,13 @@ from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Literal
 from sqlalchemy import select, func, text, update
+from sqlalchemy.exc import SQLAlchemyError
 from trading_agent.core.config import get_settings
 from typing import Optional, List
 from datetime import UTC, datetime
 
 from trading_agent.storage.db import get_database, PositionRepository, Position
+from trading_agent.risk.ledger_guard import SELECT_LEDGER, ledger_state
 
 router = APIRouter()
 
@@ -102,17 +104,25 @@ async def create_position(position: PositionCreate):
         # Serialize check-and-create in the supported SQLite deployment.
         if session.bind.dialect.name != "sqlite":
             raise HTTPException(status_code=503, detail="Paper entry risk locking requires SQLite")
-        await session.execute(text("BEGIN IMMEDIATE"))
-        opened = list((await session.execute(select(Position).where(func.lower(Position.status) == "open"))).scalars())
-        realized = (await session.execute(select(func.coalesce(func.sum(Position.pnl), 0)).where(func.lower(Position.status) == "closed"))).scalar_one()
-        equity = limits.initial_capital + float(realized)
-        if any(p.symbol == position.symbol for p in opened):
+        try:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            rows = (await session.execute(text(SELECT_LEDGER))).mappings().all()
+            ledger = ledger_state(rows, limits)
+        except (SQLAlchemyError, ValueError, TypeError, KeyError) as error:
+            raise HTTPException(status_code=503, detail="Paper ledger cannot be verified; new entries blocked") from error
+        if not ledger["entries_allowed"]:
+            raise HTTPException(status_code=409, detail=ledger["block_reason"])
+        opened = ledger["positions"]
+        equity = ledger["realized_equity"]
+        if any(p["symbol"].upper() == position.symbol for p in opened):
             raise HTTPException(status_code=409, detail="Symbol already has an open paper position")
         if equity <= 0 or len(opened) >= limits.max_positions:
             raise HTTPException(status_code=409, detail="Paper capital or position limit reached")
-        if sum(p.position_value for p in opened) + position_value > equity * limits.max_exposure_pct:
+        if position_value > equity * limits.max_single_position_pct:
+            raise HTTPException(status_code=409, detail="Paper single-position exposure limit exceeded")
+        if sum(p["position_value"] for p in opened) + position_value > equity * limits.max_exposure_pct:
             raise HTTPException(status_code=409, detail="Paper exposure limit exceeded")
-        if risk_amount > equity * limits.max_trade_risk_pct or sum(p.risk_amount for p in opened) + risk_amount > equity * limits.max_risk_pct:
+        if risk_amount > equity * limits.max_trade_risk_pct or sum(p["risk_amount"] for p in opened) + risk_amount > equity * limits.max_risk_pct:
             raise HTTPException(status_code=409, detail="Paper risk limit exceeded")
         pos = await repo.create(
             symbol=position.symbol.upper(),

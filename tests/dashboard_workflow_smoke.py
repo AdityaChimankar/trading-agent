@@ -6,6 +6,7 @@ All API requests are intercepted. No real training, news, book or orders.
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from os import environ
 from pathlib import Path
 import sys
 from threading import Thread
@@ -42,12 +43,14 @@ def exercise(page, base_url, screenshots=None):
                  "room_reward_risk": 4},
     }
     scan = {"status": "idle", "total": 0, "processed": 0, "rows": [], "errors": [], "skipped": []}
-    news = {"status": "empty", "articles": [], "analysis": None}
+    news = {"status": "cached", "articles": [{"headline": "Offline fixture: company publishes quarterly update",
+            "url": "https://example.invalid/news", "source": "Offline fixture", "published_at": now.isoformat()}], "analysis": None}
     model_status = {"active": None, "error": None, "candidates": [], "required": "Promotion gates"}
 
     def route_api(route):
         nonlocal scan
         request = route.request
+        assert "/api/v1/" in request.url, "The dashboard must use the versioned API"
         path = request.url.split("/api/v1/", 1)[-1].split("?", 1)[0]
         if request.method == "POST":
             body = request.post_data_json
@@ -56,8 +59,11 @@ def exercise(page, base_url, screenshots=None):
                 waiting[path] = route
                 return
             if path == "research/scan":
+                bearish = {**row, "symbol": "INFY", "action": "SELL", "score": 68,
+                           "rule": {"action": "SELL", "confidence": .65},
+                           "plan": {**row["plan"], "stop_loss": 101.5, "take_profit": 95.5}}
                 scan = {"status": "completed", "total": 2, "processed": 2, "evaluated": 2,
-                        "stale": 0, "eligible": 1, "rows": [row], "errors": [], "skipped": [],
+                        "stale": 0, "eligible": 2, "rows": [row, bearish], "errors": [], "skipped": [],
                         "options": body, "started_at": datetime.now(UTC).isoformat(),
                         "completed_at": datetime.now(UTC).isoformat(), "effective_capital": 100000}
                 route.fulfill(json=scan)
@@ -76,8 +82,8 @@ def exercise(page, base_url, screenshots=None):
         elif path == "research/scan":
             response = scan
         elif path == "wallet/summary":
-            response = {"cash": 100000, "invested": 0, "total_value": 100000,
-                        "total_pnl": 0, "open_positions": 0, "accounting_basis": "entry_cost"}
+            response = {"cash": 98000, "invested": 2000, "total_value": 100000,
+                        "total_pnl": 0, "open_positions": 1, "accounting_basis": "entry_cost"}
         elif path == "research/outcome-models":
             response = model_status
         elif path.endswith("/news"):
@@ -91,7 +97,10 @@ def exercise(page, base_url, screenshots=None):
         elif path.startswith("history/"):
             response = {"candles": []}
         elif path == "positions/":
-            response = []
+            response = [] if "status=closed" in request.url else [{
+                "id": 5, "symbol": "RELIANCE", "action": "BUY", "entry_price": 200,
+                "quantity": 10, "stop_loss": 195, "take_profit": 210, "status": "open", "pnl": None,
+            }]
         elif path == "ready":
             response = {"status": "ready"}
         elif path == "liveness/feed":
@@ -107,15 +116,30 @@ def exercise(page, base_url, screenshots=None):
     page.goto(base_url, wait_until="networkidle")
     expect(page.get_by_role("heading", name="Opportunity Finder", exact=True)).to_be_visible()
     expect(page.get_by_role("heading", name="Walk-Forward Optimizer", exact=True)).not_to_be_visible()
+    expect(page.get_by_role("region", name="Paper book at a glance")).to_contain_text("98,000")
+    expect(page.get_by_role("heading", name="Open paper positions", exact=True)).to_be_visible()
+    expect(page.get_by_text("10 shares at", exact=False)).to_be_visible()
+    expect(page.get_by_label("Target reward/risk", exact=True)).not_to_be_visible()
+    expect(page.get_by_role("link", name="Offline fixture: company publishes quarterly update", exact=True)).to_be_visible()
     assert posts == [], "Navigation must not start jobs"
     symbol = page.get_by_label("Selected research symbol", exact=True)
     symbol.fill("TCS")
     page.get_by_label("Candle interval", exact=True).select_option("5minute")
     page.get_by_label("Decision mode", exact=True).select_option("rule_only")
+    page.locator(".advanced-settings > summary").click()
     page.get_by_label("Target reward/risk", exact=True).fill("3")
     page.get_by_role("button", name="Scan entire watchlist", exact=True).click()
     expect(page.get_by_role("button", name="Select TCS", exact=True)).to_be_visible()
     assert posts[-1] == ("research/scan", options)
+    expect(page.get_by_role("button", name="Select INFY", exact=True)).to_be_visible()
+    if screenshots:
+        page.locator(".advanced-settings > summary").click()
+        page.screenshot(path=str(screenshots / "overview-desktop.png"), full_page=True)
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
+        page.screenshot(path=str(screenshots / "overview-mobile.png"), full_page=True)
+        page.set_viewport_size({"width": 1440, "height": 1000})
+        page.locator(".advanced-settings > summary").click()
     page.get_by_role("button", name="Select TCS", exact=True).click()
     expect(page.get_by_role("heading", name="TCS — Price, Indicators & Patterns", exact=True)).to_be_visible()
     expect(page.get_by_role("heading", name="Recent News + LLM Sentiment", exact=True)).to_be_visible()
@@ -162,6 +186,14 @@ def exercise(page, base_url, screenshots=None):
     expect(page.get_by_role("button", name="Select TCS", exact=True)).to_have_count(0)
     expect(page.get_by_text("Rule outcome evidence updated for TCS.", exact=False)).to_be_visible()
     page.get_by_role("button", name="Scan entire watchlist", exact=True).click()
+    expect(page.get_by_role("button", name="Select TCS", exact=True)).to_be_visible()
+    # Another client changing the paper ledger must hide allocations immediately.
+    scan["allocation_warning"] = "Paper ledger changed since this scan."
+    page.get_by_role("button", name="Refresh views", exact=True).click()
+    expect(page.get_by_role("button", name="Select TCS", exact=True)).to_have_count(0)
+    expect(page.get_by_text("Paper ledger changed since this scan.", exact=False)).to_be_visible()
+    scan.pop("allocation_warning")
+    page.get_by_role("button", name="Refresh views", exact=True).click()
     expect(page.get_by_role("button", name="Select TCS", exact=True)).to_be_visible()
     page.get_by_role("button", name="Paper operations", exact=True).click()
     expect(page.get_by_label("Paper research symbol", exact=True)).to_have_value("TCS")
@@ -235,7 +267,7 @@ def main():
     dist = Path(__file__).resolve().parents[1] / "frontend" / "dist"
     if not (dist / "index.html").is_file():
         raise RuntimeError("Build the frontend first")
-    screenshots = dist.parents[1] / ".test-tmp" / "workflow-ui" if "--screenshots" in sys.argv else None
+    screenshots = dist.parents[1] / "artifacts" / "dashboard-repair" if "--screenshots" in sys.argv else None
     if screenshots:
         screenshots.mkdir(parents=True, exist_ok=True)
     with ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(dist))) as server:
@@ -243,7 +275,7 @@ def main():
         thread.start()
         try:
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
+                browser = playwright.chromium.launch(headless=True, channel=environ.get("PLAYWRIGHT_BROWSER_CHANNEL"))
                 try:
                     exercise(browser.new_page(viewport={"width": 1440, "height": 1000}),
                              f"http://127.0.0.1:{server.server_port}", screenshots)

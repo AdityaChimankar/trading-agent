@@ -98,6 +98,51 @@ class ScanRequest(BaseModel):
         return value
 
 
+class AutomaticScanRequest(ScanRequest):
+    """Automatic runs must retain the full-universe evidence policy."""
+
+    symbols: None = None
+    interval: Literal["minute", "5minute", "15minute"] = "minute"
+    require_validated: Literal[True] = True
+
+
+class AutomationRequest(BaseModel):
+    scan: AutomaticScanRequest
+    min_scan_seconds: int = Field(default=120, ge=60, le=3600)
+
+
+@router.get("/readiness")
+def research_readiness(interval: Interval = "minute"):
+    from trading_agent.analysis.readiness import readiness
+    return jsonable(readiness(interval))
+
+
+@router.get("/automation")
+def automation_status():
+    from trading_agent.analysis.research_automation import get_research_automation
+    return get_research_automation().snapshot()
+
+
+@router.post("/automation/enable")
+def enable_automation(request: AutomationRequest):
+    from trading_agent.analysis.research_automation import get_research_automation
+    worker = get_research_automation()
+    if get_settings().api.workers != 1 or not worker.snapshot()["running"]:
+        raise HTTPException(409, "Automatic research requires one running API worker")
+    try:
+        return worker.enable(request.scan.model_dump(), request.min_scan_seconds)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(409, str(error)) from error
+
+
+@router.post("/automation/pause")
+def pause_automation():
+    from trading_agent.analysis.research_automation import get_research_automation
+    return get_research_automation().pause()
+
+
 @router.get("/universe")
 def get_universe():
     symbols = universe()
@@ -112,6 +157,8 @@ def outcome_models():
 
 @router.post("/scan", status_code=202)
 def start_scan(request: ScanRequest):
+    if get_settings().api.workers != 1:
+        raise HTTPException(409, "Research scans require API_WORKERS=1")
     try:
         return get_research_jobs().start(request.model_dump())
     except RuntimeError as error:
@@ -125,6 +172,8 @@ def scan_status():
 
 @router.post("/scan/cancel")
 def cancel_scan():
+    from trading_agent.analysis.research_automation import get_research_automation
+    get_research_automation().pause("Scan cancelled. Enable automatic research again explicitly.")
     get_research_jobs().cancelled.set()
     return {"status": "cancellation_requested"}
 

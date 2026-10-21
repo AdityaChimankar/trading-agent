@@ -1,10 +1,24 @@
 # Integration audit and readiness
 
-Reviewed: 2026-10-20. Scope: local-first research and paper operations, not approval for live broker execution. Existing user data, positions, credentials, and unrelated research edits were preserved. No broker orders are part of this work.
+Reviewed: 2026-10-21. Scope: local-first research and paper operations, not approval for live broker execution. Existing user data, positions, credentials, and unrelated research edits were preserved. No broker orders are part of this work.
 
 ## Operating boundary
 
-### Latest: coordinated research UI
+### Latest: gemini repair with the rework overview (2026-10-21)
+
+The Find view again exposes paper-book equity/cash, open positions, quick symbol selection, paired bullish/bearish cards and cached headlines. Advanced scan and evidence details are collapsible. Find / Inspect / Validate / Paper still share selection and require current settings, unexpired plans and explicit actions. Fourteen unreachable legacy frontend files were removed; the old UI remains recoverable from Git and `rework`.
+
+Paper entry creation now applies configurable single-position exposure, realized daily-loss and realized drawdown limits inside the same serialized SQLite transaction as the insert. Invalid ledger evidence blocks new entries while exits remain available. Scan allocations bind to the ledger, session date and risk settings; changed or unreadable state zeros allocations on reads. Unreadable outcome evidence removes qualification without failing the entire scan response.
+
+Readiness and automatic research API routes are connected. Automation starts disabled, observes local stored candles only after explicit enabling, shares the manual scan lock, and requires one API worker. Startup/shutdown closes resources on failures; an old worker still finishing storage I/O must exit before an in-process restart can succeed. Strategy Lab now exposes bounded causal profile/baseline comparisons using the shared bracket replay, chronological windows, equal-notional additive statistics and unavailable metrics represented as null. It cannot validate or promote a model.
+
+CI checks now include `gemini` and `rework`; image publishing remains limited to `main` and `develop`. Setup and branch/data compatibility guidance are in the README and user guide.
+
+Verification: **404 Python tests passed**, with **65.45% measured coverage** under the existing configuration (which excludes research/script modules from the percentage; Strategy Lab and replay have explicit tests). Ruff, Python compilation, the TypeScript/Vite production build, and both offline browser scripts passed. Desktop/mobile captures were inspected; workflow checks cover the overview, settings/evidence gates, ledger invalidation, expiry, shared selection, explicit actions and overflow. Compose configuration validated with `.env.example` substituted for the private env file. Screenshots and the final test log are local artifacts under `artifacts/dashboard-repair/` and `artifacts/repair-pytest.log`. The installed Starlette test-client deprecation and SciPy solver-option warnings remain non-failing; the existing lazy Plotly bundle still triggers Vite's size warning.
+
+This repair changes source in an isolated `gemini` worktree. The original `rework` checkout, `.env`, real database, candle history and model artifacts were preserved. No Docker services were rebuilt/restarted, no external provider or broker session was exercised, and no remote publication was performed. Realized gross paper limits do not account for unrealized losses or actual fees; strategy comparisons do not establish profitability. Prior dated verification entries below describe their respective historical revisions.
+
+### Earlier: coordinated research UI (2026-10-20)
 
 The research dashboard now has Find / Inspect / Validate / Paper steps with shared symbol and interval, global scan settings, per-input evaluation result caches, and explicit rule/promoted-ML policy handoffs. Paper operations no longer embeds a second independent scanner. Validation, news and paper-book changes mark current workspace scan plans for recomputation. Changing selection during a request does not attach its result to another symbol. Unsubmitted manual paper price fields reset when the symbol changes.
 
@@ -34,7 +48,7 @@ Verification for this update: **280 tests passed**, **61.22% measured coverage**
 
 The active model SHA-256 remains `B597138EFC0D93077392C5F26F0391DCEE9398E60CD8124F900E386E46B9B40B`. Docker images/services were **not rebuilt or restarted for this update**. The isolated browser-smoke script was extended for the new panel and insufficient-data response but has not been rerun against rebuilt images; older Docker evidence below applies to the prior restoration only.
 
-The supported path is Kite historical/live data -> Parquet -> research scan/risk plans -> `/api/v1/research` -> `ResearchDashboard.tsx`, with the persistent SQLite paper book available through the Paper operations tab (`OperatingConsole.tsx`). Original Plotly rendering and layout styles are reused. Unmounted legacy components remain for reference; incompatible `/api` routes are not silently reintroduced.
+The supported path is Kite historical/live data -> Parquet -> research scan/risk plans -> `/api/v1/research` -> `ResearchDashboard.tsx`, with the persistent SQLite paper book available through the Paper operations tab (`OperatingConsole.tsx`). Original Plotly rendering and layout styles are reused. Unmounted legacy components were subsequently removed in the 2026-10-21 repair; their historical source remains in Git. Incompatible `/api` routes are not silently reintroduced.
 
 Restoration (2026-10-20): recovered the original layout and nine-feature classifier contract from Git commit `5dcea32`. Full-watchlist background scans now use real rules plus model predictions, not constant placeholder scores. Conflicts result in HOLD; missing inputs remain unavailable. Cached, explicitly requested LLM news sentiment can modify rankings when time-aligned. Bullish/bearish plans share basket risk/exposure reservations; stale and held symbols are blocked. The artifact lacks training provenance/interval metadata: research inference is restored, but model performance/promotion is not validated. The older `/opportunities/{symbol}/decision` compatibility endpoint remains rule-only; the main dashboard uses `/research`.
 

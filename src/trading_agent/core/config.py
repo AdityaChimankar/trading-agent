@@ -98,9 +98,12 @@ class PaperRiskSettings(BaseSettings):
     initial_capital: float = Field(default=1_000_000, gt=0, allow_inf_nan=False)
     entries_enabled: bool = True
     max_positions: int = Field(default=10, ge=1)
+    max_single_position_pct: float = Field(default=0.10, gt=0, le=1)
     max_exposure_pct: float = Field(default=0.5, gt=0, le=1)
     max_risk_pct: float = Field(default=0.06, gt=0, le=1)
     max_trade_risk_pct: float = Field(default=0.02, gt=0, le=1)
+    max_daily_loss_pct: float = Field(default=0.03, gt=0, le=1)
+    max_drawdown_pct: float = Field(default=0.15, gt=0, le=1)
 
 
 class MLSettings(BaseSettings):

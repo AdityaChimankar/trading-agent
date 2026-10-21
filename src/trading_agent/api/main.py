@@ -8,6 +8,7 @@ from secrets import compare_digest
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from trading_agent.api.routers import (
     digest,
@@ -18,6 +19,7 @@ from trading_agent.api.routers import (
     pipeline,
     positions,
     research,
+    strategy_lab,
     symbols,
     wallet,
     watchlist,
@@ -43,14 +45,27 @@ async def lifespan(app: FastAPI):
     from trading_agent.storage.db import get_database
 
     db = get_database()
-    await db.create_tables()
-
-    yield
-
-    # Shutdown
-    logger.info("application_shutting_down")
-    await shutdown_mgr.run_cleanup()
-    await db.close()
+    worker = None
+    try:
+        await db.create_tables()
+        from trading_agent.analysis.research_automation import get_research_automation
+        worker = get_research_automation()
+        # The worker starts disabled and performs no observations until enabled.
+        # Its in-memory controller supports the documented single-worker deployment.
+        worker.pause("API started. Enable automatic research explicitly for this session.")
+        if get_settings().api.workers == 1:
+            worker.start_worker()
+        yield
+    finally:
+        logger.info("application_shutting_down")
+        try:
+            if worker is not None:
+                await run_in_threadpool(worker.stop_worker)
+        finally:
+            try:
+                await shutdown_mgr.run_cleanup()
+            finally:
+                await db.close()
 
 
 def create_app() -> FastAPI:
@@ -108,6 +123,7 @@ def create_app() -> FastAPI:
     app.include_router(wallet.router, prefix="/api/v1/wallet", tags=["wallet"])
     app.include_router(pipeline.router, prefix="/api/v1/pipeline", tags=["pipeline"])
     app.include_router(research.router, prefix="/api/v1/research", tags=["research"])
+    app.include_router(strategy_lab.router, prefix="/api/v1/strategy-lab", tags=["strategy-lab"])
     app.include_router(digest.router, prefix="/api/v1/digest", tags=["digest"])
     app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["watchlist"])
     app.include_router(liveness.router, prefix="/api/v1/liveness", tags=["liveness"])

@@ -157,9 +157,10 @@ def test_llm_sentiment_rejects_invalid_scores(score):
 def test_scan_counts_all_symbols_and_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs_module, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path, paper=PaperRiskSettings()))
     monkeypatch.setattr(jobs_module, "model_for_research", lambda: SimpleNamespace(status="loaded", warning="test"))
-    monkeypatch.setattr(jobs_module, "get_open_positions", lambda: [])
-    monkeypatch.setattr(jobs_module, "get_connection", lambda: SimpleNamespace(
-        execute=lambda *args: SimpleNamespace(fetchone=lambda: [0]), close=lambda: None))
+    monkeypatch.setattr(jobs_module, "read_ledger_state", lambda *args: {
+        "positions": [], "realized_equity": 100000, "fingerprint": "empty-book",
+        "entries_allowed": True, "block_reason": None,
+    })
 
     def analyze(symbol, *args):
         if symbol == "MISSING":

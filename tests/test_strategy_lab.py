@@ -78,3 +78,131 @@ def test_api_bounds_and_lock(monkeypatch, candles):
         assert client.post("/compare", json={"symbol": "TEST", "interval": "day"}).status_code == 422
         with route._lock:
             assert client.post("/compare", json={"symbol": "TEST"}).status_code == 409
+
+
+def test_evaluation_prices_cannot_change_reference_results(candles):
+    original = lab.compare_profiles(candles, "TEST")
+    changed = candles.copy()
+    split = int(len(changed) * .6)
+    changed.loc[split:, ["open", "high", "low", "close"]] *= 1.5
+    altered = lab.compare_profiles(changed, "TEST")
+    for before, after in zip(original["profiles"] + original["baselines"],
+                             altered["profiles"] + altered["baselines"], strict=True):
+        assert before["reference"] == after["reference"]
+
+
+def test_partitions_own_their_outcomes_and_baselines_share_policy(monkeypatch, candles):
+    calls = []
+
+    def checked_replay(frame, actions, scores, start, end, policy, seconds):
+        trades = replay(frame, actions, scores, start, end, policy, seconds)
+        assert all(start <= trade["signal_index"] < trade["exit_index"] < end for trade in trades)
+        calls.append((start, end, policy, seconds))
+        return trades
+
+    monkeypatch.setattr(lab, "replay", checked_replay)
+    policy = TradePolicy(horizon=12, cost_bps=20, slippage_bps=5)
+    result = lab.compare_profiles(candles, "TEST", policy=policy)
+    assert [baseline["id"] for baseline in result["baselines"]] == ["always_long", "always_short"]
+    assert len(calls) == 2 * (len(lab.PROFILES) + 2)
+    assert set(calls) == {(0, 720, policy, 60), (720, 1200, policy, 60)}
+
+
+@pytest.mark.parametrize("kind", ["duplicate", "unsorted", "nan", "negative_volume", "bad_timestamp"])
+def test_rejects_invalid_candle_history(candles, kind):
+    invalid = candles.iloc[:100].copy()
+    if kind == "duplicate":
+        invalid.loc[1, "timestamp"] = invalid.timestamp.iloc[0]
+    elif kind == "unsorted":
+        invalid = invalid.iloc[::-1]
+    elif kind == "nan":
+        invalid.loc[1, "close"] = np.nan
+    elif kind == "negative_volume":
+        invalid.loc[1, "volume"] = -1
+    else:
+        invalid.loc[1, "timestamp"] = pd.NaT
+    with pytest.raises(ValueError, match="OHLCV"):
+        lab.prepare_frame(invalid)
+
+
+def test_empty_and_all_winning_metrics_are_finite_json():
+    import json
+
+    assert lab.summarize([])["total_net_return_pct"] is None
+    metrics = lab.summarize([{"session": "2026-10-05", "net_return": -.02},
+                             {"session": "2026-10-05", "net_return": .01}])
+    assert metrics["max_drawdown_pct_points"] == pytest.approx(2)
+    assert metrics["total_net_return_pct"] == pytest.approx(-1)
+    assert metrics["profit_factor"] == pytest.approx(.5)
+    winning = lab.summarize([{"session": "2026-10-05", "net_return": .01}])
+    assert winning["profit_factor"] is None
+    json.dumps([metrics, winning, lab.summarize([])], allow_nan=False)
+
+
+def test_completed_read_is_bounded_and_excludes_live_or_future_candles(monkeypatch, candles):
+    now = pd.Timestamp.now(tz="UTC")
+    raw = candles.iloc[:3].copy()
+    raw["timestamp"] = [now - pd.Timedelta(minutes=2), now - pd.Timedelta(seconds=30),
+                        now + pd.Timedelta(seconds=30)]
+    calls = []
+
+    class Store:
+        def read_latest(self, symbol, interval, n):
+            calls.append((symbol, interval, n))
+            return raw
+
+    monkeypatch.setattr(lab, "get_parquet_store", Store)
+    completed = lab.read_completed("TEST", "minute", 250)
+    assert len(completed) == 1
+    assert completed.timestamp.iloc[0] == raw.timestamp.iloc[0]
+    assert calls == [("TEST", "minute", 251)]
+    with pytest.raises(ValueError):
+        lab.read_completed("TEST", "minute", 10001)
+    assert len(calls) == 1
+
+
+def test_api_releases_lock_after_error_and_validates_response(monkeypatch, candles):
+    from trading_agent.api.routers import strategy_lab as route
+
+    app = FastAPI()
+    app.include_router(route.router)
+    invalid = candles.copy()
+    invalid.loc[1, "low"] = 10000
+    monkeypatch.setattr(route, "read_completed", lambda *args: invalid)
+    with TestClient(app) as client:
+        assert client.post("/compare", json={"symbol": "TEST"}).status_code == 422
+        assert not route._lock.locked()
+        for fields in ({"max_bars": 10001}, {"horizon": 0}, {"cost_bps": "nan"},
+                       {"slippage_bps": -1}, {"typo": True}):
+            assert client.post("/compare", json={"symbol": "TEST", **fields}).status_code == 422
+        monkeypatch.setattr(route, "read_completed", lambda *args: candles)
+        result = client.post("/compare", json={"symbol": "test"})
+        assert result.status_code == 200
+        assert result.json()["status"] == "completed"
+        assert result.json()["promotion_eligible"] is False
+
+
+def test_legacy_search_bounds_and_zero_trades(monkeypatch, candles):
+    monkeypatch.setattr(lab, "profile_actions", lambda frame, **kwargs: np.zeros(len(frame)))
+    instance = lab.StrategyLab()
+    result = instance.test_params(candles, SignalParams())
+    assert result.total_trades == 0 and result.net_ev is None
+    with pytest.raises(ValueError, match="trials"):
+        instance.grid_search(candles, {"adx_threshold": list(range(257))})
+    with pytest.raises(ValueError, match="trials"):
+        instance.random_search(candles, {}, n_iter=0)
+
+
+def test_cli_handles_unavailable_metrics_and_insufficient_history(monkeypatch, candles):
+    from typer.testing import CliRunner
+    from trading_agent.optimize.cli import app
+
+    monkeypatch.setattr(lab, "read_completed", lambda *args: candles)
+    monkeypatch.setattr(lab, "profile_actions", lambda frame, **kwargs: np.zeros(len(frame)))
+    result = CliRunner().invoke(app, ["strategy-lab", "TEST", "--interval", "minute"])
+    assert result.exit_code == 0, result.output
+    assert "Mean net return: n/a" in result.output
+    assert "Exploratory" in result.output
+    monkeypatch.setattr(lab, "read_completed", lambda *args: candles.iloc[:10])
+    result = CliRunner().invoke(app, ["strategy-lab", "TEST"])
+    assert result.exit_code == 1 and "Insufficient history" in result.output
