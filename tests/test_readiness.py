@@ -28,6 +28,9 @@ def inputs(monkeypatch):
     monkeypatch.setattr(module, "get_settings", lambda: SimpleNamespace(api=SimpleNamespace(workers=1)))
     monkeypatch.setattr(module, "get_parquet_store", lambda: SimpleNamespace(
         get_symbols=lambda: ["AAA"], get_intervals=lambda symbol: ["minute"]))
+    monkeypatch.setattr(module, "storage_coverage", lambda store, symbols, interval: {
+        "status": "ready", "observed_at": NOW.isoformat(),
+        "stored_for_interval": sum(interval in store.get_intervals(s) for s in set(store.get_symbols()) & set(symbols))})
     monkeypatch.setattr(module, "get_research_jobs", lambda: SimpleNamespace(lock=RLock(), state=scan))
     monkeypatch.setattr(module, "read_ledger_state", lambda *args: ledger)
     monkeypatch.setattr(module, "candidate_status", lambda: {
@@ -100,3 +103,15 @@ def test_multiple_workers_never_report_eligible_allocations(inputs, monkeypatch)
     report = module.readiness("minute", NOW)
     assert report["coverage"]["eligible"] == 0
     assert any(check["code"] == "unsupported_workers" for check in report["checks"])
+
+
+@pytest.mark.parametrize("status,code", [("pending", "storage_pending"), ("error", "storage_unavailable")])
+def test_pending_inventory_never_fabricates_missing_directory_counts(inputs, monkeypatch, status, code):
+    monkeypatch.setattr(module, "storage_coverage", lambda *args: {
+        "status": status, "stored_for_interval": None, "observed_at": None})
+    report = module.readiness("minute", NOW)
+    assert report["coverage"]["configured"] == 2
+    assert report["coverage"]["stored_for_interval"] is None
+    assert report["coverage"]["missing_for_interval"] is None
+    assert report["coverage"]["storage_status"] == status
+    assert any(c["code"] == code for c in report["checks"])

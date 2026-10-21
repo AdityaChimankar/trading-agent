@@ -4,7 +4,21 @@ Reviewed: 2026-10-21. Scope: local-first research and paper operations, not appr
 
 ## Operating boundary
 
-### Latest: gemini repair with the rework overview (2026-10-21)
+### Latest: service lifecycle and readiness repair (2026-10-21)
+
+Fixed the scheduler console entry point's import of the nonexistent `register_shutdown_handler`. It now handles SIGINT/SIGTERM around the blocking scheduler, waits for active jobs during cleanup, and starts at configured job times without an immediate provider pass. The shared Unix async signal callback receives its required arguments; API lifespan leaves signal ownership to Uvicorn so Docker stop reaches normal cleanup.
+
+The ticker command publishes socket health approximately every 15 seconds independently of market ticks. The last exchange tick timestamp is preserved during idle periods and reconnects. The market-hours watchdog still checks tick age, so an idle connected socket cannot suppress historical repair indefinitely. Ticker SIGTERM closes the connection and publishes disconnected status.
+
+The old readiness storage inventory took about 47 seconds against the Docker bind mount (9 seconds listing symbols and 38 checking interval directories). Directory enumeration now uses `scandir`, and readiness uses one background inventory worker with a 60-second cache. Pending/error counts are null with explicit status and observation time; candle freshness, ledger and qualification checks remain separate. A temporary no-network candidate container with the real data/model directories mounted read-only returned readiness in **0.34 seconds**, with storage marked pending for 2,319 configured symbols.
+
+Verification: **419 Python tests passed**, **65.90% measured coverage** under the existing exclusions; Ruff and Python compilation passed. The frontend Docker build includes TypeScript/Vite checks. An isolated no-egress Docker stack passed the actual Linux scheduler startup/SIGTERM, API graceful exit, migrations, Parquet replay/compaction, authentication and Nginx proxy, chart rendering, validation error handling, Strategy Lab and readiness routes, disabled-by-default automation, and browser paper open/close/reload persistence. Its temporary containers and network were removed; no synthetic trades were written to the real ledger.
+
+The full backend build was cancelled after a stalled dependency download. The candidate `trading-agent-app:gemini-operational` instead replaces source in the retained runtime image; the dependency manifest is unchanged (SHA-256 `5319a31f50614601e2b3d6b2fb42924d2fb66f34347cade0b7fc1e1a0fbefbe8`). The frontend candidate is `trading-agent-frontend:gemini-repair`; previous runtime images have `pre-operational-20261021` rollback tags. Build instructions and verification logs are local artifacts under `artifacts/`.
+
+Deployment to the existing four services is pending explicit operator approval: automatic approval review rejected the restart because it interrupts the app and resumes broker-connected/scheduled operations against real mounts. The original configuration, databases and models are preserved. A connected socket after market close does not certify fresh market data; a complete live market-session observation remains outstanding.
+
+### Earlier: gemini repair with the rework overview (2026-10-21)
 
 The Find view again exposes paper-book equity/cash, open positions, quick symbol selection, paired bullish/bearish cards and cached headlines. Advanced scan and evidence details are collapsible. Find / Inspect / Validate / Paper still share selection and require current settings, unexpired plans and explicit actions. Fourteen unreachable legacy frontend files were removed; the old UI remains recoverable from Git and `rework`.
 

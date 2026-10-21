@@ -1,6 +1,6 @@
 """API startup/shutdown must never silently arm stored-data automation."""
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 import threading
 
 import pytest
@@ -18,7 +18,8 @@ def lifecycle(monkeypatch):
 
     worker = ResearchAutomation(jobs=forbidden, observe=forbidden, ledger=forbidden)
     database = SimpleNamespace(create_tables=AsyncMock(), close=AsyncMock())
-    cleanup = SimpleNamespace(register_signals=lambda: None, run_cleanup=AsyncMock())
+    cleanup = SimpleNamespace(register_signals=Mock(side_effect=AssertionError("ASGI host owns signals")),
+                              run_cleanup=AsyncMock())
     settings = SimpleNamespace(api=SimpleNamespace(workers=1))
     monkeypatch.setattr(research_automation, "get_research_automation", lambda: worker)
     monkeypatch.setattr(main, "get_settings", lambda: settings)

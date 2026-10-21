@@ -25,6 +25,7 @@ import functools
 import json
 import subprocess
 import sys
+import signal
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -210,8 +211,20 @@ def monitor_cycle():
 def heal_if_feed_down():
     """Check if live feed is down and heal from historical endpoint."""
     from trading_agent.core.freshness import ingest_heartbeat
+    from trading_agent.core.config import get_settings
+    if not in_market_hours():
+        return
     heartbeat = ingest_heartbeat()
-    if in_market_hours() and (not heartbeat or not heartbeat.get("connected")):
+    tick_age = float("inf")
+    try:
+        stamp = datetime.fromisoformat(heartbeat["last_tick"])
+        if stamp.tzinfo is not None:
+            tick_age = (datetime.now(UTC) - stamp).total_seconds()
+    except (TypeError, ValueError, KeyError):
+        pass
+    seconds = {"minute": 60, "1minute": 60, "5minute": 300, "15minute": 900}[
+        get_settings().storage.candle_interval]
+    if not heartbeat or not heartbeat.get("connected") or not 0 <= tick_age <= 2 * seconds + 60:
         end_of_session_heal()
 
 
@@ -372,22 +385,21 @@ def _shutdown() -> None:
 def main() -> None:
     """Start the scheduled pipeline and block until shutdown."""
     from trading_agent.core.logging_config import setup_logging
-    from trading_agent.core.shutdown import register_shutdown_handler
     setup_logging()
 
-    # Register shutdown handler
-    register_shutdown_handler(_shutdown)
+    def stop(signum, frame):
+        # Unwind BlockingScheduler.start so cleanup runs outside the handler.
+        raise SystemExit(0)
 
-    logger.info("Running startup pass...")
-    run_once_now()
-    logger.info(
-        "Scheduler started - news/sentiment/decisions/ML compare every 5 min, "
-        "LLM comparison every 15 min, feed watchdog every 10 min, "
-        "news flush daily at 8:00 AM, "
-        "repair sweep at 3:32 PM, digest at 3:35 PM, "
-        "weekly ML retraining Sunday 2 AM..."
-    )
-    scheduler.start()
+    previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        logger.info("Scheduler started; waiting for configured Asia/Kolkata jobs. No startup pass.")
+        scheduler.start()
+    finally:
+        if scheduler.running:
+            _shutdown()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":

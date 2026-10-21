@@ -47,6 +47,7 @@ optimization_results/
 logs/
 
 # Build artifacts
+artifacts/
 *.egg-info
 dist/
 build/

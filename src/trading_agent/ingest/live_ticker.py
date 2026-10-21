@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import signal
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -242,7 +243,7 @@ class LiveTicker:
     def _on_connect(self, ws, response) -> None:
         """Handle WebSocket connect."""
         logger.info("ticker_connected", tokens=len(self._tokens))
-        write_heartbeat(True, None)
+        write_heartbeat(True, max(self._last_tick.values(), default=None))
         self._last_volume.clear()
         ws.subscribe(self._tokens)
         ws.set_mode(ws.MODE_FULL, self._tokens)
@@ -299,6 +300,21 @@ class LiveTicker:
         if self._ticker:
             self._ticker.close()
         logger.info("ticker_stopped")
+
+    def publish_heartbeat(self) -> None:
+        """Report actual socket health even when no market ticks arrive.
+
+        The command's main loop calls this independently of WebSocket callbacks.
+        Last-tick timestamps remain exchange evidence, never the heartbeat time.
+        """
+        now = time.monotonic()
+        if now - self._last_heartbeat < 15:
+            return
+        connected = bool(self._running and self._ticker and self._ticker.is_connected())
+        last_tick = max(list(self._last_tick.values()), default=None)
+        depth = sum(len(buffer) for buffer in list(self._candle_buffers.values()))
+        write_heartbeat(connected, last_tick, depth)
+        self._last_heartbeat = now
 
     def subscribe(self, symbols: list[str]) -> None:
         """Subscribe to additional symbols."""
@@ -371,12 +387,19 @@ def main() -> None:
 
     ticker = LiveTicker(symbols=symbols, interval=get_settings().storage.candle_interval,
                         on_candle=create_default_candle_handler())
-    ticker.start()
+    def stop(signum, frame):
+        raise SystemExit(0)
+
+    previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
+        ticker.start()
         while ticker._running:
+            ticker.publish_heartbeat()
             time.sleep(0.5)
     finally:
         ticker.stop()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":

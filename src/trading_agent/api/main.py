@@ -39,7 +39,8 @@ async def lifespan(app: FastAPI):
     logger.info("application_starting")
 
     shutdown_mgr = get_shutdown_manager()
-    shutdown_mgr.register_signals()
+    # Uvicorn owns process signals and invokes this lifespan for cleanup.
+    # Replacing its handlers would leave SIGTERM waiting on an unused event.
 
     # Initialize database
     from trading_agent.storage.db import get_database

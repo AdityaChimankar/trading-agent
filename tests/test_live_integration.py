@@ -78,3 +78,29 @@ def test_heartbeat_is_shared_and_expired_state_is_not_healthy(tmp_path, monkeypa
     data["updated_at"] = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
     (tmp_path / "ticker-heartbeat.json").write_text(json.dumps(data))
     assert heartbeat.read_heartbeat()["connected"] is False
+
+
+def test_idle_socket_heartbeat_preserves_actual_last_tick_and_reports_disconnect(ticker, monkeypatch):
+    old_tick = datetime.now(timezone.utc) - timedelta(hours=2)
+    ticker._last_tick = {1: old_tick}
+    ticker._running = True
+    ticker._ticker = Mock()
+    ticker._ticker.is_connected.return_value = True
+    clock = [100]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    ticker.publish_heartbeat()
+    module.write_heartbeat.assert_called_once_with(True, old_tick, 0)
+    clock[0] = 114
+    ticker.publish_heartbeat()
+    assert module.write_heartbeat.call_count == 1
+    clock[0] = 116
+    ticker._ticker.is_connected.return_value = False
+    ticker.publish_heartbeat()
+    module.write_heartbeat.assert_called_with(False, old_tick, 0)
+
+
+def test_connect_without_new_ticks_does_not_erase_last_tick(ticker):
+    old_tick = datetime.now(timezone.utc) - timedelta(hours=2)
+    ticker._last_tick = {1: old_tick}
+    ticker._on_connect(Mock(), {})
+    module.write_heartbeat.assert_called_with(True, old_tick)

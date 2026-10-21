@@ -114,3 +114,16 @@ def test_shutdown_manager_signal_registration():
     # Should not raise
     manager.register_signals()
     assert manager._signals_registered is True
+
+
+def test_async_unix_signal_callback_receives_required_arguments(monkeypatch):
+    from unittest.mock import Mock
+    from trading_agent.core import shutdown
+    loop = Mock()
+    monkeypatch.setattr(shutdown.sys, "platform", "linux")
+    monkeypatch.setattr(shutdown.asyncio, "get_running_loop", lambda: loop)
+    manager = ShutdownManager()
+    manager.register_signals()
+    _, callback, *arguments = loop.add_signal_handler.call_args.args
+    callback(*arguments)
+    assert manager._shutdown_event.is_set()

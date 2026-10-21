@@ -38,6 +38,8 @@ After installing changes to these panels and their API, run `docker compose buil
 
 The API exposes `GET /api/v1/research/readiness` for storage coverage, feed evidence, scan freshness, model qualification and paper-risk status. `/api/v1/ready` is the smaller database health check; it does not mean a strategy is ready to trade.
 
+Storage inventory runs in one background worker and is cached for up to 60 seconds. While it refreshes, `coverage.storage_status` is `pending`, counts are `null`, and the response includes `storage_pending`; refresh shortly to get observed counts. `error` means the directory inventory failed. `storage_observed_at` identifies the last completed observation. Inventory does not read or certify candle freshness.
+
 Automatic research scans stored candles only and starts disabled after every API restart. In the API docs, call `POST /api/v1/research/automation/enable` with a body such as:
 
 ```json
@@ -230,6 +232,10 @@ trading-agent-api
 ```
 
 The scheduler uses the Asia/Kolkata timezone. It stores rule, ML, LLM, and shadow outputs independently so the paths can be compared. With `LLM_PROVIDER=mock`, the LLM path records mock HOLD decisions without a network charge.
+
+Scheduler startup waits for configured job times; restarting it does not run an immediate news/sentiment/decision pass. Docker stop/SIGTERM shuts down the blocking scheduler and waits for active jobs. The ticker also handles SIGTERM and publishes a disconnected heartbeat on exit.
+
+The ticker command refreshes socket health approximately every 15 seconds even without new market ticks. `connected` describes the actual socket and a recent process heartbeat; `last_tick` remains the actual exchange timestamp. A connection after market close does not imply fresh trading data. During market hours, the feed watchdog checks both connection status and tick age before requesting historical repair.
 
 Set `STORAGE_CANDLE_INTERVAL` consistently for downloads, ticker, scheduler, monitor, and dashboard selection. Its default is `5minute`. Scheduled decision passes skip stale, incomplete, future-dated, and off-session inputs. The weekday/session guard does not know exchange holidays or special sessions.
 

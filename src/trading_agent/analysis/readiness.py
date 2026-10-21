@@ -7,6 +7,7 @@ import math
 from trading_agent.analysis.research_engine import universe, refresh_eligibility
 from trading_agent.analysis.research_jobs import get_research_jobs
 from trading_agent.analysis.outcome_validation import estimate
+from trading_agent.analysis.storage_coverage import storage_coverage
 from trading_agent.core.config import get_settings
 from trading_agent.core.freshness import ingest_heartbeat
 from trading_agent.risk.ledger_guard import read_ledger_state
@@ -25,16 +26,23 @@ def readiness(interval="minute", now=None):
     try:
         configured = set(universe())
         store = get_parquet_store()
-        stored = set(store.get_symbols())
-        present = sum(interval in store.get_intervals(symbol) for symbol in configured & stored)
+        inventory = storage_coverage(store, configured, interval)
+        present = inventory["stored_for_interval"]
+        if inventory["status"] == "pending":
+            check("storage_pending", "warning", "Storage inventory is refreshing",
+                  "Directory counts are temporarily unavailable. Refresh this view shortly; no market download was attempted.", "data")
+        elif inventory["status"] == "error":
+            check("storage_unavailable", "blocker", "Stored-data coverage unavailable",
+                  "Check storage mounts and permissions. No market download was attempted.", "data")
     except Exception:
-        configured, present = set(), 0
+        configured, present = set(), None
+        inventory = {"status": "error", "observed_at": None}
         check("storage_unavailable", "blocker", "Stored-data coverage unavailable",
               "Check the configured symbol file, storage mount and permissions. No market download was attempted.", "data")
     if not configured:
         check("empty_universe", "blocker", "No configured universe",
               "Configure symbols.txt and ingest the required interval before scanning.", "data")
-    elif present < len(configured):
+    elif present is not None and present < len(configured):
         check("missing_interval", "warning", "Some symbols have no interval directory",
               f"{len(configured) - present} configured symbols lack {interval} storage. Directory presence is not verified candle history.", "data")
     jobs = get_research_jobs()
@@ -140,7 +148,8 @@ def readiness(interval="minute", now=None):
         "status": "attention" if any(c["severity"] != "info" for c in checks) else "research_only",
         "interval": interval,
         "coverage": {"configured": len(configured), "stored_for_interval": present,
-                     "missing_for_interval": max(0, len(configured) - present),
+                     "missing_for_interval": max(0, len(configured) - present) if present is not None else None,
+                     "storage_status": inventory["status"], "storage_observed_at": inventory["observed_at"],
                      "scan_status": scan.get("status", "idle"), "scan_interval": scanned_interval,
                      "scan_processed": scan.get("processed", 0), "scan_total": scan.get("total", 0),
                      "evaluated": len(rows), "fresh": fresh, "stale": len(rows) - fresh,
@@ -148,7 +157,7 @@ def readiness(interval="minute", now=None):
                      "scan_completed_at": scan.get("completed_at"), "full_universe": full},
         "feed": feed, "model": model, "paper": paper, "checks": checks,
         "limitations": [
-            "Storage coverage counts interval directories, not valid/fresh candles or point-in-time listings.",
+            "Storage coverage is a background directory inventory cached for up to 60 seconds; pending counts are null, not zero. It does not verify valid/fresh candles or point-in-time listings.",
             "Scan counts describe the latest snapshot and its interval, not streaming all-symbol surveillance; eligibility still requires fresh evidence.",
             "Paper risk uses realized gross equity only; unrealized losses, actual fees, taxes, slippage, sector and correlation exposure remain incomplete.",
             "Weekday/session checks are not an authoritative exchange holiday or special-session calendar.",

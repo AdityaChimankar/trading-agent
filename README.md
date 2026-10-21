@@ -370,6 +370,22 @@ The old `data/trading_agent.db` and the current `data/trading.db` have different
 
 The overview and paper ledger require only the API and frontend. Ingestion, scheduled strategy decisions, validation, retraining and model promotion each remain optional operations. See [the user guide](USER_GUIDE.md#optional-automatic-research) for the separate stored-data scanner and its limits.
 
+If your main checkout is still `rework` and the repaired `gemini` branch is in `.worktrees/gemini-repair`, build from that worktree and resolve runtime mounts against the main project directory:
+
+```powershell
+$repo = (Get-Location).Path # Run from the main trading-agent folder
+$repair = Join-Path $repo '.worktrees/gemini-repair'
+docker build -t trading-agent-app:latest $repair
+if ($LASTEXITCODE -ne 0) { throw 'API build failed' }
+docker build -t trading-agent-frontend:latest "$repair/frontend"
+if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
+docker compose --project-directory $repo -f "$repair/docker-compose.yml" up -d --no-build api frontend
+# Only when you use the live ticker/scheduler, recreate those against the same image:
+docker compose --project-directory $repo -f "$repair/docker-compose.yml" --profile live up -d --no-build ticker scheduler
+```
+
+This keeps the original `.env`, `data` and `models` mounts. Building from the main `rework` folder uses different source. A healthy API alone does not establish that the scheduler or live feed is healthy; check every requested service's status.
+
 ## Troubleshooting
 
 | Symptom | Fix |

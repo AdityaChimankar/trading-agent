@@ -43,14 +43,17 @@ class ShutdownManager:
             logger.debug("signal_registration_skipped_non_main_thread")
             return
 
-        if sys.platform == "win32":
-            # Windows doesn't support add_signal_handler
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if sys.platform == "win32" or loop is None:
+            # Windows and synchronous entry points use process signal handlers.
             for sig in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(sig, self._signal_handler)
         else:
-            loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, self._signal_handler)
+                loop.add_signal_handler(sig, self._signal_handler, sig, None)
 
         self._signals_registered = True
 

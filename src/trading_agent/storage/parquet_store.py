@@ -227,10 +227,9 @@ class ParquetStore:
         if not candles_path.exists():
             return []
 
-        symbols = []
-        for item in candles_path.iterdir():
-            if item.is_dir() and item.name.startswith("symbol="):
-                symbols.append(item.name[7:])  # Remove "symbol="
+        with os.scandir(candles_path) as entries:
+            symbols = [item.name[7:] for item in entries
+                       if item.name.startswith("symbol=") and item.is_dir()]
         return sorted(symbols)
 
     def get_intervals(self, symbol: str) -> list[str]:
@@ -239,10 +238,9 @@ class ParquetStore:
         if not path.exists():
             return []
 
-        intervals = []
-        for item in path.iterdir():
-            if item.is_dir() and item.name.startswith("interval="):
-                intervals.append(item.name[9:])  # Remove "interval="
+        with os.scandir(path) as entries:
+            intervals = [item.name[9:] for item in entries
+                         if item.name.startswith("interval=") and item.is_dir()]
         return sorted(intervals)
 
     def get_date_range(

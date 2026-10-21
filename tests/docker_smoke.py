@@ -5,6 +5,8 @@ Never point this at a real book: it records and closes a synthetic paper positio
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
 
 import httpx
 import pandas as pd
@@ -19,6 +21,27 @@ from trading_agent.storage.parquet_store import get_parquet_store
 def main():
     settings = get_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    # Exercise the actual Linux console entry point and Docker's SIGTERM path.
+    with tempfile.TemporaryFile(mode="w+") as output:
+        process = subprocess.Popen(["trading-agent-scheduler"], stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                output.seek(0)
+                log = output.read()
+                if "Scheduler started; waiting" in log:
+                    break
+                assert process.poll() is None, log
+                time.sleep(.1)
+            else:
+                raise AssertionError("Scheduler did not start")
+            time.sleep(.2)
+            process.terminate()
+            assert process.wait(timeout=15) == 0
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
     # Windows 1.5.2 Cython pickles use an unqualified loss module name.
     from trading_agent.strategy.research_features import load_legacy_bundle
     from sklearn._loss._loss import CyHalfMultinomialLoss
@@ -75,16 +98,18 @@ def main():
         page.goto("http://frontend:8080", wait_until="networkidle")
         expect(page.get_by_role("heading", name="Watchlist Bias", exact=True)).to_be_visible()
         expect(page.get_by_role("button", name="Scan entire watchlist", exact=True)).to_be_visible()
-        page.get_by_label("Selected research symbol", exact=True).fill("CHART")
-        expect(page.locator(".js-plotly-plot")).to_be_visible(timeout=30000)
-        expect(page.get_by_role("heading", name="Hybrid Decision Maker", exact=True)).to_be_visible()
-        expect(page.get_by_role("heading", name="Stop Loss, Target & Position Sizing", exact=True)).to_be_visible()
-        expect(page.get_by_role("heading", name="Walk-Forward Optimizer", exact=True)).to_be_visible()
-        expect(page.get_by_role("heading", name="Trade Outcome Validation", exact=True)).to_be_visible()
-        expect(page.get_by_label("Require qualified outcome evidence")).to_be_checked()
         page.get_by_text("API authentication", exact=True).click()
         page.get_by_label("Session API token", exact=True).fill("smoke-test-only")
         page.get_by_role("button", name="Apply session token", exact=True).click()
+        page.get_by_label("Selected research symbol", exact=True).fill("CHART")
+        page.get_by_role("button", name="Inspect CHART", exact=True).click()
+        expect(page.locator(".js-plotly-plot")).to_be_visible(timeout=30000)
+        expect(page.get_by_role("heading", name="Hybrid Decision Maker", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", name="Stop Loss, Target & Position Sizing", exact=True)).to_be_visible()
+        expect(page.get_by_label("Require qualified outcome evidence")).to_be_checked()
+        page.get_by_role("button", name="Validate CHART strategy", exact=True).click()
+        expect(page.get_by_role("heading", name="Walk-Forward Optimizer", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", name="Trade Outcome Validation", exact=True)).to_be_visible()
         page.get_by_role("button", name="Run walk-forward evaluation", exact=True).click()
         expect(page.get_by_text("Walk-forward: insufficient_history", exact=False)).to_be_visible(timeout=30000)
         page.get_by_role("button", name="Validate CHART outcomes", exact=True).click()
@@ -93,25 +118,16 @@ def main():
         page.get_by_text("API access token (if enabled on the server)").click()
         page.get_by_label("Bearer token").fill("smoke-test-only")
         page.get_by_role("button", name="Use for this page session").click()
-        # Exercise the actual versioned research routes through the frontend proxy.
-        # The API's isolated store has no candles; missing data must not fabricate picks.
-        for heading in ("Opportunity Finder", "Top Opportunity", "Hybrid Decision Maker"):
-            expect(page.get_by_role("heading", name=heading, exact=True)).to_be_visible()
-        page.get_by_label("Scan symbols (comma-separated; blank scans all stored symbols)").fill("MISSING")
-        page.get_by_role("button", name="Find opportunities", exact=True).click()
-        expect(page.get_by_text("No qualifying opportunities.", exact=False)).to_be_visible()
-        page.get_by_label("Decision symbol", exact=True).fill("MISSING")
-        page.get_by_role("button", name="Preview hybrid decision", exact=True).click()
-        expect(page.get_by_text("No stored data for symbol", exact=True)).to_be_visible()
-        page.locator('input[name="symbol"]').fill("SMOKE")
+        # Paper operations uses the same selection, with no second scanner.
+        page.get_by_label("Paper research symbol", exact=True).fill("SMOKE")
         page.get_by_label("Entry price", exact=True).fill("100")
         page.get_by_label("Quantity", exact=True).fill("10")
         page.get_by_label("Stop loss", exact=True).fill("95")
         page.get_by_role("button", name="Record paper position", exact=True).click()
-        expect(page.get_by_role("status")).to_have_text("Paper position recorded.")
+        expect(page.get_by_role("status")).to_contain_text("Paper position recorded.")
         page.get_by_label("Exit price for SMOKE").fill("105")
         page.get_by_role("button", name="Close paper position", exact=True).click()
-        expect(page.get_by_role("status")).to_have_text("Paper position closed.")
+        expect(page.get_by_role("status")).to_contain_text("Paper position closed.")
         page.reload(wait_until="networkidle")
         page.get_by_role("button", name="Paper operations", exact=True).click()
         # Tokens are deliberately not stored across reloads.
@@ -122,6 +138,11 @@ def main():
         assert not failures, failures
         browser.close()
     with httpx.Client(base_url="http://api:8000", headers={"Authorization": "Bearer smoke-test-only"}) as client:
+        assert client.get("/api/v1/research/readiness").status_code == 200
+        automation = client.get("/api/v1/research/automation").json()
+        assert automation["running"] and not automation["enabled"]
+        comparison = client.post("/api/v1/strategy-lab/compare", json={"symbol": "MISSING"})
+        assert comparison.status_code == 200 and comparison.json()["status"] == "insufficient_history"
         book = client.get("/api/v1/wallet/summary").json()
         assert book["cash"] == 1000050 and book["open_positions"] == 0, book
         assert len(client.get("/api/v1/wallet/trades").json()) == 1
