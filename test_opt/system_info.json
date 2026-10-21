@@ -1,0 +1,7 @@
+{
+  "cpu_physical": 12,
+  "cpu_logical": 24,
+  "ram_total_gb": 23.1,
+  "ram_available_gb": 7.5,
+  "workers_used": 6
+}

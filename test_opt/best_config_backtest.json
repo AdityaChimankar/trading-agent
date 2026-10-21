@@ -1,0 +1,32 @@
+{
+  "config_name": "top50_balanced_13",
+  "params": {
+    "htf_ema_fast": 20,
+    "htf_ema_slow": 50,
+    "use_htf_trend": true,
+    "ltf_ema_fast": 9,
+    "ltf_ema_slow": 21,
+    "pullback_ema": 9,
+    "atr_sl_mult": 2.0,
+    "atr_tp_mult": 4.0,
+    "trail_mult": 2.0,
+    "use_trailing": false,
+    "use_take_profit": false,
+    "min_atr_pct": 0.0005,
+    "adx_threshold": 25,
+    "rsi_max_long": 60,
+    "rsi_min_short": 40,
+    "volume_mult": 1.2,
+    "use_rsi_filter": true,
+    "use_volume_filter": true
+  },
+  "symbols_tested": 50,
+  "total_trades": 29642,
+  "win_rate": 24.9,
+  "avg_return_pct": -0.0025300000000000045,
+  "sharpe_like": -0.004,
+  "max_drawdown_pct": -350.4,
+  "total_return_pct": -87.29,
+  "elapsed_seconds": 3.7901246547698975,
+  "timestamp": "2026-10-03T13:36:57.492911"
+}
