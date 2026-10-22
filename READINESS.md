@@ -1,10 +1,18 @@
 # Integration audit and readiness
 
-Reviewed: 2026-10-21. Scope: local-first research and paper operations, not approval for live broker execution. Existing user data, positions, credentials, and unrelated research edits were preserved. No broker orders are part of this work.
+Reviewed: 2026-10-22. Scope: local-first research and paper operations, not approval for live broker execution. Existing user data, positions, credentials, and unrelated research edits were preserved. No broker orders are part of this work.
 
 ## Operating boundary
 
-### Latest: service lifecycle and readiness repair (2026-10-21)
+### Latest: full image build and deployment (2026-10-22)
+
+The failed API build was a PyPI socket read timeout during the NumPy download. Build stages now allow a 300-second download timeout and 10 connection retries, with a persistent BuildKit pip cache. The complete multi-stage build succeeded as `trading-agent-app:gemini-buildfix`, including dependency installation and Chromium. The rebuilt image passed the isolated Docker/browser smoke suite, and the temporary test stack was removed.
+
+After explicit operator approval, API, frontend, ticker and scheduler were recreated with the tested images and the original main-directory configuration/data/model mounts. All four were running with zero restarts at verification. API health, API readiness and the frontend returned HTTP 200. Research readiness returned in 0.16 seconds after the background inventory completed (2,311 stored symbols of 2,319 configured). Strategy Lab was present in served OpenAPI, and all 106 deployed Python source files matched the repaired worktree.
+
+The ticker publishes fresh heartbeats but Kite rejects the WebSocket handshake with HTTP 403. Live quotes remain disconnected until a valid broker session is supplied; deployment does not establish live-data readiness. The latest stored scan is stale, and no full market-session validation or strategy promotion is claimed. Earlier image tags remain available for rollback.
+
+### Earlier: service lifecycle and readiness repair (2026-10-21)
 
 Fixed the scheduler console entry point's import of the nonexistent `register_shutdown_handler`. It now handles SIGINT/SIGTERM around the blocking scheduler, waits for active jobs during cleanup, and starts at configured job times without an immediate provider pass. The shared Unix async signal callback receives its required arguments; API lifespan leaves signal ownership to Uvicorn so Docker stop reaches normal cleanup.
 
@@ -16,7 +24,7 @@ Verification: **419 Python tests passed**, **65.90% measured coverage** under th
 
 The full backend build was cancelled after a stalled dependency download. The candidate `trading-agent-app:gemini-operational` instead replaces source in the retained runtime image; the dependency manifest is unchanged (SHA-256 `5319a31f50614601e2b3d6b2fb42924d2fb66f34347cade0b7fc1e1a0fbefbe8`). The frontend candidate is `trading-agent-frontend:gemini-repair`; previous runtime images have `pre-operational-20261021` rollback tags. Build instructions and verification logs are local artifacts under `artifacts/`.
 
-Deployment to the existing four services is pending explicit operator approval: automatic approval review rejected the restart because it interrupts the app and resumes broker-connected/scheduled operations against real mounts. The original configuration, databases and models are preserved. A connected socket after market close does not certify fresh market data; a complete live market-session observation remains outstanding.
+At this checkpoint, deployment awaited explicit operator approval after automatic approval review rejected the restart. Approval and deployment subsequently occurred as recorded above. A complete live market-session observation remains outstanding.
 
 ### Earlier: gemini repair with the rework overview (2026-10-21)
 

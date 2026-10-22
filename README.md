@@ -396,6 +396,8 @@ This keeps the original `.env`, `data` and `models` mounts. Building from the ma
 | Playwright browser missing | Run `playwright install chromium`, or use `python manual_login.py` |
 | Port 8000/5173 is busy | Change the port mapping in `docker-compose.yml` or use CLI/API port options |
 | Docker frontend cannot reach API | Confirm `api` is healthy with `docker compose ps` and inspect `docker compose logs api` |
+| Compose reports `no configuration file provided` from the main `rework` folder | Use the worktree commands above. For status from that folder, run `docker compose --project-directory . -f ./.worktrees/gemini-repair/docker-compose.yml --profile live ps`. Build images from the explicit worktree contexts shown above. |
+| API image build reports `files.pythonhosted.org` read timeout | Retry the build. Python package downloads use a 300-second socket timeout, 10 connection retries, and a persistent BuildKit package cache. For longer network stalls, add `--build-arg PIP_DEFAULT_TIMEOUT=600` to `docker build`. A failed partial download may restart; completed cached downloads can be reused. |
 | SQLite is locked | Avoid multiple ad-hoc writers; stop duplicate ticker/scheduler processes |
 | Rebuilt code appears unchanged | Rerun `docker compose up -d api frontend` (and live services if used); rebuilding alone does not replace running containers |
 | `kite_historical` breaker is OPEN | Review the first underlying failure, check login, wait for broker recovery, then retry a bounded batch; avoid concurrent backfills |

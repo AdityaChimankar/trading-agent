@@ -9,15 +9,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Allow slow package downloads; these settings apply only to build stages.
+ARG PIP_DEFAULT_TIMEOUT=300
+ARG PIP_RETRIES=10
+
 # Cache dependencies independently of source and documentation changes.
 COPY pyproject.toml ./
-RUN python -c "import subprocess, tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call(['pip', 'install', '--no-cache-dir', '--prefix=/install', *deps])"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -c "import subprocess, tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call(['pip', 'install', '--prefix=/install', *deps])"
 
 # Install the package/console entry points without re-resolving dependencies.
 FROM builder AS application
 COPY README.md ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir --no-deps --prefix=/install .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps --prefix=/install .
 
 # Stage 2: Playwright browser installation
 FROM builder AS playwright
