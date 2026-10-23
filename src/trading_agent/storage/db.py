@@ -277,6 +277,35 @@ class Trade(Base):
     exit_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class Order(Base):
+    """Every order the router sends (paper or live), with its lifecycle state.
+
+    PENDING -> SUBMITTED -> FILLED | REJECTED | CANCELLED. ``charges`` is the
+    modelled statutory + brokerage cost of the fill; ``client_order_id`` makes
+    retries idempotent and ties broker order ids back to this row.
+    """
+
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    client_order_id: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    position_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)  # BUY, SELL
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    purpose: Mapped[str] = mapped_column(String(10), nullable=False)  # entry, exit
+    mode: Mapped[str] = mapped_column(String(10), nullable=False)  # paper, live
+    product: Mapped[str] = mapped_column(String(10), nullable=False, default="MIS")
+    reference_price: Mapped[float] = mapped_column(Float, nullable=False)
+    fill_price: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
+    broker_order_id: Mapped[str | None] = mapped_column(String(40))
+    charges: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reason: Mapped[str | None] = mapped_column(String(200))
+    error: Mapped[str | None] = mapped_column(Text)
+
+
 def apply_sqlite_pragmas(conn) -> None:
     """WAL lets the ticker writer, scheduler and API read/write concurrently
     without "database is locked"; busy_timeout absorbs short write contention."""

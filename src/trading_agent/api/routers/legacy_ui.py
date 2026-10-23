@@ -215,8 +215,8 @@ async def list_positions():
 
 @router.post("/positions", status_code=201)
 async def open_position(payload: OpenPositionRequest):
-    """Record the scan's sized plan for this symbol through the risk-checked v1 path."""
-    from trading_agent.api.routers.positions import PositionCreate, create_position
+    """Enter the scan's sized plan through the order router (all risk checks apply)."""
+    from trading_agent.execution.router import get_order_router
 
     symbol = _require_symbol(payload.symbol)
     rows = await run_in_threadpool(_scan_rows)
@@ -225,13 +225,12 @@ async def open_position(payload: OpenPositionRequest):
     if plan is None:
         reason = (row or {}).get("plan", {}).get("block_reason") if row else None
         raise HTTPException(400, reason or "No fresh, unblocked plan for this symbol and side. Re-scan first.")
-    created = await create_position(PositionCreate(
-        symbol=symbol, action=payload.action, entry_price=plan["entry_price"],
-        quantity=int(plan["quantity"]), stop_loss=plan["stop_loss"], take_profit=plan["take_profit"],
-        strategy="hybrid_scan",
-    ))
-    return {"symbol": symbol, "action": payload.action, "shares": created.quantity,
-            "value": round(created.entry_price * created.quantity, 2)}
+    filled = await get_order_router().enter(
+        symbol=symbol, side=payload.action, quantity=int(plan["quantity"]),
+        reference_price=plan["entry_price"], stop_loss=plan["stop_loss"],
+        take_profit=plan["take_profit"], strategy="hybrid_scan", reason="classic_dashboard")
+    return {"symbol": symbol, "action": payload.action, "shares": filled["quantity"],
+            "value": round(filled["fill_price"] * filled["quantity"], 2), "mode": filled["mode"]}
 
 
 async def _latest_close(symbol: str) -> float:
@@ -247,17 +246,17 @@ async def _latest_close(symbol: str) -> float:
 
 @router.post("/positions/{position_id}/close")
 async def close(position_id: int):
-    """Close at the latest stored candle close (paper fill; no slippage modelled)."""
-    from trading_agent.api.routers.positions import close_position
+    """Exit through the order router at the latest stored price (slippage applies)."""
+    from trading_agent.execution.router import get_order_router
 
     async with get_database().session() as session:
         position = await session.get(Position, position_id)
     if position is None:
         raise HTTPException(404, "Position not found.")
     exit_price = await _latest_close(position.symbol)
-    result = await close_position(position_id, exit_price=exit_price)
+    result = await get_order_router().exit_position(position_id, reason="classic_dashboard", price=exit_price)
     return {"closed": position_id, "symbol": position.symbol,
-            "realized_pnl_rupees": round(result["pnl"], 2), "exit_price": exit_price}
+            "realized_pnl_rupees": result["gross_pnl"], "exit_price": result["exit_price"]}
 
 
 # --- wallet / history ------------------------------------------------------------

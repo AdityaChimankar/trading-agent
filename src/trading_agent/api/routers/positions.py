@@ -10,6 +10,7 @@ from typing import Optional, List
 from datetime import UTC, datetime
 
 from trading_agent.storage.db import get_database, PositionRepository, Position
+from trading_agent.risk.controls import audit, entry_block_reason
 from trading_agent.risk.ledger_guard import SELECT_LEDGER, ledger_state
 
 router = APIRouter()
@@ -112,6 +113,10 @@ async def create_position(position: PositionCreate):
             raise HTTPException(status_code=503, detail="Paper ledger cannot be verified; new entries blocked") from error
         if not ledger["entries_allowed"]:
             raise HTTPException(status_code=409, detail=ledger["block_reason"])
+        # Kill switch, session window and daily trade count (risk/controls.py).
+        session_block = entry_block_reason([dict(row) for row in rows])
+        if session_block:
+            raise HTTPException(status_code=409, detail=session_block)
         opened = ledger["positions"]
         equity = ledger["realized_equity"]
         if any(p["symbol"].upper() == position.symbol for p in opened):
@@ -137,6 +142,10 @@ async def create_position(position: PositionCreate):
             signal_source=position.strategy,
             status="open",
         )
+        await session.flush()
+        audit("position_opened", position_id=pos.id, symbol=pos.symbol, action=pos.action,
+              quantity=pos.quantity, entry_price=pos.entry_price, stop_loss=pos.stop_loss,
+              take_profit=pos.take_profit, strategy=pos.strategy)
 
         return PositionResponse(
             id=pos.id,
@@ -184,5 +193,6 @@ async def close_position(
         )
         if result.rowcount != 1:
             raise HTTPException(status_code=409, detail="Position was already closed")
+        audit("position_closed", position_id=position_id, symbol=pos.symbol, exit_price=exit_price, pnl=pnl)
 
         return {"position_id": position_id, "exit_price": exit_price, "pnl": pnl}

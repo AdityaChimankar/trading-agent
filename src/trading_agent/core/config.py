@@ -104,6 +104,37 @@ class PaperRiskSettings(BaseSettings):
     max_trade_risk_pct: float = Field(default=0.02, gt=0, le=1)
     max_daily_loss_pct: float = Field(default=0.03, gt=0, le=1)
     max_drawdown_pct: float = Field(default=0.15, gt=0, le=1)
+    # Intraday session discipline (IST). No new entries after the cutoff; every
+    # open position is squared off at square_off_time, like broker MIS.
+    # Session gates (cutoff, open, weekend) can be disabled for back-office
+    # testing; the kill switch and trade-count limit always apply.
+    enforce_session: bool = True
+    max_trades_per_day: int = Field(default=20, ge=1)
+    entry_cutoff: str = Field(default="15:00", pattern=r"^\d{2}:\d{2}$")
+    square_off_time: str = Field(default="15:15", pattern=r"^\d{2}:\d{2}$")
+
+
+class ExecutionSettings(BaseSettings):
+    """Order routing. Paper by default; live needs two explicit settings."""
+
+    model_config = SettingsConfigDict(env_prefix="EXECUTION_", env_file=".env", extra="ignore")
+    mode: Literal["paper", "live"] = "paper"
+    # Live orders go to Zerodha only when this equals LIVE_CONFIRMATION exactly.
+    live_confirmation: str = ""
+    slippage_bps: float = Field(default=5.0, ge=0, le=100)
+    product: Literal["MIS", "CNC"] = "MIS"
+    # Never take more than this share of a stock's average traded value per bar.
+    max_participation_pct: float = Field(default=0.01, gt=0, le=0.25)
+
+
+class MonitoringSettings(BaseSettings):
+    """ML feature-drift thresholds (Population Stability Index)."""
+
+    model_config = SettingsConfigDict(env_prefix="MONITOR_", env_file=".env", extra="ignore")
+    psi_warn: float = Field(default=0.1, gt=0)
+    psi_drift: float = Field(default=0.25, gt=0)
+    # Features above psi_drift needed before ML is withdrawn from decisions.
+    drift_features_to_fallback: int = Field(default=3, ge=1)
 
 
 class MLSettings(BaseSettings):
@@ -184,6 +215,8 @@ class Settings(BaseSettings):
     ml: MLSettings = Field(default_factory=MLSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
+    monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
 
     # Paths
     data_dir: Path = Field(default=Path("data"), description="Data directory")

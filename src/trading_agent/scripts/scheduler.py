@@ -38,6 +38,7 @@ CronTrigger = functools.partial(CronTrigger, timezone="Asia/Kolkata")
 
 from trading_agent.analysis.digest import DigestGenerator
 from trading_agent.analysis.sentiment import get_sentiment_analyzer
+from trading_agent.core.config import get_settings
 from trading_agent.core.freshness import in_market_hours
 from trading_agent.core.logging_config import get_logger
 from trading_agent.ingest.fetch_news import fetch_latest_news
@@ -239,6 +240,32 @@ def end_of_session_heal():
         raise RuntimeError(f"Historical repair failed for {len(healer.errors)} symbols")
 
 
+def square_off_cycle():
+    """Intraday square-off: close every open position (MIS-style) at the cutoff."""
+    import asyncio
+
+    from trading_agent.risk.controls import square_off_all
+
+    try:
+        results = asyncio.run(square_off_all(reason="scheduled_square_off"))
+        failed = [r for r in results if r["status"] != "closed"]
+        logger.info("square_off_completed", closed=len(results) - len(failed), failed=len(failed))
+    except Exception as e:
+        logger.error("square_off_failed", error=str(e))
+
+
+def drift_check_cycle():
+    """Daily ML feature-drift check; withdraws ML from decisions on drift."""
+    from trading_agent.strategy.model_monitoring import evaluate_and_apply
+
+    try:
+        result = evaluate_and_apply()
+        logger.info("ml_drift_checked", status=result["report"]["status"],
+                    fallback=result["fallback"].get("active", False))
+    except Exception as e:
+        logger.error("ml_drift_check_failed", error=str(e))
+
+
 # Create scheduler AFTER all functions are defined
 scheduler = BlockingScheduler(timezone="Asia/Kolkata")
 
@@ -316,6 +343,17 @@ scheduler.add_job(
     end_of_session_heal,
     CronTrigger(day_of_week="mon-fri", hour=15, minute=32),
     id="end_of_session_heal",
+)
+_square_off = get_settings().paper.square_off_time.split(":")
+scheduler.add_job(
+    square_off_cycle,
+    CronTrigger(day_of_week="mon-fri", hour=int(_square_off[0]), minute=int(_square_off[1])),
+    id="intraday_square_off",
+)
+scheduler.add_job(
+    drift_check_cycle,
+    CronTrigger(day_of_week="mon-fri", hour=15, minute=40),
+    id="ml_drift_check",
 )
 scheduler.add_job(
     generate_digest,

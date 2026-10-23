@@ -94,6 +94,10 @@ def analyze_frame(symbol, frame, interval, model, mode, now, news=None):
     rule = ["HOLD", "BUY", "SELL"][action_code]
     rule_confidence = min(0.95, 0.5 + min(float(last.adx), 50) / 200 + 0.1 * (last.pattern_code != 0)) if rule != "HOLD" else 0.0
     ml = model.predict(df, symbol, interval)
+    if ml.get("status") == "available":
+        from trading_agent.strategy.model_monitoring import log_live_features
+
+        log_live_features(symbol, interval, last)
     action, confidence, reasoning = combine(rule, rule_confidence, ml, mode)
     sentiment = usable_sentiment(news or {}, candle_time)
     score = confidence * 100
@@ -199,7 +203,14 @@ def size_opportunities(rows, capital, positions, limits, risk_pct=1.0, reward_ri
 
 
 def model_for_research():
-    if (Path(get_settings().ml.model_dir) / "outcome-active.json").exists():
+    from trading_agent.strategy.model_monitoring import DriftWithheldModel, fallback_state
+
+    model_dir = Path(get_settings().ml.model_dir)
+    if fallback_state().get("active"):
+        # Feature drift: use the previous artifact if kept, otherwise withdraw ML.
+        previous = model_dir / "ml_model.previous.joblib"
+        return ResearchModel(previous) if previous.exists() else DriftWithheldModel()
+    if (model_dir / "outcome-active.json").exists():
         from trading_agent.strategy.outcome_model import OutcomeResearchModel
         return OutcomeResearchModel()
     return ResearchModel(Path(get_settings().ml.model_dir) / "ml_model.joblib")

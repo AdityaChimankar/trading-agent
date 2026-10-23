@@ -46,6 +46,7 @@ def client(tmp_path, monkeypatch, scan_rows):
     monkeypatch.setenv("PAPER_INITIAL_CAPITAL", "1000000")
     monkeypatch.setenv("API_AUTH_TOKEN", "")
     monkeypatch.setenv("PAPER_ENTRIES_ENABLED", "true")
+    monkeypatch.setenv("EXECUTION_SLIPPAGE_BPS", "0")  # exact fills keep P&L assertions readable
     monkeypatch.setattr(db_module, "DB_PATH", str(path))
     store = parquet_module.ParquetStore(tmp_path / "parquet")
     monkeypatch.setattr(parquet_module, "_store", store)

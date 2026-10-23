@@ -26,11 +26,16 @@ def alembic(path, *args):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# Tables added by later revisions do not exist in a revision-001 database.
+LATER_TABLES = {"orders"}
+LEGACY_TABLES = [t for t in Base.metadata.sorted_tables if t.name not in LATER_TABLES]
+
+
 def legacy_database(path):
     alembic(path, "upgrade", "001")
     engine = create_engine(f"sqlite:///{path.as_posix()}")
     with engine.begin() as connection:
-        for table in Base.metadata.sorted_tables:
+        for table in LEGACY_TABLES:
             row = {}
             for column in table.columns:
                 if isinstance(column.type, DateTime):
@@ -54,7 +59,7 @@ def snapshot(path):
     with sqlite3.connect(path) as connection:
         connection.row_factory = sqlite3.Row
         return {table.name: [dict(row) for row in connection.execute(f'SELECT * FROM "{table.name}" ORDER BY id')]
-                for table in Base.metadata.sorted_tables}
+                for table in LEGACY_TABLES}
 
 
 def test_legacy_upgrade_preserves_every_record_and_metadata(tmp_path):
@@ -73,7 +78,8 @@ def test_legacy_upgrade_preserves_every_record_and_metadata(tmp_path):
     assert snapshot(path) == before
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("002",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("003",)
+        assert connection.execute("SELECT COUNT(*) FROM orders").fetchone() == (0,)
 
 
 @pytest.mark.parametrize("ambiguous", [True, False])

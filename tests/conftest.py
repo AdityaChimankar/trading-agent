@@ -89,3 +89,15 @@ def mock_candidate():
         rule_confidence=0.7,
         volume=50000,
     )
+
+@pytest.fixture(autouse=True)
+def _isolated_controls(tmp_path_factory, monkeypatch):
+    """Tests run at any hour: lift the IST session window unless a test opts in,
+    and keep the audit log / kill switch out of the working tree."""
+    from trading_agent.core.config import get_settings
+
+    monkeypatch.setenv("PAPER_ENFORCE_SESSION", "false")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path_factory.mktemp("data")))
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
