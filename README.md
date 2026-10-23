@@ -14,7 +14,7 @@ Project status, open work and decision history: [MEMORY.md](MEMORY.md).
 | **Research** | Find → Inspect → Validate → Paper review workflow: full-watchlist scan, Plotly chart, walk-forward optimizer, trade-outcome validation, BUY/SELL outcome models |
 | **Paper operations** | Persistent paper book: open, monitor and close positions |
 | **Risk & execution** | Kill switch, square-off, session status, router orders, reconciliation, cost calculator, audit trail |
-| **Analytics** | Net-of-cost performance and attribution, volume board (RVOL, VWAP, liquidity), ML drift monitor |
+| **Analytics** | Net-of-cost performance and attribution, volume board (RVOL, VWAP, liquidity, volume forecast), cross-sectional ranking research, ML drift monitor |
 | **Signal Pipeline** | Latest rule/LLM/ML decision per symbol |
 | **Transactions** | Transaction history and strategy status |
 | **News** | Headlines matched to the watchlist, with cached sentiment |
@@ -109,6 +109,13 @@ python -m trading_agent.research.walk_forward_optimizer --selftest   # vectorize
 python -m trading_agent.research.walk_forward_optimizer RELIANCE --interval minute --cost-bps 5
 python -m trading_agent.research.walk_forward_optimizer --all        # whole watchlist, expensive
 
+# Nifty 50 index candles (market-regime context for Strategy Lab; never traded)
+trading-agent ingest NIFTY50 --interval minute --days 60
+trading-agent optimize strategy-lab RELIANCE --interval minute   # includes opening-range breakout profiles
+
+# Cross-sectional ranking research (walk-forward, after costs, vs random picks)
+python -m trading_agent.research.cross_sectional --interval minute   # --max-lag 240 for the paper's lags
+
 # ML drift monitoring
 python -m trading_agent.strategy.model_monitoring baseline      # once, before drift reports mean anything
 python -m trading_agent.strategy.model_monitoring report
@@ -136,7 +143,7 @@ Every entry, whether from the dashboard, the paper book or the API, passes the s
 - Session: no entries before 09:15, after `PAPER_ENTRY_CUTOFF` (15:00) or on weekends.
 - Daily trade cap (`PAPER_MAX_TRADES_PER_DAY`), and optionally one entry per symbol per day (`PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY`).
 - Portfolio exposure, stop risk, position count, single-name cap, realized daily loss and drawdown.
-- Participation cap: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value.
+- Participation caps: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value, or above `EXECUTION_MAX_REMAINING_VOLUME_PCT` of the volume still forecast to trade today.
 
 The scheduler squares off every open position at `PAPER_SQUARE_OFF_TIME` (15:15). Each entry, exit, fill, rejection and halt is written to `data/controls/audit-YYYY-MM-DD.jsonl`.
 
@@ -176,6 +183,7 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `EXECUTION_MODE` / `EXECUTION_LIVE_CONFIRMATION` | `paper` / empty | Live orders need both set |
 | `EXECUTION_SLIPPAGE_BPS` / `EXECUTION_PRODUCT` | `5` / `MIS` | Paper slippage; live product |
 | `EXECUTION_MAX_PARTICIPATION_PCT` | `0.01` | Share of average daily traded value |
+| `EXECUTION_MAX_REMAINING_VOLUME_PCT` | `0.05` | Share of the volume still forecast to trade today |
 | `LLM_PROVIDER` | `mock` in code, `openrouter` in `.env.example` | `mock` makes no calls |
 | `LLM_API_KEY` / `OPENROUTER_API_KEY` / `LLM_MODEL` | empty / empty / `gpt-4o-mini` in code (`.env.example`: `google/gemini-2.0-flash-001`) | OpenRouter credentials and model id |
 | `LLM_MIN_INTERVAL_SECONDS` / `LLM_MAX_RETRIES` | `4.5` / `4` | Throttling and 429 retries |

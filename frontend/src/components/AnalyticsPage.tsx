@@ -23,7 +23,22 @@ interface VolumeRow {
   symbol: string; price: number; rvol: number | null; bar_surge: number | null; vwap: number | null
   price_vs_vwap: string | null; liquidity: string; avg_daily_value_cr: number; max_quantity: number
   recommendation: string; reason: string; scan_action: string; scan_score: number; agreement: string
+  forecast_remaining_volume: number | null; max_quantity_remaining: number | null
 }
+interface RankStats {
+  days: number; mean_daily_net_bps?: number; hit_rate_pct?: number; t_stat?: number | null
+  annualised_sharpe?: number | null; total_net_pct_points?: number; max_drawdown_pct_points?: number
+}
+interface RankPick { symbol: string; probability: number }
+interface RankingReport {
+  status: string; reason?: string; generated_at: string; interval: string; lags: number[]
+  symbols_with_data: number; labelled_sessions?: number; required_sessions: number
+  model?: RankStats; random_baseline?: RankStats; classifier_accuracy_pct?: number | null
+  research_gate?: { passed: boolean; checks: Record<string, boolean> }
+  latest_ranking?: { session: string; long: RankPick[]; short: RankPick[] } | null
+  ranking_withheld?: string; limitations: string; config: { top_k: number; cost_bps: number; train_days: number }
+}
+interface Ranking { job: { running: boolean; started_at: string | null; error: string | null }; report: RankingReport | null }
 interface DriftFeature { feature: string; psi: number; ks: number; state: 'ok' | 'warn' | 'drift' }
 interface Drift {
   report: { status: string; live_samples: number; message?: string; baseline_source?: string; features: DriftFeature[]; drifted_features?: string[] }
@@ -42,6 +57,10 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
   const volume = useQuery({ queryKey: ['volume-board'], queryFn: () => apiGet<VolumeRow[]>('/api/v1/analytics/volume?top=40'), refetchInterval: 120_000 })
   const drift = useQuery({ queryKey: ['drift'], queryFn: () => apiGet<Drift>('/api/v1/analytics/drift'), refetchInterval: 300_000 })
   const evaluate = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/drift/evaluate'), onSuccess: () => cache.invalidateQueries({ queryKey: ['drift'] }) })
+  const ranking = useQuery({ queryKey: ['ranking'], queryFn: () => apiGet<Ranking>('/api/v1/analytics/cross-sectional'),
+    refetchInterval: (q) => (q.state.data?.job.running ? 5_000 : 300_000) })
+  const runRanking = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/cross-sectional/run'),
+    onSuccess: () => cache.invalidateQueries({ queryKey: ['ranking'] }) })
   const clear = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/drift/clear'), onSuccess: () => cache.invalidateQueries({ queryKey: ['drift'] }) })
   const o = perf.data?.overall
 
@@ -93,10 +112,15 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
           { header: 'vs VWAP', cell: r => r.price_vs_vwap ?? '—' },
           { header: 'Liquidity', cell: r => `${r.liquidity} · ₹${num(r.avg_daily_value_cr, 1)} Cr/day` },
           { header: 'Max qty', cell: r => r.max_quantity.toLocaleString('en-IN'), align: 'right' },
+          { header: 'Fcst left today', cell: r => r.forecast_remaining_volume == null ? '—' : r.forecast_remaining_volume.toLocaleString('en-IN'), align: 'right' },
+          { header: 'Max qty (left)', cell: r => r.max_quantity_remaining == null ? '—' : r.max_quantity_remaining.toLocaleString('en-IN'), align: 'right' },
           { header: 'Volume call', cell: r => <Chip size="small" label={r.recommendation.replace('_', ' ')} color={CALL_COLOR[r.recommendation] ?? 'default'} title={r.reason} /> },
           { header: 'vs scan', cell: r => <Chip size="small" variant="outlined" label={r.agreement} color={r.agreement === 'confirms' ? 'success' : r.agreement === 'contradicts' ? 'warning' : 'default'} /> },
         ]} />}
       </Panel>
+
+      <RankingPanel data={ranking.data} loading={ranking.isLoading} error={ranking.error}
+        onRun={() => runRanking.mutate()} starting={runRanking.isPending} startError={runRanking.error} />
 
       <Panel title="ML drift monitor" subtitle="PSI and KS of live model inputs against the training-period baseline. Significant drift withdraws ML so hybrid decisions hold."
         actions={<Stack direction="row" spacing={1}>
@@ -120,5 +144,49 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
         </>}
       </Panel>
     </Stack>
+  )
+}
+
+function RankingPanel({ data, loading, error, onRun, starting, startError }: {
+  data?: Ranking; loading: boolean; error: unknown; onRun: () => void; starting: boolean; startError: unknown
+}) {
+  const r = data?.report
+  const running = data?.job.running ?? false
+  const stat = (s?: RankStats) => s && s.days > 0
+    ? `${num(s.mean_daily_net_bps, 1)} bps/day · hit ${num(s.hit_rate_pct, 1)}% · t ${num(s.t_stat, 2)} · Sharpe ${num(s.annualised_sharpe, 2)}`
+    : '—'
+  return (
+    <Panel title="Cross-sectional ranking (research)"
+      subtitle="Random forest ranks the universe each morning by the chance of beating the day's median open-to-close return; long the top k, short the bottom k (Ghosh et al. 2021). Walk-forward after costs, against random picks. Never places orders."
+      actions={<Button variant="outlined" onClick={onRun} disabled={running || starting}>{running ? 'Running…' : 'Run evaluation'}</Button>}>
+      <StateMessage loading={loading} error={error ?? startError} empty="No evaluation yet. Run one; it reads stored candles for the Nifty 500 list and can take several minutes."
+        isEmpty={!r && !running} />
+      {data?.job.error && <Alert severity="error" sx={{ mb: 2 }}>Last run failed: {data.job.error}</Alert>}
+      {r && <>
+        {r.status !== 'completed'
+          ? <Alert severity="info" sx={{ mb: 2 }}>Insufficient history: {r.reason ?? `${r.labelled_sessions ?? 0} usable sessions`}</Alert>
+          : <Alert severity={r.research_gate?.passed ? 'success' : 'warning'} sx={{ mb: 2 }}>
+              Research gate {r.research_gate?.passed ? 'passed' : 'not passed'}
+              {r.research_gate && ` (${Object.entries(r.research_gate.checks).filter(([, ok]) => !ok).map(([k]) => k.replaceAll('_', ' ')).join(', ') || 'all checks met'})`}
+            </Alert>}
+        {r.model && <Grid container spacing={2} sx={{ mb: 2 }}>
+          <Grid size={{ xs: 12, md: 6 }}><Metric label="Model book (net)" value={stat(r.model)} hint={`${r.model.days} test days · total ${num(r.model.total_net_pct_points, 2)} pts · max DD ${num(r.model.max_drawdown_pct_points, 2)} pts`} /></Grid>
+          <Grid size={{ xs: 12, md: 6 }}><Metric label="Random picks (net)" value={stat(r.random_baseline)} hint={`classifier accuracy ${num(r.classifier_accuracy_pct, 1)}%`} /></Grid>
+        </Grid>}
+        {r.latest_ranking && <Grid container spacing={2}>
+          {(['long', 'short'] as const).map(side => <Grid key={side} size={{ xs: 12, md: 6 }}>
+            <Typography variant="overline" color="text.secondary">{side === 'long' ? 'Buy at open' : 'Short at open'} · {r.latest_ranking!.session}</Typography>
+            <DataTable rows={r.latest_ranking![side]} columns={[
+              { header: 'Symbol', cell: p => p.symbol },
+              { header: 'P(beat median)', cell: p => num(p.probability, 3), align: 'right' },
+            ]} />
+          </Grid>)}
+        </Grid>}
+        {r.ranking_withheld && <Typography variant="body2" color="text.secondary">{r.ranking_withheld}.</Typography>}
+        <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
+          {r.symbols_with_data} symbols · {r.interval} candles · lags {r.lags[0]}–{r.lags[r.lags.length - 1]} · train {r.config.train_days} days · top {r.config.top_k} · cost {r.config.cost_bps} bps · generated {new Date(r.generated_at).toLocaleString('en-IN', { hour12: false })}. {r.limitations}
+        </Typography>
+      </>}
+    </Panel>
   )
 }

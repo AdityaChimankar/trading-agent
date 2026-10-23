@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from trading_agent.research.strategy_lab import compare_profiles, read_completed
+from trading_agent.research.strategy_lab import INDEX_KEY, MAX_BARS, compare_profiles, read_completed
 from trading_agent.research.trade_outcomes import TradePolicy
 from trading_agent.storage.parquet_store import ParquetStore
 
@@ -73,6 +73,7 @@ class CompareResponse(BaseModel):
     windows: Windows | None
     profiles: list[ProfileResult]
     baselines: list[ProfileResult]
+    skipped_profiles: list[dict] = []
     limitations: str
 
 
@@ -82,9 +83,10 @@ def compare(request: CompareRequest):
         raise HTTPException(409, "A strategy comparison is already running")
     try:
         frame = read_completed(request.symbol, request.interval, request.max_bars)
+        index_frame = read_completed(INDEX_KEY, request.interval, MAX_BARS)
         policy = TradePolicy(horizon=request.horizon, reward_risk=request.reward_risk,
                              cost_bps=request.cost_bps, slippage_bps=request.slippage_bps)
-        return compare_profiles(frame, request.symbol, request.interval, policy)
+        return compare_profiles(frame, request.symbol, request.interval, policy, index_frame)
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     finally:

@@ -27,7 +27,17 @@ PROFILES = (
     ("rule", "Confirmed patterns", "Existing RSI/ADX rules with confirmed candle/swing patterns."),
     ("trend", "Trend pullback", "MA20/MA50 trend, ADX >= 20 and RSI pullback."),
     ("breakout", "20-bar breakout", "Close beyond the prior 20-bar range with ADX >= 20."),
+    ("orb", "Opening-range breakout",
+     "First candle close beyond the completed 09:15-09:30 range, once per side per session."),
 )
+# Needs NIFTY50 index candles for the same interval; skipped when they are absent.
+GAP_PROFILE = ("orb_gap", "Opening-range breakout, Nifty gap regime",
+               "Opening-range breakout filtered by the Nifty 50 opening gap: gap up (> +0.2%) "
+               "takes only shorts, gap down (< -0.2%) only longs, flat both.")
+INDEX_KEY = "NIFTY50"
+OPENING_RANGE_MINUTES = 15
+GAP_THRESHOLD_PCT = 0.2
+SESSION_OPEN_MINUTE = 9 * 60 + 15
 LIMITATIONS = (
     "Exploratory comparisons only; repeated inspection can overfit the evaluation window. "
     "No profile is qualified or promoted. Returns sum equal-notional trade returns; they "
@@ -93,8 +103,58 @@ def prepare_frame(raw: pd.DataFrame) -> pd.DataFrame:
     return prepare_research_frame(frame)
 
 
+def _session_minutes(frame: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    local = pd.to_datetime(frame.timestamp, utc=True).dt.tz_convert("Asia/Kolkata")
+    return local.dt.date, local.dt.hour * 60 + local.dt.minute - SESSION_OPEN_MINUTE
+
+
+def index_gap_regime(index_frame: pd.DataFrame | None, threshold_pct: float = GAP_THRESHOLD_PCT) -> dict:
+    """Session date -> GAP_UP / GAP_DOWN / FLAT from the index open vs the previous session close.
+
+    Known at 09:15, before any opening-range entry, so it is causal for the profile.
+    """
+    if index_frame is None or index_frame.empty:
+        return {}
+    frame = index_frame.sort_values("timestamp")
+    day, _ = _session_minutes(frame)
+    sessions = frame.groupby(day.to_numpy()).agg(open=("open", "first"), close=("close", "last"))
+    gap = (sessions["open"] / sessions["close"].shift(1) - 1) * 100
+    return {d: ("GAP_UP" if g > threshold_pct else "GAP_DOWN" if g < -threshold_pct else "FLAT")
+            for d, g in gap.dropna().items()}
+
+
+def opening_range_actions(frame: pd.DataFrame, minutes: int = OPENING_RANGE_MINUTES,
+                          regime: dict | None = None) -> np.ndarray:
+    """First close beyond the opening range, after the range has completed.
+
+    The range is the high/low of bars that start within ``minutes`` of 09:15; a
+    session without its 09:15 bar has no range. Signals come only from bars that
+    start after the window, so the range is fully in the past. With ``regime``,
+    gap-up sessions take only shorts, gap-down only longs, and sessions without a
+    regime are skipped.
+    """
+    day, minute = _session_minutes(frame)
+    in_window = (minute >= 0) & (minute < minutes)
+    has_open = minute.groupby(day).transform("min").eq(0)
+    or_high = frame.high.where(in_window).groupby(day).transform("max")
+    or_low = frame.low.where(in_window).groupby(day).transform("min")
+    after = has_open & (minute >= minutes)
+    buy = after & (frame.close > or_high)
+    sell = after & (frame.close < or_low)
+    if regime is not None:
+        labels = day.map(regime)
+        buy &= labels.isin(["GAP_DOWN", "FLAT"])
+        sell &= labels.isin(["GAP_UP", "FLAT"])
+    buy &= buy.astype(int).groupby(day).cumsum().eq(1)
+    sell &= sell.astype(int).groupby(day).cumsum().eq(1)
+    actions = np.zeros(len(frame), dtype=np.int8)
+    actions[buy.to_numpy()] = 1
+    actions[sell.to_numpy()] = 2
+    return actions
+
+
 def profile_actions(frame: pd.DataFrame, profile: str = "rule",
-                    params: SignalParams | None = None) -> np.ndarray:
+                    params: SignalParams | None = None, regime: dict | None = None) -> np.ndarray:
     """Fixed profiles use current/past candles; swings require confirmation first."""
     if profile == "rule":
         selected = params or SignalParams()
@@ -102,6 +162,12 @@ def profile_actions(frame: pd.DataFrame, profile: str = "rule",
             raise ValueError("Signal parameters must be finite")
         return evaluate_signals(frame.rsi.to_numpy(), frame.adx.to_numpy(),
                                 frame.pattern_code.to_numpy(), params=selected)
+    if profile == "orb":
+        return opening_range_actions(frame)
+    if profile == "orb_gap":
+        if not regime:
+            raise ValueError("The gap-regime profile needs NIFTY50 index candles")
+        return opening_range_actions(frame, regime=regime)
     actions = np.zeros(len(frame), dtype=np.int8)
     if profile == "trend":
         buy = (frame.ma20 > frame.ma50) & frame.rsi.between(40, 50)
@@ -138,7 +204,7 @@ def summarize(trades: list[dict]) -> dict:
 
 
 def compare_profiles(raw: pd.DataFrame, symbol: str, interval: str = "minute",
-                     policy: TradePolicy | None = None) -> dict:
+                     policy: TradePolicy | None = None, index_frame: pd.DataFrame | None = None) -> dict:
     """Compare predefined profiles on the same chronological 60/40 partitions.
 
     The reference partition is descriptive, not fitted. Both partitions own
@@ -153,7 +219,7 @@ def compare_profiles(raw: pd.DataFrame, symbol: str, interval: str = "minute",
               "symbol": symbol, "interval": interval, "candles": len(raw),
               "required_candles": max(MIN_BARS, math.ceil((policy.horizon + 61) / .4)),
               "policy": asdict(policy), "windows": None, "profiles": [], "baselines": [],
-              "limitations": LIMITATIONS}
+              "skipped_profiles": [], "limitations": LIMITATIONS}
     if raw.empty:
         return result
     frame = prepare_frame(raw)
@@ -179,6 +245,15 @@ def compare_profiles(raw: pd.DataFrame, symbol: str, interval: str = "minute",
     for identifier, label, description in PROFILES:
         result["profiles"].append(measure(identifier, label, description,
                                           profile_actions(frame, profile=identifier)))
+    regime = index_gap_regime(index_frame)
+    if regime:
+        identifier, label, description = GAP_PROFILE
+        result["profiles"].append(measure(identifier, label, description,
+                                          profile_actions(frame, profile=identifier, regime=regime)))
+    else:
+        result["skipped_profiles"].append({"id": GAP_PROFILE[0], "reason": (
+            f"No {INDEX_KEY} candles for this interval; ingest them with "
+            f"'trading-agent ingest {INDEX_KEY} --interval {interval}'")})
     for code, side in ((1, "long"), (2, "short")):
         result["baselines"].append(measure(f"always_{side}", f"Unconditional {side}",
                                            "Enter at every eligible opportunity under the same policy.",

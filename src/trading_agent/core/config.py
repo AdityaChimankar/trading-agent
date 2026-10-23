@@ -126,6 +126,8 @@ class ExecutionSettings(BaseSettings):
     slippage_bps: float = Field(default=5.0, ge=0, le=100)
     product: Literal["MIS", "CNC"] = "MIS"
     # Never take more than this share of a stock's average traded value per bar.
+    # Also cap at this share of the forecast volume still to trade today.
+    max_remaining_volume_pct: float = Field(default=0.05, gt=0, le=1)
     max_participation_pct: float = Field(default=0.01, gt=0, le=0.25)
 
 

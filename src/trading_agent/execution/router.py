@@ -185,6 +185,11 @@ class OrderRouter:
             raise HTTPException(409, (
                 f"Size INR {quantity * price:,.0f} exceeds {profile['participation_pct']:.2f}% of "
                 f"{symbol}'s average daily traded value (max {profile['max_quantity']} shares)"))
+        remaining = profile.get("max_quantity_remaining")
+        if remaining is not None and quantity > remaining:
+            raise HTTPException(409, (
+                f"{quantity} shares exceeds {profile['remaining_participation_pct']:.1f}% of {symbol}'s "
+                f"forecast remaining volume today (max {remaining} shares)"))
 
     async def exit_position(self, position_id: int, *, reason: str, price: float | None = None) -> dict:
         from trading_agent.api.routers.positions import close_position

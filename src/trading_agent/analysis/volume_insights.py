@@ -11,6 +11,13 @@ answers three questions the price-only signals cannot:
 - How big? A position is capped at ``EXECUTION_MAX_PARTICIPATION_PCT`` of the
   stock's average daily traded value, so size never outgrows the market.
 
+Remaining-day volume is forecast from the intraday U-shape: the median share
+of a session's volume traded by this minute over prior sessions, blended with
+today's pace (Yvaine-Zhang's "deterministic blend"). The blend weight grows with
+the share of the day already traded, so the forecast leans on history at the
+open and on today's pace later. ``evaluate_volume_forecast`` measures it out of
+sample against two baselines before anyone relies on it.
+
 These are recommendations and filters, not a backtested signal.
 """
 
@@ -28,6 +35,9 @@ IST = ZoneInfo("Asia/Kolkata")
 LOOKBACK_SESSIONS = 20
 CRORE = 1e7
 TIERS = [(100 * CRORE, "high"), (10 * CRORE, "medium"), (1 * CRORE, "low")]
+SESSION_OPEN, SESSION_CLOSE = 9 * 60 + 15, 15 * 60 + 30
+MIN_FORECAST_SESSIONS = 5
+CHECKPOINTS = (60, 165, 285)  # minutes after 09:15: 10:15, 12:00, 14:00
 
 
 def liquidity_tier(avg_daily_value: float) -> str:
@@ -35,6 +45,78 @@ def liquidity_tier(avg_daily_value: float) -> str:
         if avg_daily_value >= floor:
             return name
     return "illiquid"
+
+
+def forecast_day_volume(prior: pd.DataFrame, today_cum: float, now_minute: int) -> dict | None:
+    """Full-session volume forecast at ``now_minute`` from prior sessions' U-shape.
+
+    ``prior`` has session/minute/volume columns; minutes are IST minutes of day,
+    with each bar labelled by its start, the same convention as ``today_cum``.
+    """
+    totals = prior.groupby("session")["volume"].sum()
+    totals = totals[totals > 0]
+    if len(totals) < MIN_FORECAST_SESSIONS:
+        return None
+    upto = prior[prior["minute"] <= now_minute].groupby("session")["volume"].sum()
+    share = float(np.median((upto.reindex(totals.index, fill_value=0) / totals).clip(0, 1)))
+    average = float(totals.mean())
+    pace = today_cum / share if share > 0 else average
+    # Trust today's pace more as the day fills in. sqrt(share) beat share and 1.0 at
+    # 10:15, 12:00 and 14:00 on 15 stored NSE symbols (~3,000 sessions, 2026-10-24).
+    weight = share ** 0.5
+    remaining = max(0.0, (1 - share) * (weight * pace + (1 - weight) * average))
+    return {"expected_share_traded": share, "average_day_volume": average,
+            "forecast_day_volume": today_cum + remaining, "forecast_remaining_volume": remaining}
+
+
+def evaluate_volume_forecast(frame: pd.DataFrame, checkpoints: tuple[int, ...] = CHECKPOINTS) -> dict:
+    """Out-of-sample error of the full-day volume forecast against two baselines.
+
+    For every complete session with enough earlier sessions, forecast its total
+    at each checkpoint using only earlier sessions and that session's bars up to
+    the checkpoint. Baselines: the flat prior-session average ("average") and
+    today's straight-line pace ("pace"). Errors are absolute percentage errors.
+    """
+    if frame is None or frame.empty:
+        return {"status": "insufficient_history", "sessions_evaluated": 0}
+    df = frame[["timestamp", "volume"]].copy()
+    local = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(IST)
+    df["session"], df["minute"] = local.dt.date, local.dt.hour * 60 + local.dt.minute
+    sessions = sorted(df["session"].unique())
+    errors = {c: {"blend": [], "average": [], "pace": []} for c in checkpoints}
+    evaluated = 0
+    for i, session in enumerate(sessions):
+        today = df[df["session"] == session]
+        if i < MIN_FORECAST_SESSIONS or today["minute"].max() < SESSION_CLOSE - 5:
+            continue  # need history, and a complete session to know the actual total
+        actual = float(today["volume"].sum())
+        if actual <= 0:
+            continue
+        prior = df[df["session"].isin(sessions[max(0, i - LOOKBACK_SESSIONS):i])]
+        evaluated += 1
+        for c in checkpoints:
+            minute = SESSION_OPEN + c
+            cum = float(today.loc[today["minute"] < minute, "volume"].sum())
+            forecast = forecast_day_volume(prior, cum, minute - 1)
+            if forecast is None:
+                continue
+            pace = cum * (SESSION_CLOSE - SESSION_OPEN) / c
+            for name, value in (("blend", forecast["forecast_day_volume"]),
+                                ("average", forecast["average_day_volume"]), ("pace", pace)):
+                errors[c][name].append(abs(value - actual) / actual * 100)
+    if not evaluated:
+        return {"status": "insufficient_history", "sessions_evaluated": 0,
+                "required_sessions": MIN_FORECAST_SESSIONS + 1}
+    table = []
+    for c in checkpoints:
+        row = {"minutes_after_open": c, "samples": len(errors[c]["blend"])}
+        row.update({f"{k}_mape_pct": round(float(np.mean(v)), 2) if v else None for k, v in errors[c].items()})
+        table.append(row)
+    blend = [r["blend_mape_pct"] for r in table if r["blend_mape_pct"] is not None]
+    rivals = [min(x for x in (r["average_mape_pct"], r["pace_mape_pct"]) if x is not None)
+              for r in table if r["blend_mape_pct"] is not None]
+    return {"status": "completed", "sessions_evaluated": evaluated, "checkpoints": table,
+            "beats_baselines": bool(blend) and all(b < r for b, r in zip(blend, rivals, strict=True))}
 
 
 def volume_profile(frame: pd.DataFrame, symbol: str = "") -> dict | None:
@@ -90,6 +172,8 @@ def volume_profile(frame: pd.DataFrame, symbol: str = "") -> dict | None:
 
     if rvol is not None and len(prior_cum) < 5:
         why += f" (only {len(prior_cum)} prior session(s); RVOL is unreliable)"
+    forecast = forecast_day_volume(prior, today_cum, now_minute)
+    remaining_cap = get_settings().execution.max_remaining_volume_pct
 
     return {
         "symbol": symbol, "as_of": pd.Timestamp(df["timestamp"].iloc[-1]).isoformat(),
@@ -103,6 +187,12 @@ def volume_profile(frame: pd.DataFrame, symbol: str = "") -> dict | None:
         "participation_pct": participation * 100,
         "sessions_compared": int(len(prior_cum)),
         "recommendation": call, "reason": why,
+        "expected_share_traded": None if forecast is None else round(forecast["expected_share_traded"], 4),
+        "forecast_day_volume": None if forecast is None else round(forecast["forecast_day_volume"]),
+        "forecast_remaining_volume": None if forecast is None else round(forecast["forecast_remaining_volume"]),
+        "max_quantity_remaining": None if forecast is None
+        else int(remaining_cap * forecast["forecast_remaining_volume"]),
+        "remaining_participation_pct": remaining_cap * 100,
     }
 
 

@@ -63,6 +63,23 @@ The **volume board** takes the strongest directional scan names and compares tod
 
 The board also shows liquidity tier, the maximum quantity under the participation cap, and whether the volume call confirms or contradicts the scan. With fewer than five prior sessions, RVOL is marked unreliable. These are rules of thumb, not a backtested signal. A single symbol is available at `GET /api/v1/analytics/volume/{symbol}`.
 
+**Volume forecast.** Each volume-board row also forecasts how much volume is still to trade today. It uses the stock's intraday U-shape: the median share of a session's volume normally traded by this minute, taken over the previous 20 sessions. That profile is blended with today's own pace, and the weight on today's pace grows as the day fills in. The router refuses entries above `EXECUTION_MAX_REMAINING_VOLUME_PCT` (5%) of that forecast. Check how well it works for a symbol with `GET /api/v1/analytics/volume/{symbol}/forecast-check`. That endpoint replays every complete session out of sample and reports the mean absolute percentage error at 10:15, 12:00 and 14:00. It compares the error against two baselines: the flat 20-session average, and today's straight-line pace.
+
+On 15 large NSE symbols (about 3,000 sessions, checked on 2026-10-24), the median errors were 27% / 19% / 12% against 37% / 20% / 17% for the better baseline. The weighting was chosen on that same data, so treat it as in-sample.
+
+**Cross-sectional ranking (research).** This is adapted from Ghosh, Neufeld & Sahoo (2021). Every session, a random forest ranks the universe (default `symbols_nifty500_plus.txt`) by the probability that a stock's open-to-close return beats the day's median. The strategy buys the top `k` at the open, shorts the bottom `k`, and closes everything at the close. Features are lagged open-to-close, close-to-close and overnight returns, all known at the open. The walk-forward retrains every 20 sessions on the previous 120 and is compared after `cost_bps` (15 bps per round trip, including slippage) with random picks.
+
+The research gate needs at least 60 test days, a positive net mean, a t-stat of at least 2, and a result better than random picks. Only when it passes does the report publish a long/short list for the latest session. The list is not an order and does not feed the scanner.
+
+Run it from **Analytics → Run evaluation** or `python -m trading_agent.research.cross_sectional`. Daily bars come from stored intraday candles, and sessions without a 09:15 bar or a closing bar are skipped. The paper's longest lag is 240 days; `--max-lag 20` is the default because most stored history is shorter. Survivorship bias (today's watchlist omits delisted stocks) makes results look better than reality.
+
+**Opening-range breakout and Nifty gap regime.** Strategy Lab (`trading-agent optimize strategy-lab SYMBOL` or `POST /api/v1/strategy-lab/compare`) adds two profiles:
+
+- `orb`: the first candle close beyond the 09:15–09:30 range, once per side per session. A session without its 09:15 bar has no range.
+- `orb_gap`: the same breakout filtered by the Nifty 50 opening gap. A gap up of more than +0.2% takes only shorts, a gap down of more than −0.2% only longs, and a flat open both.
+
+`orb_gap` needs index candles: `trading-agent ingest NIFTY50 --interval minute --days 60` (`BANKNIFTY` also works). Without them the profile is listed under `skipped_profiles`. Both profiles use the shared bracket replay (ATR stop, reward/risk target, costs), so they are compared like for like with the existing profiles and the unconditional baselines. They remain exploratory hypotheses.
+
 The **ML drift monitor** compares logged live model inputs with a training-period baseline, using PSI and KS per feature. A feature is `warn` above `MONITOR_PSI_WARN` and `drift` above `MONITOR_PSI_DRIFT`. When `MONITOR_DRIFT_FEATURES_TO_FALLBACK` features drift, ML is withdrawn: the research scan loads `models/ml_model.previous.joblib` if present, otherwise ML is unavailable and Rules + ML mode holds. **Restore ML** clears the fallback.
 
 ```bash

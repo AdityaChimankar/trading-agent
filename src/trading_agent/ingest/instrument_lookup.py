@@ -14,6 +14,12 @@ from trading_agent.ingest.kite_auth import get_kite_auth
 
 logger = get_logger(__name__)
 
+# NSE indices stored under Parquet-safe keys. Kite's instrument dump lists them
+# in segment INDICES ("NIFTY 50", "NIFTY BANK"); these tokens are fixed by Kite.
+# Index candles carry no volume and are for market-regime context, never orders.
+INDEX_TOKENS = {"NIFTY50": 256265, "BANKNIFTY": 260105}
+
+
 class InstrumentLookup:
     """NSE instrument lookup and symbol resolution."""
 
@@ -108,13 +114,18 @@ class InstrumentLookup:
         logger.info("instruments_cached", path=str(self.cache_path))
 
     def get_token(self, symbol: str) -> int | None:
-        """Get instrument token for a symbol."""
+        """Get instrument token for a symbol (or an INDEX_TOKENS key)."""
+        if symbol in INDEX_TOKENS:
+            return INDEX_TOKENS[symbol]
         if not self._symbol_to_token:
             self.load()
         return self._symbol_to_token.get(symbol)
 
     def get_symbol(self, token: int) -> str | None:
         """Get symbol for an instrument token."""
+        for key, index_token in INDEX_TOKENS.items():
+            if token == index_token:
+                return key
         if not self._token_to_symbol:
             self.load()
         return self._token_to_symbol.get(token)

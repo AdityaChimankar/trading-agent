@@ -33,6 +33,33 @@ def _parse_utc_timestamps(values: pd.Series) -> pd.Series:
     return pd.to_datetime(values, utc=True, format="mixed")
 
 
+_OFFSET_SUFFIX = r"(?:Z|[+-]\d{2}:?\d{2})$"
+
+
+def _parse_stored_timestamps(values: pd.Series) -> pd.Series:
+    """Parse timestamps read back from candle files.
+
+    Every current write is tz-aware UTC (``write_candles``). Files from the old
+    pipeline hold naive wall-clock strings in IST, its "canonical naive IST
+    format" (scripts/migrate_legacy_timestamps.py). Reading those as UTC moved
+    each legacy session 5h30m late and let a candle appear twice once newer
+    files held the same instant. So stored values without an offset are IST;
+    values with an offset keep it. Nothing is rewritten on disk.
+    """
+    if isinstance(values.dtype, pd.DatetimeTZDtype):
+        return pd.to_datetime(values, utc=True)
+    if pd.api.types.is_datetime64_any_dtype(values.dtype):
+        return values.dt.tz_localize("Asia/Kolkata").dt.tz_convert("UTC")
+    text = values.astype("string")
+    aware = text.str.contains(_OFFSET_SUFFIX, regex=True).fillna(False).astype(bool)
+    parts = []
+    if aware.any():
+        parts.append(pd.to_datetime(text[aware], utc=True, format="mixed"))
+    if (~aware).any():
+        parts.append(pd.to_datetime(text[~aware], format="mixed").dt.tz_localize("Asia/Kolkata").dt.tz_convert("UTC"))
+    return pd.concat(parts).sort_index().astype("datetime64[ns, UTC]")
+
+
 class ParquetStore:
     """Partitioned Parquet storage for candle data."""
 
@@ -72,7 +99,7 @@ class ParquetStore:
         frames = []
         for file in sorted(files, key=lambda p: (p.stat().st_mtime_ns, p.name)):
             frame = pq.ParquetFile(file).read().to_pandas()
-            frame["timestamp"] = _parse_utc_timestamps(frame["timestamp"])
+            frame["timestamp"] = _parse_stored_timestamps(frame["timestamp"])
             frames.append(frame)
         if not frames:
             return pd.DataFrame()

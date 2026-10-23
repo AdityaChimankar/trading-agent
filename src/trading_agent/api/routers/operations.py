@@ -197,3 +197,59 @@ def drift_clear():
     from trading_agent.strategy.model_monitoring import clear_fallback
 
     return clear_fallback()
+
+
+@router.get("/analytics/volume/{symbol}/forecast-check")
+async def volume_forecast_check(symbol: str, interval: Literal["minute", "5minute"] = "minute"):
+    """Out-of-sample error of the U-shape volume forecast against flat-average and pace baselines."""
+    from datetime import UTC, datetime
+
+    from fastapi import HTTPException
+
+    from trading_agent.analysis.research_engine import completed_frame
+    from trading_agent.analysis.research_news import news_path
+    from trading_agent.analysis.volume_insights import evaluate_volume_forecast
+    from trading_agent.storage.parquet_store import get_parquet_store
+
+    symbol = symbol.strip().upper()
+    try:
+        news_path(symbol)
+    except ValueError as error:
+        raise HTTPException(422, "Invalid symbol") from error
+
+    def check():
+        frame = completed_frame(get_parquet_store(), symbol, interval, datetime.now(UTC))
+        return evaluate_volume_forecast(frame)
+
+    return jsonable({"symbol": symbol, "interval": interval, **await run_in_threadpool(check)})
+
+
+class RankingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    interval: Literal["minute", "5minute", "15minute"] = "5minute"
+    max_lag: int = Field(default=20, ge=1, le=240)
+    train_days: int = Field(default=120, ge=20, le=1000)
+    retrain_days: int = Field(default=20, ge=1, le=250)
+    top_k: int = Field(default=10, ge=1, le=50)
+    cost_bps: float = Field(default=15.0, ge=0, le=200, allow_inf_nan=False)
+
+
+@router.get("/analytics/cross-sectional")
+def cross_sectional_status():
+    from trading_agent.research.cross_sectional import get_job, read_report
+
+    return jsonable({"job": get_job().state, "report": read_report()})
+
+
+@router.post("/analytics/cross-sectional/run", status_code=202)
+def cross_sectional_run(payload: RankingRequest | None = None):
+    from fastapi import HTTPException
+
+    from trading_agent.research.cross_sectional import RankConfig, get_job
+
+    payload = payload or RankingRequest()
+    config = RankConfig(max_lag=payload.max_lag, train_days=payload.train_days,
+                        retrain_days=payload.retrain_days, top_k=payload.top_k, cost_bps=payload.cost_bps)
+    if not get_job().start(interval=payload.interval, config=config):
+        raise HTTPException(409, "A cross-sectional evaluation is already running")
+    return {"started": True}

@@ -82,3 +82,18 @@ def test_filters_do_not_resurrect_superseded_candles(tmp_path):
     store.write_candles(candles(n=1, close=100), "TEST")
     store.write_candles(candles(n=1, close=105), "TEST")
     assert store.read_candles("TEST", filters=[("close", "==", 100)]).empty
+
+
+def test_naive_legacy_strings_are_read_as_ist_wall_clock(tmp_path):
+    # The old pipeline stored naive IST strings; current writes are aware UTC.
+    store = ParquetStore(tmp_path)
+    path = tmp_path / "candles" / "symbol=TEST" / "interval=minute"
+    path.mkdir(parents=True)
+    legacy = candles()
+    legacy["timestamp"] = ["2026-10-19T09:15:00", "2026-10-19T09:16:00"]
+    pq.write_table(pa.Table.from_pandas(legacy), path / "data.parquet")
+    # The same 09:16 IST candle re-written by the current pipeline must not duplicate.
+    store.write_candles(candles("2026-10-19T03:46:00Z", n=1, close=105), "TEST", "minute")
+    result = store.read_candles("TEST", "minute")
+    assert result["timestamp"].tolist() == [pd.Timestamp("2026-10-19T03:45:00Z"), pd.Timestamp("2026-10-19T03:46:00Z")]
+    assert result["close"].tolist() == [100, 105]

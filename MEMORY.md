@@ -15,11 +15,11 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-24 (external-repo adaptations). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
+Last updated: 2026-10-24 (volume forecast, ORB/gap regime, cross-sectional ranking, legacy timestamp fix). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
-**Verified** (2026-10-24, after the external-repo adaptations): 493 Python tests passed, repo-wide Ruff passed, (`PYTHONPATH=src`), both offline browser smokes passed, and the frontend production build passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
+**Verified** (2026-10-24, after the volume/ORB/ranking work): 507 Python tests passed, repo-wide Ruff passed, frontend type-check and build passed, (`PYTHONPATH=src`), both offline browser smokes passed, and the frontend production build passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
 
 **Not verified:**
 
@@ -52,6 +52,9 @@ Keep paper mode until those are evidenced.
 | Execution | Zerodha intraday cost model | `execution/costs.py` |
 | Analytics | Net-of-cost performance, Sharpe/Sortino/drawdown/profit factor/expectancy/R, attribution | `analysis/performance.py` |
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
+| Analytics | U-shape remaining-volume forecast with out-of-sample check; router caps size at 5% of forecast remaining volume | `volume_insights.forecast_day_volume / evaluate_volume_forecast`, `/api/v1/analytics/volume/{s}/forecast-check` |
+| Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, research gate, long/short list only when passed | `research/cross_sectional.py`, `/api/v1/analytics/cross-sectional`, Analytics panel |
+| Research | Strategy Lab opening-range breakout and Nifty-gap-regime profiles; NIFTY50/BANKNIFTY index candles | `research/strategy_lab.py`, `ingest/instrument_lookup.INDEX_TOKENS` |
 | ML | PSI/KS drift monitor; withdraws ML (or loads `ml_model.previous.joblib`) on drift; daily 15:40 check | `strategy/model_monitoring.py` |
 | Validation | Vectorized backtest `--selftest` vs loop reference, walk-forward `--all`, lookahead and train/serve skew checks | `research/walk_forward_optimizer.py`, `strategy/session_features.py` |
 | UI | React + MUI: Dashboard, Research, Paper operations, Risk & execution, Analytics, Signal Pipeline, Transactions, News | `frontend/src/App.tsx`, `lib/router.ts` |
@@ -66,9 +69,9 @@ Keep paper mode until those are evidenced.
 | P0 | Build the drift baseline on real data | `python -m trading_agent.strategy.model_monitoring baseline` run; `/api/v1/analytics/drift` reports `ok`/`warn`, not "no baseline" |
 | P0 | Broker order lifecycle hardening | partial fills, rejects, cancels, reconnect replay and idempotent intent IDs covered by fault-injection tests |
 | P1 | Prospective paper evidence | ≥ 20 trading days of paper results so analytics stop warning about sample size |
-| P1 | Intraday volume forecast (U-shape profile blended with today's volume) | out-of-sample error beats the flat 20-session RVOL baseline; participation cap can use forecast remaining volume |
-| P1 | Nifty 50 index data + gap regime / opening-range breakout hypothesis | index candles ingested; Strategy Lab profile compared with baselines after costs |
-| P1 | Cross-sectional ranking model (Ghosh et al. 2021: lagged intraday/close/overnight returns, long top-k / short bottom-k) | trained as an outcome-model candidate on Nifty 500; passes existing gates; point-in-time universe caveat recorded |
+| P0 | Re-run research on corrected timestamps | earlier walk-forward, outcome-validation and outcome-model results were computed on history whose legacy sessions were shifted 5h30m; rerun before relying on any of them |
+| P1 | Ingest Nifty 50 candles and run `orb` / `orb_gap` in Strategy Lab | NIFTY50 minute candles stored; profiles compared with baselines after costs on several symbols |
+| P1 | Cross-sectional ranking on longer history | daily or intraday history long enough for `--max-lag 240`; point-in-time Nifty 500 membership to remove survivorship bias; prospective paper results |
 | P1 | Exchange holiday calendar | session gates and scheduler skip NSE holidays and special sessions |
 | P1 | Finish MUI conversion | remaining `.btn` and legacy markup in older pages replaced by MUI components |
 | P1 | Lint/type baselines | selected Ruff rules and type checks pass and become required CI gates |
@@ -93,6 +96,23 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-24: Volume forecast, opening-range breakout, cross-sectional ranking; legacy timestamp fix
+
+Built the three queued adaptations:
+
+- **Volume forecast:**
+  - The U-shape forecast blends the median share-by-minute profile with today's pace, weighted by the square root of the share already traded.
+  - On 15 large symbols (about 3,000 sessions) it beat both the flat-average and straight-line-pace baselines at 10:15, 12:00 and 14:00. The weight was chosen among three variants on that same data, so the result is in-sample.
+  - The router adds a 5% cap on forecast remaining volume.
+- **Strategy Lab:**
+  - New `orb` (09:15–09:30 range, first close beyond it) and `orb_gap` (filtered by the Nifty 50 opening gap, ±0.2%) profiles.
+  - NIFTY50 and BANKNIFTY index tokens are now downloadable.
+- **Cross-sectional ranking:**
+  - A walk-forward random-forest ranker with a random-pick baseline and a research gate.
+  - A long/short list is published only when the gate passes. Analytics has a panel and a Run button.
+
+Found and fixed a store-wide data bug. Legacy candle files (`data.parquet` from the old pipeline) hold naive IST strings, and the reader parsed them as UTC, so every legacy session appeared 5h30m late (14:45–21:00 IST). A scan of the store found only two formats, naive strings and aware UTC, so the reader now reads naive stored values as IST. Nothing is rewritten on disk. RELIANCE's 253 minute sessions now fall within 09:15–15:30. **Any earlier result computed on long history (walk-forward, outcome validation, the failed outcome-model candidate) used shifted sessions and must be rerun.** Recent scans used recent, correctly labelled candles.
 
 ### 2026-10-24: Adaptations from external repositories
 

@@ -77,11 +77,12 @@ def strategy_lab(
     max_bars: int = typer.Option(5000, min=250, max=10000, help="Maximum completed local candles"),
 ):
     """Compare fixed profiles and unconditional baselines; exploratory only."""
-    from trading_agent.research.strategy_lab import compare_profiles, read_completed
+    from trading_agent.research.strategy_lab import INDEX_KEY, MAX_BARS, compare_profiles, read_completed
 
     symbol = symbol.strip().upper()
     try:
-        result = compare_profiles(read_completed(symbol, interval, max_bars), symbol, interval)
+        result = compare_profiles(read_completed(symbol, interval, max_bars), symbol, interval,
+                                  index_frame=read_completed(INDEX_KEY, interval, MAX_BARS))
     except ValueError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=1) from error
@@ -94,6 +95,8 @@ def strategy_lab(
         mean = metrics["mean_net_return_pct"]
         mean_label = "n/a" if mean is None else f"{mean:.4f}%"
         typer.echo(f"{profile['label']}: {metrics['trades']} trades | Mean net return: {mean_label}")
+    for skipped in result["skipped_profiles"]:
+        typer.echo(f"Skipped {skipped['id']}: {skipped['reason']}")
     typer.echo(result["limitations"])
 
 
