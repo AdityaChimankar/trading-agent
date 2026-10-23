@@ -16,6 +16,7 @@ import type {
   PositionStatus,
   RankingsResponse,
   SignalRow,
+  TechnicalsResponse,
   SizingResponse,
   TransactionsResponse,
   WatchlistResponse,
@@ -118,6 +119,15 @@ export function usePatterns(symbol: string | null) {
   return useQuery({
     queryKey: ['patterns', symbol],
     queryFn: () => apiGet<{ patterns: string[]; bias: string }>(`/api/symbols/${symbol}/patterns`),
+    enabled: Boolean(symbol),
+    refetchInterval: REFRESH.patterns,
+  })
+}
+
+export function useTechnicals(symbol: string | null) {
+  return useQuery({
+    queryKey: ['technicals', symbol],
+    queryFn: () => apiGet<TechnicalsResponse>(`/api/symbols/${symbol}/technicals`),
     enabled: Boolean(symbol),
     refetchInterval: REFRESH.patterns,
   })

@@ -274,7 +274,10 @@ async def wallet():
         price = s["current_price"]
         sign = 1 if p["action"] == "BUY" else -1
         qty = p["position_size"]
-        scenario = (lambda level: None if level is None else round(sign * (level - p["entry_price"]) * qty, 2))
+
+        def scenario(level, sign=sign, qty=qty, entry=p["entry_price"]):
+            return None if level is None else round(sign * (level - entry) * qty, 2)
+
         open_rows.append({
             "position_id": p["id"], "symbol": p["symbol"], "action": p["action"], "position_size": qty,
             "entry_price": p["entry_price"], "current_price": price, "current_value": s["current_value"],
@@ -338,8 +341,12 @@ async def transactions(limit: int = Query(200, ge=1, le=2000)):
     wins, losses = [x for x in pnls if x > 0], [x for x in pnls if x <= 0]
     best = max(trades, key=lambda t: t["realized_pnl_rupees"], default=None)
     worst = min(trades, key=lambda t: t["realized_pnl_rupees"], default=None)
-    brief = (lambda t: None if t is None else {"symbol": t["symbol"], "realized_pnl_rupees": t["realized_pnl_rupees"],
-                                               "exit_at": t["exit_at"]})
+
+    def brief(t):
+        if t is None:
+            return None
+        return {"symbol": t["symbol"], "realized_pnl_rupees": t["realized_pnl_rupees"], "exit_at": t["exit_at"]}
+
     exits = [t["exit_at"] for t in trades if t["exit_at"]]
     return to_jsonable({
         "summary": {
@@ -473,6 +480,19 @@ async def patterns(symbol: str, interval: str = Query(DEFAULT_INTERVAL)):
     last = df.iloc[-1]
     names = [n for n in ("doji", "hammer", "bullish_engulfing", "bearish_engulfing") if bool(last[n])]
     return {"patterns": names, "bias": ["neutral", "bullish", "bearish"][int(last.pattern_code)]}
+
+
+@router.get("/symbols/{symbol}/technicals")
+async def technicals(symbol: str, interval: str = Query(DEFAULT_INTERVAL)):
+    from trading_agent.analysis.research_engine import INTERVAL_SECONDS
+    from trading_agent.analysis.technical_summary import summary_from_frame
+
+    symbol = _require_symbol(symbol)
+    if interval not in INTERVAL_SECONDS:
+        raise HTTPException(422, "Unsupported interval")
+    df =await run_in_threadpool(_research_frame, symbol, interval)
+    summary = summary_from_frame(symbol, interval, df) if df is not None else None
+    return to_jsonable(summary or {"symbol": symbol, "insufficient_data": True})
 
 
 @router.get("/symbols/{symbol}/sizing")

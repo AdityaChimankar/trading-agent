@@ -110,6 +110,8 @@ class PaperRiskSettings(BaseSettings):
     # testing; the kill switch and trade-count limit always apply.
     enforce_session: bool = True
     max_trades_per_day: int = Field(default=20, ge=1)
+    # At most one entry per symbol per IST day: no re-entry after a stop or target.
+    one_entry_per_symbol_per_day: bool = False
     entry_cutoff: str = Field(default="15:00", pattern=r"^\d{2}:\d{2}$")
     square_off_time: str = Field(default="15:15", pattern=r"^\d{2}:\d{2}$")
 

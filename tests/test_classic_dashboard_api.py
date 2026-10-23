@@ -157,6 +157,16 @@ def test_chart_and_patterns_use_research_frame(client):
     assert client.get("/api/symbols/AAA/patterns").json()["bias"] in {"neutral", "bullish", "bearish"}
 
 
+def test_technicals_include_vote_and_pivots(client):
+    assert client.get("/api/symbols/AAA/technicals").json()["insufficient_data"] is True
+    # 2,000 minutes reaches back into an earlier IST session, so pivots exist.
+    _write_candles(client.store, "AAA", 100, n=2000)
+    body = client.get("/api/symbols/AAA/technicals").json()
+    assert body["total"] == body["bullish_count"] + body["bearish_count"] + body["neutral_count"] > 0
+    assert body["pivots"]["pivot"] == pytest.approx((101 + 99 + 100) / 3, abs=0.01)
+    assert client.get("/api/symbols/AAA/technicals?interval=week").status_code == 422
+
+
 def test_invalid_symbol_rejected(client):
     assert client.get("/api/symbols/..%2Fetc/news").status_code in {404, 422}
     assert client.get("/api/symbols/bad$sym/sizing").status_code == 422

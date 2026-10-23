@@ -10,7 +10,7 @@ Project status, open work and decision history: [MEMORY.md](MEMORY.md).
 
 | Tab | What it is for |
 |---|---|
-| **Dashboard** | Classic view: watchlist sidebar with bias and contradictions, bullish/bearish Top Opportunity, symbol detail (chart, patterns, technical summary, sizing, news, rule/LLM/ML signals), wallet, position monitor, morning digest |
+| **Dashboard** | Classic view: watchlist sidebar with bias and contradictions, bullish/bearish Top Opportunity, symbol detail (chart, patterns, technical summary with floor pivots, sizing, news, rule/LLM/ML signals), wallet, position monitor, morning digest |
 | **Research** | Find → Inspect → Validate → Paper review workflow: full-watchlist scan, Plotly chart, walk-forward optimizer, trade-outcome validation, BUY/SELL outcome models |
 | **Paper operations** | Persistent paper book: open, monitor and close positions |
 | **Risk & execution** | Kill switch, square-off, session status, router orders, reconciliation, cost calculator, audit trail |
@@ -134,7 +134,7 @@ Every entry, whether from the dashboard, the paper book or the API, passes the s
 
 - Kill switch (persists across restarts; an unreadable state file blocks entries).
 - Session: no entries before 09:15, after `PAPER_ENTRY_CUTOFF` (15:00) or on weekends.
-- Daily trade cap (`PAPER_MAX_TRADES_PER_DAY`).
+- Daily trade cap (`PAPER_MAX_TRADES_PER_DAY`), and optionally one entry per symbol per day (`PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY`).
 - Portfolio exposure, stop risk, position count, single-name cap, realized daily loss and drawdown.
 - Participation cap: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value.
 
@@ -172,6 +172,7 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `PAPER_MAX_TRADES_PER_DAY` | `20` | Daily entry cap |
 | `PAPER_ENTRY_CUTOFF` / `PAPER_SQUARE_OFF_TIME` | `15:00` / `15:15` | IST session discipline |
 | `PAPER_ENFORCE_SESSION` | `true` | `false` disables time gates (tests); the trade cap still applies |
+| `PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY` | `false` | `true` blocks re-entering a symbol already traded today |
 | `EXECUTION_MODE` / `EXECUTION_LIVE_CONFIRMATION` | `paper` / empty | Live orders need both set |
 | `EXECUTION_SLIPPAGE_BPS` / `EXECUTION_PRODUCT` | `5` / `MIS` | Paper slippage; live product |
 | `EXECUTION_MAX_PARTICIPATION_PCT` | `0.01` | Share of average daily traded value |

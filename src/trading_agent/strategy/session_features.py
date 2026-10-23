@@ -120,13 +120,16 @@ def add_intraday_patterns(df: pd.DataFrame) -> pd.DataFrame:
 
     # Opening range
     opening_mask = (
-        df["is_opening_hour"] if "is_opening_hour" in df.columns else (df["minutes_from_open"] < 60)
+        df["is_opening_hour"] if "is_opening_hour" in df.columns
+        else (df["minutes_from_open"] >= 0) & (df["minutes_from_open"] < 60)
     )
     if opening_mask.any():
-        opening_high = (
-            df.loc[opening_mask].groupby(df["timestamp"].dt.date)["high"].transform("max")
-        )
-        opening_low = df.loc[opening_mask].groupby(df["timestamp"].dt.date)["low"].transform("min")
+        # Running extremes, so a bar inside the window sees only candles up to
+        # itself; later bars carry the completed range. A whole-window max here
+        # would leak the rest of the opening hour into earlier bars.
+        day = pd.to_datetime(df["timestamp"]).dt.date
+        opening_high = df["high"].where(opening_mask).groupby(day).cummax().groupby(day).ffill()
+        opening_low = df["low"].where(opening_mask).groupby(day).cummin().groupby(day).ffill()
         df["opening_range_high"] = opening_high
         df["opening_range_low"] = opening_low
         df["opening_range_size"] = (opening_high - opening_low) / opening_low * 100

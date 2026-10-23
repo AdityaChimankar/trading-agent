@@ -117,13 +117,13 @@ def release_kill_switch(by: str = "operator") -> dict:
 
 # --- session gates -----------------------------------------------------------------
 
-def entries_today(rows: list[dict], now: datetime | None = None) -> int:
-    """Positions opened on the current IST trading day (open or since closed)."""
+def entries_today(rows: list[dict], now: datetime | None = None, symbol: str | None = None) -> int:
+    """Positions opened on the current IST trading day (open or since closed), optionally for one symbol."""
     today = (now or datetime.now(UTC)).astimezone(IST).date()
     count = 0
     for row in rows:
         opened = row.get("opened_at")
-        if opened is None:
+        if opened is None or (symbol and str(row.get("symbol", "")).upper() != symbol.upper()):
             continue
         stamp = opened if isinstance(opened, datetime) else datetime.fromisoformat(str(opened))
         stamp = stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp
@@ -131,8 +131,8 @@ def entries_today(rows: list[dict], now: datetime | None = None) -> int:
     return count
 
 
-def entry_block_reason(rows: list[dict], now: datetime | None = None) -> str | None:
-    """Why a new entry is not allowed right now, or None if it is."""
+def entry_block_reason(rows: list[dict], now: datetime | None = None, symbol: str | None = None) -> str | None:
+    """Why a new entry (for ``symbol``, when given) is not allowed right now, or None if it is."""
     now = now or datetime.now(UTC)
     limits = get_settings().paper
     halt = halt_state()
@@ -148,6 +148,8 @@ def entry_block_reason(rows: list[dict], now: datetime | None = None) -> str | N
             return f"After the {limits.entry_cutoff} IST entry cutoff"
     if entries_today(rows, now) >= limits.max_trades_per_day:
         return f"Daily trade limit reached ({limits.max_trades_per_day})"
+    if symbol and limits.one_entry_per_symbol_per_day and entries_today(rows, now, symbol):
+        return f"{symbol.upper()} was already traded today (one entry per symbol per day)"
     return None
 
 

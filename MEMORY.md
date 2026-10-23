@@ -15,11 +15,11 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-24. Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
+Last updated: 2026-10-24 (external-repo adaptations). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
-**Verified** (2026-10-24, after the documentation cleanup): 487 Python tests passed (`PYTHONPATH=src`), both offline browser smokes passed, and the frontend production build passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
+**Verified** (2026-10-24, after the external-repo adaptations): 493 Python tests passed, repo-wide Ruff passed, (`PYTHONPATH=src`), both offline browser smokes passed, and the frontend production build passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
 
 **Not verified:**
 
@@ -42,12 +42,12 @@ Keep paper mode until those are evidenced.
 | Data | Pre-flight check (env, Kite, DB WAL, watchlist tokens, RSS, LLM) | `python -m trading_agent.scripts.validate_setup [--skip-llm]` |
 | Analysis | RSI, ATR, ADX, MACD, Stochastic, Williams %R, CCI, +DI/-DI | `core/quant_indicators.py` |
 | Analysis | Doji, hammer, engulfing, double top/bottom | `core/pattern_detection.py` |
-| Analysis | Groww-style technical summary | `analysis/technical_summary.py`, `GET /api/v1/symbols/{s}/technicals` |
+| Analysis | Groww-style technical summary and floor pivots (P, R1–R3, S1–S3 from the previous session), shown in the symbol view | `analysis/technical_summary.py`, `components/TechnicalsPanel.tsx`, `GET /api/symbols/{s}/technicals` |
 | Analysis | LLM headline sentiment through OpenRouter, rate limited, 429/5xx retry with `Retry-After` | `core/llm_client.py`, `analysis/research_news.py` |
 | Decisions | Rule agent is the validated path; LLM and ML run in parallel in separate tables and never override it | `strategy/`, `signals` / `llm_signals` / `ml_signals` |
 | Decisions | Full-universe research scan, watchlist bias, contradictions, Top Opportunity by conviction and room to S/R | `analysis/research_jobs.py`, `api/routers/legacy_ui.py` |
 | Risk | ATR stop/target/sizing, portfolio exposure/risk caps, realized daily-loss and drawdown gates | `risk/`, `risk/ledger_guard.py` |
-| Risk | Kill switch (persisted, fails closed), session gates (09:15 / 15:00 cutoff / weekends), trade cap, 15:15 square-off, JSONL audit | `risk/controls.py`, scheduler `square_off_cycle` |
+| Risk | Kill switch (persisted, fails closed), session gates (09:15 / 15:00 cutoff / weekends), trade cap, optional one entry per symbol per day, 15:15 square-off, JSONL audit | `risk/controls.py`, scheduler `square_off_cycle` |
 | Execution | Order router: risk checks before any order, paper fills with slippage, live Kite MARKET/MIS behind double opt-in, reconciliation | `execution/router.py`, `execution/reconcile.py` |
 | Execution | Zerodha intraday cost model | `execution/costs.py` |
 | Analytics | Net-of-cost performance, Sharpe/Sortino/drawdown/profit factor/expectancy/R, attribution | `analysis/performance.py` |
@@ -66,6 +66,9 @@ Keep paper mode until those are evidenced.
 | P0 | Build the drift baseline on real data | `python -m trading_agent.strategy.model_monitoring baseline` run; `/api/v1/analytics/drift` reports `ok`/`warn`, not "no baseline" |
 | P0 | Broker order lifecycle hardening | partial fills, rejects, cancels, reconnect replay and idempotent intent IDs covered by fault-injection tests |
 | P1 | Prospective paper evidence | ≥ 20 trading days of paper results so analytics stop warning about sample size |
+| P1 | Intraday volume forecast (U-shape profile blended with today's volume) | out-of-sample error beats the flat 20-session RVOL baseline; participation cap can use forecast remaining volume |
+| P1 | Nifty 50 index data + gap regime / opening-range breakout hypothesis | index candles ingested; Strategy Lab profile compared with baselines after costs |
+| P1 | Cross-sectional ranking model (Ghosh et al. 2021: lagged intraday/close/overnight returns, long top-k / short bottom-k) | trained as an outcome-model candidate on Nifty 500; passes existing gates; point-in-time universe caveat recorded |
 | P1 | Exchange holiday calendar | session gates and scheduler skip NSE holidays and special sessions |
 | P1 | Finish MUI conversion | remaining `.btn` and legacy markup in older pages replaced by MUI components |
 | P1 | Lint/type baselines | selected Ruff rules and type checks pass and become required CI gates |
@@ -90,6 +93,32 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-24: Adaptations from external repositories
+
+Reviewed five public intraday projects:
+
+- `arshadakl/intraday-trading-bot`: NSE, Angel One; gap plus 3-minute opening-range breakout, VWAP+RSI, pivots, cost calculator.
+- `pushpendughosh/Stock-market-forecasting`: LSTM/RF cross-sectional ranking, published paper.
+- `Yvaine-Zhang/Models-for-Intraday-Trading-Volume-Prediction`: U-shape, Kalman and ARIMA volume forecasts.
+- `wassupansh/Intraday-Trading-Navigating-the-Market-Waves`: single-stock notebook with FinBERT sentiment.
+- `GeorgeHigham/Intraday-Trading`: toy S&P strategies with no costs.
+
+Adopted now:
+
+- Classic floor pivots, added to the technical summary and shown in the symbol view. The technical summary was previously API-only.
+- An optional `PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY` re-entry block, applied to every entry path.
+
+Also fixed a latent lookahead in `add_intraday_patterns`: the opening range used a whole-hour max/min, so early bars saw later opening-hour prices. It now uses running extremes, and a regression test fails on the old code. No live path called it.
+
+Queued as hypotheses (see Open work): the volume forecast, the Nifty gap/opening-range strategy and the cross-sectional ranking model.
+
+Rejected:
+
+- arshadakl's "70% win rate" claim, which has no evidence behind it.
+- Their cost rates: our NSE rate (0.00297%) and GST base are more current.
+- wassupansh's 94% F1, which is likely leakage; FinBERT was skipped because the decision is OpenRouter only.
+- GeorgeHigham's strategies.
 
 ### 2026-10-24: Documentation and repository cleanup
 

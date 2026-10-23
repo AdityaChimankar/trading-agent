@@ -113,8 +113,8 @@ async def create_position(position: PositionCreate):
             raise HTTPException(status_code=503, detail="Paper ledger cannot be verified; new entries blocked") from error
         if not ledger["entries_allowed"]:
             raise HTTPException(status_code=409, detail=ledger["block_reason"])
-        # Kill switch, session window and daily trade count (risk/controls.py).
-        session_block = entry_block_reason([dict(row) for row in rows])
+        # Kill switch, session window, daily trade count, per-symbol re-entry (risk/controls.py).
+        session_block = entry_block_reason([dict(row) for row in rows], symbol=position.symbol)
         if session_block:
             raise HTTPException(status_code=409, detail=session_block)
         opened = ledger["positions"]

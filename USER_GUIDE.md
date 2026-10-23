@@ -21,6 +21,8 @@ The top bar has a tab per page and a searchable symbol picker that sets the symb
 | Transactions | Review the transaction history and strategy status |
 | News | Read headlines matched to the watchlist with cached sentiment |
 
+The symbol view's **Technical summary** shows a Groww-style vote across RSI, MACD, Stochastic, Williams %R, CCI, ADX/DI and moving averages. Next to it are classic floor pivots for today, calculated from the previous IST session's high, low and close: pivot = (H+L+C)/3, R1 = 2P−L, S1 = 2P−H, R2/S2 = P ± (H−L), R3 = H + 2(P−L), S3 = L − 2(H−P). The panel also shows the nearest pivot above and below the price. Both are context only. They never change the rule signal or the scan's room-to-target, and pivots need a completed previous session in stored candles (`GET /api/symbols/{symbol}/technicals`).
+
 The Dashboard digest is built in the background from the top 30 scan names and cached for 15 minutes. Run a research scan first; without one, the classic pages show empty states rather than invented rankings.
 
 ## Intraday risk controls and execution
@@ -29,7 +31,7 @@ All entry paths (Dashboard, Paper operations, `POST /api/v1/execution/enter`) us
 
 1. kill switch: **Risk & execution → Engage kill switch** writes `data/controls/kill_switch.json`, which survives restarts. An unreadable file blocks entries; **Resume trading** clears it;
 2. session: no entries before 09:15 IST, after `PAPER_ENTRY_CUTOFF` (15:00) or at weekends. `PAPER_ENFORCE_SESSION=false` disables only these time gates;
-3. the daily trade cap (`PAPER_MAX_TRADES_PER_DAY`);
+3. the daily trade cap (`PAPER_MAX_TRADES_PER_DAY`), and, when `PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY=true`, no second entry in a symbol already traded today (no re-entry after its stop or target);
 4. the participation cap: quantity × price must not exceed `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value;
 5. the paper-ledger limits inside one SQLite `BEGIN IMMEDIATE` transaction: duplicates, positions, exposure, stop risk, single-name cap, realized daily loss and drawdown.
 

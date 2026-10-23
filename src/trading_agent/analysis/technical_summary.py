@@ -464,9 +464,62 @@ def get_technical_summary(symbol: str, interval: str = "5minute", candle_limit: 
                           parquet_store=None) -> dict | None:
     """Groww-style technicals for ``symbol`` from stored candles."""
     store = parquet_store or get_parquet_store()
-    df = store.read_latest(symbol, interval, n=candle_limit)
-    votes = technical_votes(df) if not df.empty else None
+    # Pivots need the whole previous session, which can exceed candle_limit on minute data.
+    history = store.read_latest(symbol, interval, n=max(candle_limit, PIVOT_HISTORY_BARS))
+    return summary_from_frame(symbol, interval, history, candle_limit)
+
+
+PIVOT_HISTORY_BARS = 1000  # > two NSE sessions of minute candles (375 each)
+
+
+def summary_from_frame(symbol: str, interval: str, history: pd.DataFrame, candle_limit: int = 200) -> dict | None:
+    """Indicator vote over the last ``candle_limit`` candles plus session pivots."""
+    if history is None or history.empty:
+        return None
+    votes = technical_votes(history.tail(candle_limit).reset_index(drop=True))
     if votes is None:
         return None
     return {"symbol": symbol, "interval": interval,
-            "as_of": pd.Timestamp(df["timestamp"].iloc[-1]).isoformat(), **votes}
+            "as_of": pd.Timestamp(history["timestamp"].iloc[-1]).isoformat(), **votes,
+            "pivots": pivot_levels(history)}
+
+
+# ---------------------------------------------------------------------------
+# Classic floor pivots
+#
+# Reference levels for the current IST session from the previous session's
+# high, low and close. Like the vote above they are context, not a validated
+# signal, and they do not feed the research scan's room-to-target.
+# ---------------------------------------------------------------------------
+
+def pivot_levels(df: pd.DataFrame) -> dict | None:
+    """Pivot, R1-R3 and S1-S3 for the latest session in ``df`` (intraday or daily candles)."""
+    if df is None or df.empty:
+        return None
+    frame = df.assign(timestamp=pd.to_datetime(df["timestamp"], utc=True)).sort_values("timestamp")
+    sessions = frame["timestamp"].dt.tz_convert("Asia/Kolkata").dt.date.to_numpy()
+    current = sessions[-1]
+    earlier = sessions < current
+    if not earlier.any():
+        return None
+    previous = sessions[earlier].max()
+    prior = frame[sessions == previous]
+    high, low, close = float(prior["high"].max()), float(prior["low"].min()), float(prior["close"].iloc[-1])
+    if not (high > 0 and low > 0 and close > 0) or low > high:
+        return None
+    pivot = (high + low + close) / 3
+    levels = {
+        "pivot": pivot,
+        "r1": 2 * pivot - low, "r2": pivot + (high - low), "r3": high + 2 * (pivot - low),
+        "s1": 2 * pivot - high, "s2": pivot - (high - low), "s3": low - 2 * (high - pivot),
+    }
+    price = float(frame["close"].iloc[-1])
+    above = [v for v in levels.values() if v > price]
+    below = [v for v in levels.values() if v < price]
+    return {
+        "session": current.isoformat(), "based_on": previous.isoformat(),
+        "prev_high": high, "prev_low": low, "prev_close": close, "price": price,
+        **{k: round(v, 2) for k, v in levels.items()},
+        "nearest_resistance": round(min(above), 2) if above else None,
+        "nearest_support": round(max(below), 2) if below else None,
+    }
