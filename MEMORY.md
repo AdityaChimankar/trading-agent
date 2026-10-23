@@ -112,6 +112,8 @@ Built the three queued adaptations:
   - A walk-forward random-forest ranker with a random-pick baseline and a research gate.
   - A long/short list is published only when the gate passes. Analytics has a panel and a Run button.
 
+First real-data ranking run (2026-10-24, on corrected timestamps): 494 of 501 Nifty 500 symbols had data, and 228 sessions were usable from stored minute candles. Settings: lags 1–20, 120-day training window, top/bottom 10, 15 bps costs. Across 108 out-of-sample test days (2026-04-29 to 2026-10-01) the model book netted **+10.6 bps/day**, with a 55.6% hit rate, t-stat **1.95**, max drawdown 2.8 points, and 53.9% classifier accuracy. Random picks netted −15.2 bps/day, which is just the cost. **Research gate not passed** (t-stat < 2), so no list was published. This is promising but not significant, and it carries survivorship bias. Rerun as more history accrues and before any paper trial. (The random baseline averages 200 draws per day, so only its mean is meaningful; its hit rate and t-stat are not.)
+
 Found and fixed a store-wide data bug. Legacy candle files (`data.parquet` from the old pipeline) hold naive IST strings, and the reader parsed them as UTC, so every legacy session appeared 5h30m late (14:45–21:00 IST). A scan of the store found only two formats, naive strings and aware UTC, so the reader now reads naive stored values as IST. Nothing is rewritten on disk. RELIANCE's 253 minute sessions now fall within 09:15–15:30. **Any earlier result computed on long history (walk-forward, outcome validation, the failed outcome-model candidate) used shifted sessions and must be rerun.** Recent scans used recent, correctly labelled candles.
 
 ### 2026-10-24: Adaptations from external repositories
