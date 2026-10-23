@@ -221,7 +221,7 @@ def chart_payload(symbol, df, limit=200):
     return {
         "symbol": symbol, "insufficient_data": False,
         "candles": {k: view[k].tolist() for k in ("timestamp", "open", "high", "low", "close", "volume")},
-        "indicators": {k: view[k].tolist() for k in ("rsi", "adx", "atr", "ma20", "ma50")},
+        "indicators": {k: view[k].tolist() for k in ("rsi", "adx", "atr", "ma20", "ma50", "ema9", "ema21", "vwap")},
         "patterns": {k: view[k].tolist() for k in ("doji", "hammer", "bullish_engulfing", "bearish_engulfing")},
         "signal_markers": [
             {"timestamp": timestamp, "action": ["HOLD", "BUY", "SELL"][int(action)]}

@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from trading_agent.core.position_sizing import PositionSizingConfig
-from trading_agent.core.signals import SignalParams, evaluate_signals
+from trading_agent.core.signals import SignalParams, apply_ma_filter, evaluate_signals, ma_trend
 from trading_agent.research.trade_outcomes import TradePolicy, replay
 from trading_agent.storage.parquet_store import ParquetStore, get_parquet_store
 
@@ -27,6 +27,10 @@ PROFILES = (
     ("rule", "Confirmed patterns", "Existing RSI/ADX rules with confirmed candle/swing patterns."),
     ("trend", "Trend pullback", "MA20/MA50 trend, ADX >= 20 and RSI pullback."),
     ("breakout", "20-bar breakout", "Close beyond the prior 20-bar range with ADX >= 20."),
+    ("rule_ma", "Rules + EMA 9/21 trend filter",
+     "Existing rules, but BUY only while EMA9 > EMA21 and SELL only while EMA9 < EMA21."),
+    ("ema_cross", "EMA 9/21 crossover + VWAP",
+     "EMA9 crosses EMA21 with ADX >= 20, on the matching side of session VWAP."),
     ("orb", "Opening-range breakout",
      "First candle close beyond the completed 09:15-09:30 range, once per side per session."),
 )
@@ -162,6 +166,19 @@ def profile_actions(frame: pd.DataFrame, profile: str = "rule",
             raise ValueError("Signal parameters must be finite")
         return evaluate_signals(frame.rsi.to_numpy(), frame.adx.to_numpy(),
                                 frame.pattern_code.to_numpy(), params=selected)
+    if profile == "rule_ma":
+        rule = evaluate_signals(frame.rsi.to_numpy(), frame.adx.to_numpy(),
+                                frame.pattern_code.to_numpy(), params=params or SignalParams())
+        return apply_ma_filter(rule, ma_trend(frame.ema9.to_numpy(), frame.ema21.to_numpy()))
+    if profile == "ema_cross":
+        above = frame.ema9 > frame.ema21
+        crossed_up = above & ~above.shift(1, fill_value=True)
+        crossed_down = ~above & above.shift(1, fill_value=False)
+        actions = np.zeros(len(frame), dtype=np.int8)
+        strong = frame.adx >= 20
+        actions[(crossed_up & strong & (frame.close > frame.vwap)).to_numpy()] = 1
+        actions[(crossed_down & strong & (frame.close < frame.vwap)).to_numpy()] = 2
+        return actions
     if profile == "orb":
         return opening_range_actions(frame)
     if profile == "orb_gap":

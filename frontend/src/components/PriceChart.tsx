@@ -130,6 +130,21 @@ export default function PriceChart({ data }: { data: ChartResponse }) {
         xaxis: 'x',
         yaxis: 'y',
       },
+      ...([
+        ['ema9', 'EMA9', 'deepskyblue', 'legendonly'],
+        ['ema21', 'EMA21', 'gold', 'legendonly'],
+        ['vwap', 'Session VWAP', 'white', true],
+      ] as const).filter(([key]) => indicators[key]).map(([key, name, color, visible]) => ({
+        x,
+        y: indicators[key],
+        type: 'scatter',
+        mode: 'lines',
+        name,
+        visible,
+        line: { color, width: 1, dash: key === 'vwap' ? 'dot' : 'solid' },
+        xaxis: 'x',
+        yaxis: 'y',
+      })),
       {
         x: buys.xs,
         y: buys.ys,

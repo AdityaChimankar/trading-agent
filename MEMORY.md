@@ -54,6 +54,7 @@ Keep paper mode until those are evidenced.
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
 | Analytics | U-shape remaining-volume forecast with out-of-sample check; router caps size at 5% of forecast remaining volume | `volume_insights.forecast_day_volume / evaluate_volume_forecast`, `/api/v1/analytics/volume/{s}/forecast-check` |
 | Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, research gate, long/short list only when passed | `research/cross_sectional.py`, `/api/v1/analytics/cross-sectional`, Analytics panel |
+| Research | Strategy Lab moving-average profiles (`rule_ma` EMA9/21 filter on the rule, `ema_cross` EMA9/21 crossover + VWAP); EMA9, EMA21 and session VWAP on the chart | `core/signals.ma_trend / apply_ma_filter`, `research/strategy_lab.py`, `PriceChart.tsx` |
 | Research | Strategy Lab opening-range breakout and Nifty-gap-regime profiles; NIFTY50/BANKNIFTY index candles | `research/strategy_lab.py`, `ingest/instrument_lookup.INDEX_TOKENS` |
 | ML | PSI/KS drift monitor; withdraws ML (or loads `ml_model.previous.joblib`) on drift; daily 15:40 check | `strategy/model_monitoring.py` |
 | Validation | Vectorized backtest `--selftest` vs loop reference, walk-forward `--all`, lookahead and train/serve skew checks | `research/walk_forward_optimizer.py`, `strategy/session_features.py` |
@@ -96,6 +97,21 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-24: Moving averages in the rule path (tested, not adopted)
+
+The user asked whether moving averages should be added to the rule. Added EMA9, EMA21 and session VWAP to the shared feature frame and the chart, plus two Strategy Lab profiles: `rule_ma` (rule + EMA9/21 alignment) and `ema_cross` (crossover + ADX ≥ 20 + VWAP side).
+
+Tested on 20 large NSE symbols: newest 40% of up to 10,000 bars, next-open entry, 1.5 ATR stop, 2R target, 24 bars, 10 bps + 2×2 bps.
+
+- Gross per-trade results were within ±3 bps for every variant, including the unconditional baselines.
+- Net per-trade results ran from −12.4 to −14.7 bps on 1-minute bars and from −13.2 to −16.6 bps on 5-minute bars.
+- The filters removed 70–90% of trades for about 1 bp of change.
+- The strict "price above both EMAs" filter removed every signal, because the rule buys pullbacks.
+
+**Decision:** keep the live rule unchanged, and keep the profiles for research.
+
+**Lesson:** on these bars, costs (about 14 bps a round trip) dominate any entry filter. The lever is fewer, larger moves (longer holds or higher timeframes), not a better entry filter.
 
 ### 2026-10-24: Volume forecast, opening-range breakout, cross-sectional ranking; legacy timestamp fix
 

@@ -48,6 +48,26 @@ class SignalResult:
 DEFAULT_PARAMS = SignalParams()
 
 
+def ma_trend(ema_fast: NDArray[np.float64], ema_slow: NDArray[np.float64]) -> NDArray[np.int8]:
+    """+1 when the fast EMA is above the slow EMA, -1 below, 0 when equal or unknown.
+
+    Alignment only, not close > fast EMA: the rule buys pullbacks (RSI < 45), and
+    requiring price above both EMAs removed every rule signal on 20 NSE symbols.
+    """
+    return np.where(ema_fast > ema_slow, 1, np.where(ema_fast < ema_slow, -1, 0)).astype(np.int8)
+
+
+def apply_ma_filter(actions: NDArray[np.int8], trend: NDArray[np.int8]) -> NDArray[np.int8]:
+    """Keep BUYs only in an up-trend and SELLs only in a down-trend.
+
+    An optional filter on top of ``evaluate_signals``; the rule itself is unchanged.
+    """
+    filtered = actions.copy()
+    filtered[(actions == 1) & (trend != 1)] = 0
+    filtered[(actions == 2) & (trend != -1)] = 0
+    return filtered
+
+
 def evaluate_signals(
     rsi: NDArray[np.float64],
     adx: NDArray[np.float64],

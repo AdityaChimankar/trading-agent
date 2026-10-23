@@ -70,6 +70,13 @@ def prepare_research_frame(raw: pd.DataFrame) -> pd.DataFrame:
     df["volume_ratio"] = df.volume / df.volume.rolling(20).mean().replace(0, np.nan)
     df["ma20"], df["ma50"] = df.close.rolling(20).mean(), df.close.rolling(50).mean()
     df["dist_from_ma20"] = (df.close - df.ma20) / df.ma20
+    # Intraday trend context for the moving-average profiles. EMAs with adjust=False
+    # and a session-cumulative VWAP use only the current and earlier candles.
+    df["ema9"] = df.close.ewm(span=9, adjust=False).mean()
+    df["ema21"] = df.close.ewm(span=21, adjust=False).mean()
+    session = pd.to_datetime(df.timestamp, utc=True).dt.tz_convert("Asia/Kolkata").dt.date
+    traded = (df.high + df.low + df.close) / 3 * df.volume
+    df["vwap"] = traded.groupby(session).cumsum() / df.volume.groupby(session).cumsum().replace(0, np.nan)
     return df
 
 

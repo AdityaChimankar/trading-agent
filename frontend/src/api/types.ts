@@ -144,6 +144,9 @@ export interface IndicatorArrays {
   atr: (number | null)[]
   ma20: (number | null)[]
   ma50: (number | null)[]
+  ema9?: (number | null)[]
+  ema21?: (number | null)[]
+  vwap?: (number | null)[]
 }
 
 export interface PatternFlags {

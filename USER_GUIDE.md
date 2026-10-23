@@ -73,6 +73,19 @@ The research gate needs at least 60 test days, a positive net mean, a t-stat of 
 
 Run it from **Analytics → Run evaluation** or `python -m trading_agent.research.cross_sectional`. Daily bars come from stored intraday candles, and sessions without a 09:15 bar or a closing bar are skipped. The paper's longest lag is 240 days; `--max-lag 20` is the default because most stored history is shorter. Survivorship bias (today's watchlist omits delisted stocks) makes results look better than reality.
 
+**Moving averages.** The chart shows MA20 and MA50, plus EMA9, EMA21 and session VWAP (VWAP restarts at each 09:15). Click EMA9 or EMA21 in the legend to show them. Strategy Lab has two moving-average profiles:
+
+- `rule_ma`: the existing rule, keeping a BUY only while EMA9 > EMA21 and a SELL only while EMA9 < EMA21.
+- `ema_cross`: EMA9 crossing EMA21 with ADX ≥ 20, on the matching side of session VWAP.
+
+The live rule signal is unchanged. A test on 20 large NSE symbols (2026-10-24, newest 40% of the history, shared bracket policy) found no edge from moving averages on 1-minute or 5-minute bars:
+
+- Before costs, every variant, including the unconditional baselines, averaged between −2.6 and +1.6 bps per trade.
+- After 10 bps costs plus 2 bps slippage per fill, every variant lost 12–15 bps per trade.
+- The filters cut trades by 70–90% and changed the per-trade result by about 1 bp.
+
+Requiring price above both EMAs removed every rule signal, because the rule buys pullbacks (RSI < 45). That is why `rule_ma` uses EMA alignment only.
+
 **Opening-range breakout and Nifty gap regime.** Strategy Lab (`trading-agent optimize strategy-lab SYMBOL` or `POST /api/v1/strategy-lab/compare`) adds two profiles:
 
 - `orb`: the first candle close beyond the 09:15–09:30 range, once per side per session. A session without its 09:15 bar has no range.
