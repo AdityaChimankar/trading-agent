@@ -367,3 +367,106 @@ def generate_summary_text(summary: TechnicalSummary) -> str:
     )
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Groww-style "Technicals" vote
+#
+# A SCANNABLE SUMMARY, not a validated signal: an equal-weighted vote across
+# common indicators with no backtest behind the thresholds. Like the LLM and ML
+# agents it sits beside the walk-forward-validated rule signal and never
+# overrides it.
+#
+# Two conventions are deliberately mixed, as Groww does:
+#   - REVERSAL (RSI, Stochastic, Williams %R): oversold = Bullish.
+#   - MOMENTUM (MACD, CCI, ADX/DI, moving averages): direction continues.
+# ---------------------------------------------------------------------------
+
+# (min_net_score, label), net_score = bullish_count - bearish_count.
+VERDICT_BANDS = [
+    (5, "Strongly bullish"), (2, "Moderately bullish"),
+    (-1, "Neutral"),
+    (-4, "Moderately bearish"), (float("-inf"), "Strongly bearish"),
+]
+
+
+@dataclass(frozen=True)
+class IndicatorReading:
+    name: str
+    value: float
+    verdict: str  # "Bullish", "Bearish", or "Neutral"
+
+
+def verdict_label(net_score: int) -> str:
+    for threshold, label in VERDICT_BANDS:
+        if net_score >= threshold:
+            return label
+    return "Neutral"
+
+
+def technical_votes(df: pd.DataFrame) -> dict | None:
+    """Bullish/Neutral/Bearish counts and verdict for the last candle of ``df``."""
+    from trading_agent.core import quant_indicators as qi
+
+    if len(df) < 30:
+        return None
+    h = df["high"].to_numpy(dtype=np.float64)
+    lo = df["low"].to_numpy(dtype=np.float64)
+    c = df["close"].to_numpy(dtype=np.float64)
+    readings: list[IndicatorReading] = []
+
+    def add(name: str, value: float, verdict: str) -> None:
+        if np.isfinite(value):
+            readings.append(IndicatorReading(name, round(float(value), 2), verdict))
+
+    rsi = qi.rsi(c)[-1]
+    add("RSI (14)", rsi, "Bullish" if rsi < 30 else "Bearish" if rsi > 70 else "Neutral")
+
+    hist = qi.macd(c)[2][-1]
+    add("MACD (12,26,9)", hist, "Bullish" if hist > 0 else "Bearish" if hist < 0 else "Neutral")
+
+    k = qi.stochastic(h, lo, c)[0][-1]
+    add("Stochastic %K", k, "Bullish" if k < 20 else "Bearish" if k > 80 else "Neutral")
+
+    wr = qi.williams_r(h, lo, c)[-1]
+    add("Williams %R", wr, "Bullish" if wr < -80 else "Bearish" if wr > -20 else "Neutral")
+
+    cci = qi.cci(h, lo, c)[-1]
+    add("CCI (20)", cci, "Bullish" if cci > 100 else "Bearish" if cci < -100 else "Neutral")
+
+    plus_di, minus_di = (a[-1] for a in qi.directional_indicators(h, lo, c))
+    adx = qi.adx(h, lo, c)[-1]
+    if np.isfinite(plus_di) and np.isfinite(minus_di):
+        # No confirmed trend below ADX 20, so direction isn't trustworthy.
+        add("ADX/DI (14)", adx, "Neutral" if adx < 20 else "Bullish" if plus_di > minus_di else "Bearish")
+
+    ma = {p: qi.sma(c, p)[-1] for p in (20, 50)}
+    for period, value in ma.items():
+        add(f"Price vs MA{period}", value, "Bullish" if c[-1] > value else "Bearish")
+    if np.isfinite(ma[20]) and np.isfinite(ma[50]):
+        add("MA20 vs MA50", ma[20] - ma[50], "Bullish" if ma[20] > ma[50] else "Bearish")
+
+    if not readings:
+        return None
+    bullish = sum(r.verdict == "Bullish" for r in readings)
+    bearish = sum(r.verdict == "Bearish" for r in readings)
+    return {
+        "readings": [r.__dict__ for r in readings],
+        "bullish_count": bullish,
+        "bearish_count": bearish,
+        "neutral_count": len(readings) - bullish - bearish,
+        "total": len(readings),
+        "verdict": verdict_label(bullish - bearish),
+    }
+
+
+def get_technical_summary(symbol: str, interval: str = "5minute", candle_limit: int = 200,
+                          parquet_store=None) -> dict | None:
+    """Groww-style technicals for ``symbol`` from stored candles."""
+    store = parquet_store or get_parquet_store()
+    df = store.read_latest(symbol, interval, n=candle_limit)
+    votes = technical_votes(df) if not df.empty else None
+    if votes is None:
+        return None
+    return {"symbol": symbol, "interval": interval,
+            "as_of": pd.Timestamp(df["timestamp"].iloc[-1]).isoformat(), **votes}

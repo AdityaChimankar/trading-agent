@@ -351,3 +351,33 @@ def run_backtest(
     """Convenience function to run backtest."""
     engine = BacktestEngine(**kwargs)
     return engine.run(symbols, start_date, end_date, interval)
+
+
+def _symbol_trades(symbol: str, params: dict | None) -> list:
+    from trading_agent.core.signals import prepare_symbol_series, simulate_trades
+
+    prepared = prepare_symbol_series(symbol)
+    if prepared is None:
+        return []
+    prepared["symbol"] = symbol
+    return simulate_trades(prepared, params)
+
+
+def run_multi_backtest(
+    symbols: list[str],
+    params: dict | None = None,
+    parallel: bool = True,
+    max_workers: int = 4,
+) -> dict:
+    """Rule-signal backtest pooled across ``symbols`` with the given overrides."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    from trading_agent.core.signals import summarize
+
+    if parallel and len(symbols) > 1:
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            per_symbol = list(pool.map(_symbol_trades, symbols, [params] * len(symbols)))
+    else:
+        per_symbol = [_symbol_trades(s, params) for s in symbols]
+    trades = [t for symbol_trades in per_symbol for t in symbol_trades]
+    return summarize(f"{len(symbols)} symbols", trades)

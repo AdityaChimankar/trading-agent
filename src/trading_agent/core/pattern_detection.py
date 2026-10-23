@@ -57,6 +57,19 @@ def detect_single_candle_patterns(
     return hammers, bull_engulf, bear_engulf
 
 
+def detect_doji(
+    open_: NDArray[np.float64],
+    high: NDArray[np.float64],
+    low: NDArray[np.float64],
+    close: NDArray[np.float64],
+    body_ratio: float = 0.1,
+) -> NDArray[np.bool_]:
+    """Doji: body no more than ``body_ratio`` of the candle's range (indecision)."""
+    rng = high - low
+    body = np.abs(close - open_)
+    return (rng > 0) & (body <= body_ratio * rng)
+
+
 def find_swings(
     high: NDArray[np.float64],
     low: NDArray[np.float64],

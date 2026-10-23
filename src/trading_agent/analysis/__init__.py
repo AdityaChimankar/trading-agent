@@ -31,6 +31,8 @@ from trading_agent.analysis.technical_summary import (
     TechnicalAnalyzer,
     TechnicalSummary,
     generate_summary_text,
+    get_technical_summary,
+    technical_votes,
 )
 
 __all__ = [
@@ -52,6 +54,8 @@ __all__ = [
     "TechnicalSummary",
     "TechnicalAnalyzer",
     "generate_summary_text",
+    "get_technical_summary",
+    "technical_votes",
     # Sentiment
     "SentimentLabel",
     "SentimentScore",

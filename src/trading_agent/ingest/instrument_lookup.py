@@ -40,11 +40,32 @@ class InstrumentLookup:
                 except Exception as e:
                     logger.warning("instruments_cache_corrupt", error=str(e))
 
-        # Download fresh
-        self._df = self._download()
+        # Download fresh; a stale cache still beats no tokens when Kite is down
+        # (tokens for listed equities almost never change day to day).
+        try:
+            self._df = self._download()
+        except DataError:
+            if not self.cache_path.exists():
+                raise
+            logger.warning("instruments_using_stale_cache", path=str(self.cache_path))
+            self._df = pd.read_csv(self.cache_path, compression="gzip")
+            self._build_indexes()
+            return self._df
         self._build_indexes()
         self._save_cache()
         return self._df
+
+    def resolve(self, symbols: list[str]) -> tuple[dict[str, int], list[str]]:
+        """Map symbols to tokens; returns (resolved, unresolved)."""
+        resolved: dict[str, int] = {}
+        unresolved: list[str] = []
+        for symbol in symbols:
+            token = self.get_token(symbol)
+            if token:
+                resolved[symbol] = int(token)
+            else:
+                unresolved.append(symbol)
+        return resolved, unresolved
 
     def _download(self) -> pd.DataFrame:
         """Download instruments from Kite."""

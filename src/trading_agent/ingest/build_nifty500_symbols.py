@@ -4,13 +4,15 @@ Downloads NSE equity symbols from multiple sources:
 - Nifty 500, Nifty 100, Nifty 50 indices
 - Nifty Midcap 150, Smallcap 250
 
-Writes symbols.txt - one symbol per line, ready for instrument_lookup.py.
+Each symbol is resolved to its Kite instrument token automatically; symbols
+Kite can't trade (renamed, suspended, BE/SM series) are dropped and listed, so
+symbols.txt only holds tradeable names and nobody greps tokens by hand.
 
 Usage:
-  python -m ingest.build_nifty500_symbols           # Default: Nifty 500
-  python -m ingest.build_nifty500_symbols --full    # All NSE EQ series (2300+)
-  python -m ingest.build_nifty500_symbols --combined # Nifty 500 + Midcap 150 + Smallcap 250
-  python -m ingest.build_nifty500_symbols --index NIFTY100
+  python -m trading_agent.ingest.build_nifty500_symbols           # Default: Nifty 500
+  python -m trading_agent.ingest.build_nifty500_symbols --full    # All NSE EQ series (2300+)
+  python -m trading_agent.ingest.build_nifty500_symbols --combined # Nifty 500 + Midcap 150 + Smallcap 250
+  python -m trading_agent.ingest.build_nifty500_symbols --index NIFTY100
 """
 import csv
 import io
@@ -95,6 +97,14 @@ def fetch_symbols(mode: str = "NIFTY500", index: str = None) -> list:
         return fetch_index_symbols("NIFTY500")
 
 
+def resolve_tokens(symbols: list) -> tuple[list, list]:
+    """Keep symbols that have a Kite NSE EQ instrument token, in input order."""
+    from trading_agent.ingest.instrument_lookup import get_instrument_lookup
+
+    resolved, unresolved = get_instrument_lookup().resolve(symbols)
+    return [s for s in symbols if s in resolved], unresolved
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -102,6 +112,8 @@ if __name__ == "__main__":
     parser.add_argument("--full", action="store_true", help="All NSE EQ series (~2300 symbols)")
     parser.add_argument("--combined", action="store_true", help="Nifty 500 + Midcap 150 + Smallcap 250")
     parser.add_argument("--index", choices=list(INDEX_URLS.keys()), help="Specific index to fetch")
+    parser.add_argument("--no-resolve", action="store_true",
+                        help="Skip Kite token lookup (writes every downloaded symbol)")
     args = parser.parse_args()
     
     if args.full:
@@ -120,8 +132,13 @@ if __name__ == "__main__":
         print("NSE occasionally changes headers/URLs - download manually if needed.")
         raise SystemExit(1)
     
+    if not args.no_resolve:
+        symbols, unresolved = resolve_tokens(symbols)
+        if unresolved:
+            print(f"Dropped {len(unresolved)} symbol(s) with no NSE EQ instrument token: "
+                  f"{', '.join(unresolved[:20])}{' ...' if len(unresolved) > 20 else ''}")
+
     with open(SYMBOLS_TXT, "w") as f:
         f.write("\n".join(symbols))
-    
+
     print(f"Wrote {len(symbols)} symbols to {SYMBOLS_TXT.name}")
-    print("Next: python -m ingest.instrument_lookup symbols.txt")

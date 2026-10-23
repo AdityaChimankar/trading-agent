@@ -158,3 +158,163 @@ def get_session_stats(df: pd.DataFrame) -> dict:
             else 0,
         }
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Causal session/regime feature bundle ("when NOT to trade" inputs) and the
+# lookahead self-test. Every array at index i uses only candles <= i, so the
+# same features are valid in research and live (no train/serve skew).
+# ---------------------------------------------------------------------------
+
+CACHE_KEY = "_session_features"
+FEATURE_DEFAULTS = {
+    "vwap_slope_bars": 12,       # bars used to judge whether session VWAP is rising
+    "atr_pctile_window": 250,    # trailing window for the ATR percentile
+    "atr_pctile_min_periods": 60,
+    "volume_z_window": 20,
+    "htf_fast_bars": 48,         # index-space higher-timeframe proxies
+    "htf_slow_bars": 240,
+    "forward_window": 12,        # hold horizon the expected-move term scales to
+}
+
+
+def _clock_parts(timestamps) -> tuple[np.ndarray, np.ndarray, float]:
+    """(minute_of_day IST, day_index, bar_minutes). Unparseable minute -> -1."""
+    from zoneinfo import ZoneInfo
+
+    dt = pd.to_datetime(pd.Series(timestamps), format="mixed", utc=True, errors="coerce")
+    ist = dt.dt.tz_convert(ZoneInfo("Asia/Kolkata"))
+    minute = (ist.dt.hour * 60 + ist.dt.minute).astype("float64").fillna(-1.0).to_numpy()
+    day = pd.factorize(ist.dt.strftime("%Y-%m-%d").fillna(""))[0].astype(np.int32)
+    steps = dt.diff().dt.total_seconds().div(60)
+    steps = steps[(steps > 0) & (steps <= 60)]
+    bar_minutes = float(steps.median()) if len(steps) else 1.0
+    return minute, day, bar_minutes
+
+
+def _safe_ratio(num, den) -> np.ndarray:
+    """NaN (never 0/inf) where undefined, so downstream gates decline to fire."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.asarray(num, dtype=float) / np.asarray(den, dtype=float)
+    out[~np.isfinite(out)] = np.nan
+    return out
+
+
+def _group_cumsum(values: np.ndarray, groups: np.ndarray) -> np.ndarray:
+    return pd.DataFrame({"g": groups, "v": values}).groupby("g", sort=False)["v"].cumsum().to_numpy(float)
+
+
+def build(prepared: dict, params: dict | None = None) -> dict:
+    """Every session/regime feature array for one symbol, aligned to prepared["length"]."""
+    p = {**FEATURE_DEFAULTS, **(params or {})}
+    n = prepared["length"]
+    closes = np.asarray(prepared["closes"], dtype=float)
+    opens = np.asarray(prepared["opens"], dtype=float)
+    highs = np.asarray(prepared["highs"], dtype=float)
+    lows = np.asarray(prepared["lows"], dtype=float)
+    volumes = np.asarray(prepared["volumes"], dtype=float)
+    atrs = np.asarray(prepared["atrs"], dtype=float)
+    minute, day, bar_minutes = _clock_parts(prepared["timestamps"])
+
+    bars_into_day = pd.DataFrame({"day": day}).groupby("day").cumcount().to_numpy(dtype=float)
+    # From the CLOCK, never the day group's size: group size over the full
+    # series would leak how many candles the rest of the session holds.
+    bars_left = np.full(n, np.nan)
+    known = minute >= 0
+    bars_left[known] = np.maximum(0.0, np.ceil((MARKET_CLOSE - minute[known]) / bar_minutes))
+
+    typical = (highs + lows + closes) / 3.0
+    vwap = _safe_ratio(_group_cumsum(typical * volumes, day), _group_cumsum(volumes, day))
+    dist_vwap = _safe_ratio(closes - vwap, vwap)
+    slope_bars = int(p["vwap_slope_bars"])
+    vwap_slope = np.full(n, np.nan)
+    if n > slope_bars:  # explicit shift, never np.roll (which wraps the future in)
+        vwap_slope[slope_bars:] = _safe_ratio(vwap[slope_bars:] - vwap[:-slope_bars], vwap[:-slope_bars])
+
+    atr_pct = _safe_ratio(atrs, closes)
+    atr_pctile = (pd.Series(atr_pct)
+                  .rolling(p["atr_pctile_window"], min_periods=p["atr_pctile_min_periods"])
+                  .rank(pct=True).to_numpy(dtype=float))
+
+    w = p["volume_z_window"]
+    v_ma = pd.Series(volumes).rolling(w, min_periods=w).mean().to_numpy()
+    v_sd = pd.Series(volumes).rolling(w, min_periods=w).std(ddof=0).to_numpy()
+    volume_z = _safe_ratio(volumes - v_ma, v_sd)
+
+    htf = {}
+    for name, bars in (("htf_fast_ret", p["htf_fast_bars"]), ("htf_slow_ret", p["htf_slow_bars"])):
+        htf[name] = np.full(n, np.nan)
+        if n > bars:
+            htf[name][bars:] = closes[bars:] / closes[:-bars] - 1.0
+
+    prev_close = np.r_[np.nan, closes[:-1]]
+    gap = _safe_ratio(opens - prev_close, prev_close)
+    gap[bars_into_day != 0] = np.nan  # an intraday move is not a gap
+
+    return {
+        "minute_of_day": minute, "day_index": day.astype(float),
+        "bars_into_day": bars_into_day, "bars_left_in_day": bars_left,
+        "vwap": vwap, "dist_vwap": dist_vwap, "vwap_slope": vwap_slope,
+        "atr_pct": atr_pct, "atr_pctile": atr_pctile, "volume_z": volume_z,
+        **htf, "gap_pct": gap,
+        "expected_move": atr_pct * np.sqrt(p["forward_window"]),
+    }
+
+
+def features(prepared: dict, params: dict | None = None) -> dict:
+    """build() memoized on the symbol-scoped ``prepared`` dict."""
+    cached = prepared.get(CACHE_KEY)
+    if cached is None:
+        cached = prepared[CACHE_KEY] = build(prepared, params)
+    return cached
+
+
+def _prefix(prepared: dict, k: int) -> dict:
+    short = {key: (value[:k] if isinstance(value, np.ndarray) else value)
+             for key, value in prepared.items() if key != CACHE_KEY}
+    short["length"] = k
+    return short
+
+
+def verify_causal(prepared: dict, params: dict | None = None, fraction: float = 0.7) -> tuple[bool, list[str]]:
+    """Lookahead test: features over a truncated prefix must equal the full run's first k values.
+
+    Any centered window, full-series normalization or bfill changes index i's
+    value once later candles exist, so it fails here by construction.
+    Returns (ok, mismatched_feature_names).
+    """
+    k = int(prepared["length"] * fraction)
+    if k < 400:
+        return True, []  # too little history for a meaningful comparison
+    full = build(prepared, params)
+    truncated = build(_prefix(prepared, k), params)
+    mismatched = []
+    for name, values in truncated.items():
+        reference = full[name][:k]
+        same = np.isclose(values, reference, rtol=1e-9, atol=1e-12) | (np.isnan(values) & np.isnan(reference))
+        if not same.all():
+            mismatched.append(name)
+    return not mismatched, mismatched
+
+
+def verify_sanity(prepared: dict, params: dict | None = None) -> list[str]:
+    """Unit/scale checks a causally-correct but wrong feature would still pass."""
+    problems = []
+    bundle = build(prepared, params)
+    lows = np.asarray(prepared["lows"], dtype=float)
+    highs = np.asarray(prepared["highs"], dtype=float)
+    session = bundle["minute_of_day"]
+    in_session = (session >= MARKET_OPEN) & (session <= MARKET_CLOSE)
+    if not in_session.any():
+        problems.append("no candles inside NSE market hours 09:15-15:30 IST")
+    vwap = bundle["vwap"]
+    ok = np.isfinite(vwap)
+    if ok.any() and (vwap[ok].min() < lows.min() * 0.99 or vwap[ok].max() > highs.max() * 1.01):
+        problems.append("session VWAP falls outside the observed price range")
+    pctile = bundle["atr_pctile"][np.isfinite(bundle["atr_pctile"])]
+    if len(pctile) and (pctile.min() < 0 or pctile.max() > 1):
+        problems.append("atr_pctile outside [0, 1]")
+    for name in ("atr_pct", "expected_move", "dist_vwap"):
+        if np.isinf(bundle[name]).any():
+            problems.append(f"{name} contains inf")
+    return problems

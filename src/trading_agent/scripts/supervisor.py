@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Optional
 
 from trading_agent.core.logging_config import get_logger, setup_logging
-from trading_agent.core.shutdown import GracefulShutdown, register_shutdown_handler
 
 
 logger = get_logger(__name__)
@@ -141,12 +140,14 @@ class ProcessSupervisor:
         self._shutdown = False
 
     def register_shutdown(self) -> None:
-        """Register shutdown handlers."""
+        """Stop children cleanly on Ctrl+C / SIGTERM."""
 
-        def shutdown_handler():
+        def handler(signum, frame):
+            logger.info("supervisor_signal_received", signal=signum)
             self.shutdown()
 
-        register_shutdown_handler(shutdown_handler)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, handler)
 
     def start_all(self) -> None:
         """Start all supervised processes."""

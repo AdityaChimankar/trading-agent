@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Literal
 
 import numpy as np
@@ -19,13 +19,6 @@ SWING_ORDER = 5
 MAX_HOLD_CANDLES = 24
 SLIPPAGE = 0.0005
 MAX_WORKERS = 4
-DEFAULT_PARAMS = {
-    "rsi_oversold": 30,
-    "rsi_overbought": 70,
-    "adx_threshold": 20,
-    "pattern_confirm_buy_rsi": 45,
-    "pattern_confirm_sell_rsi": 55,
-}
 
 
 @dataclass(frozen=True)
@@ -207,8 +200,8 @@ def prepare_symbol_series(symbol: str, candle_limit: int = 20000) -> dict | None
 
 def simulate_trades(prepared: dict, params: dict | None = None) -> list:
     """Simulate trades using vectorized evaluation (matches original backtest.py interface)."""
-    if params is None:
-        params = DEFAULT_PARAMS
+    # DEFAULT_PARAMS is a SignalParams dataclass; callers may pass overrides as a dict.
+    params = {**asdict(DEFAULT_PARAMS), **(params or {})}
 
     n = prepared["length"]
     rsi = prepared["rsis"]
@@ -305,19 +298,11 @@ def summarize(label: str, trades: list) -> dict:
 
 
 def verify_fast_path_matches_reference(symbol: str = "RELIANCE", candle_limit: int = 2000) -> bool:
-    """Verify that fast path matches reference implementation."""
-    prepared = prepare_symbol_series(symbol, candle_limit)
-    if prepared is None:
-        return False
+    """Check the vectorized walk-forward path against the slow loop for ``symbol``.
 
-    # Fast path
-    fast_trades = simulate_trades(prepared)
+    Delegates to the walk-forward selftest rather than comparing the fast path
+    with itself. False when ``symbol`` has no stored history (nothing verified).
+    """
+    from trading_agent.research.walk_forward_optimizer import run_selftest
 
-    # Reference path (loop-based)
-    loop_trades = []
-    n = prepared["length"]
-    for i in range(LOOKBACK_MIN, n - FORWARD_WINDOW):
-        # This would need the loop implementation
-        pass
-
-    return True
+    return run_selftest([symbol], synthetic_fallback=False)

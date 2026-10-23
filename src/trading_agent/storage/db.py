@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    event,
     select,
 )
 from sqlalchemy.ext.asyncio import (
@@ -276,6 +277,22 @@ class Trade(Base):
     exit_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+def apply_sqlite_pragmas(conn) -> None:
+    """WAL lets the ticker writer, scheduler and API read/write concurrently
+    without "database is locked"; busy_timeout absorbs short write contention."""
+    cur = conn.cursor()
+    try:
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cur.close()
+
+
+def _sqlite_on_connect(dbapi_conn, _record) -> None:
+    apply_sqlite_pragmas(dbapi_conn)
+
+
 class Database:
     """Database manager."""
 
@@ -311,6 +328,10 @@ class Database:
             expire_on_commit=False,
         )
         self.sync_session_factory = sessionmaker(bind=self.sync_engine)
+
+        if self.url.startswith("sqlite"):
+            event.listen(self.sync_engine, "connect", _sqlite_on_connect)
+            event.listen(self.async_engine.sync_engine, "connect", _sqlite_on_connect)
 
     async def create_tables(self) -> None:
         """Create all tables."""
@@ -397,6 +418,7 @@ def init_db(db_path: str | None = None) -> None:
     path = str(db_path)
     
     conn = sqlite3.connect(path)
+    apply_sqlite_pragmas(conn)
     try:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS watchlist (
@@ -573,6 +595,7 @@ def get_connection():
     path = str(module_globals.get("DB_PATH", DB_PATH))
     
     conn = sqlite3.connect(path)
+    apply_sqlite_pragmas(conn)
     conn.row_factory = sqlite3.Row
     return conn
 

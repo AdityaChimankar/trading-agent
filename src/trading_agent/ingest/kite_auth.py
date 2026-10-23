@@ -150,6 +150,14 @@ def get_kite_auth(credentials: KiteCredentials | None = None) -> KiteAuth:
     return _auth
 
 
+def get_kite_client() -> KiteConnect:
+    """KiteConnect with the saved access token applied (raises if none saved)."""
+    auth = get_kite_auth()
+    if not auth.credentials.access_token and not auth.load_access_token():
+        raise AuthenticationError("No Kite access token. Run `trading-agent login` first.")
+    return auth.kite
+
+
 if __name__ == "__main__":
     """Manual login entry point."""
     import os

@@ -16,6 +16,14 @@ from trading_agent.core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Kite Connect has no news API, so headlines come from free market RSS feeds.
+DEFAULT_RSS_FEEDS = [
+    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+    "https://www.moneycontrol.com/rss/latestnews.xml",
+    "https://www.business-standard.com/rss/markets-106.rss",
+    "https://www.livemint.com/rss/markets",
+]
+
 
 @dataclass(frozen=True)
 class NewsArticle:
@@ -156,14 +164,7 @@ class NewsFetcher:
         """Fetch from RSS feeds."""
         cb = self.circuit_breakers["rss"]
 
-        default_feeds = [
-            "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-            "https://www.moneycontrol.com/rss/latestnews.xml",
-            "https://www.business-standard.com/rss/markets-106.rss",
-            "https://www.livemint.com/rss/markets",
-        ]
-
-        feeds = feeds or default_feeds
+        feeds = feeds or DEFAULT_RSS_FEEDS
         articles = []
 
         for feed_url in feeds:

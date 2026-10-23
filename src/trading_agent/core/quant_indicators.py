@@ -176,6 +176,57 @@ def stochastic(
     return k.to_numpy(), d.to_numpy()
 
 
+def williams_r(
+    high: NDArray[np.float64],
+    low: NDArray[np.float64],
+    close: NDArray[np.float64],
+    period: int = 14,
+) -> NDArray[np.float64]:
+    """Williams %R in [-100, 0]; below -80 oversold, above -20 overbought."""
+    if period <= 0:
+        raise ValueError("Period must be positive")
+    highest = pd.Series(high).rolling(period, min_periods=period).max()
+    lowest = pd.Series(low).rolling(period, min_periods=period).min()
+    return (-100 * (highest - close) / (highest - lowest).replace(0, np.nan)).to_numpy()
+
+
+def cci(
+    high: NDArray[np.float64],
+    low: NDArray[np.float64],
+    close: NDArray[np.float64],
+    period: int = 20,
+) -> NDArray[np.float64]:
+    """Commodity Channel Index (Lambert, 0.015 constant)."""
+    if period <= 0:
+        raise ValueError("Period must be positive")
+    typical = pd.Series((high + low + close) / 3)
+    mean = typical.rolling(period, min_periods=period).mean()
+    mean_dev = typical.rolling(period, min_periods=period).apply(
+        lambda w: np.mean(np.abs(w - w.mean())), raw=True
+    )
+    return ((typical - mean) / (0.015 * mean_dev.replace(0, np.nan))).to_numpy()
+
+
+def directional_indicators(
+    high: NDArray[np.float64],
+    low: NDArray[np.float64],
+    close: NDArray[np.float64],
+    period: int = 14,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """+DI and -DI (Wilder), the same smoothing adx() uses internally."""
+    if period <= 0:
+        raise ValueError("Period must be positive")
+    up_move = np.diff(high, prepend=high[0])
+    down_move = -np.diff(low, prepend=low[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    atr_series = pd.Series(true_range(high, low, close)).ewm(
+        alpha=1 / period, adjust=False, min_periods=1
+    ).mean().replace(0, np.nan)
+    smooth = lambda dm: pd.Series(dm).ewm(alpha=1 / period, adjust=False, min_periods=1).mean()  # noqa: E731
+    return (100 * smooth(plus_dm) / atr_series).to_numpy(), (100 * smooth(minus_dm) / atr_series).to_numpy()
+
+
 def donchian_channels(
     high: NDArray[np.float64],
     low: NDArray[np.float64],

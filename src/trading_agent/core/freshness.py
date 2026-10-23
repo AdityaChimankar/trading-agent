@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from threading import Lock
+from zoneinfo import ZoneInfo
 
 from trading_agent.core.logging_config import get_logger
 
@@ -196,3 +197,21 @@ def ingest_heartbeat() -> dict | None:
     """
     from trading_agent.ingest.heartbeat import read_heartbeat
     return read_heartbeat()
+
+
+# Legacy SQLite candle timestamps: naive IST, minute precision.
+IST = ZoneInfo("Asia/Kolkata")
+MINUTE_FMT = "%Y-%m-%dT%H:%M:00"
+
+
+def candle_timestamp(value) -> str:
+    """A candle timestamp in the legacy storage format (naive IST, minute precision).
+
+    Accepts tz-aware datetimes, naive ones, and already-formatted strings, and
+    returns the same string for the same instant either way.
+    """
+    if isinstance(value, str):
+        return value[:16] + ":00"
+    if value.tzinfo is not None:
+        value = value.astimezone(IST).replace(tzinfo=None)
+    return value.strftime(MINUTE_FMT)

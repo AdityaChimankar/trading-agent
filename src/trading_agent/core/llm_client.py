@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -19,6 +21,8 @@ from trading_agent.core.exceptions import ModelError
 from trading_agent.core.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 
 
 @dataclass(frozen=True)
@@ -56,8 +60,47 @@ class LLMClient(ABC):
         pass
 
 
+class _RateLimiter:
+    """Process-wide minimum spacing between LLM calls (shared by all clients)."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._next_at = 0.0
+
+    async def wait(self, min_interval: float) -> None:
+        if min_interval <= 0:
+            return
+        async with self._lock:
+            delay = self._next_at - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next_at = time.monotonic() + min_interval
+
+    def defer(self, seconds: float) -> None:
+        """Push every caller back after the provider told us to slow down."""
+        self._next_at = max(self._next_at, time.monotonic() + seconds)
+
+
+_rate_limiter = _RateLimiter()
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    try:
+        return min(float(response.headers["retry-after"]), 60.0)
+    except (KeyError, ValueError):
+        return None
+
+
+class _RetryableStatus(Exception):
+    def __init__(self, status: int, retry_after: float | None):
+        super().__init__(status)
+        self.status = status
+        self.retry_after = retry_after
+
+
 class OpenAICompatibleClient(LLMClient):
-    """OpenAI-compatible API client (OpenAI, Azure, local models)."""
+    """OpenAI-compatible API client (OpenRouter, OpenAI, Azure, local models)."""
 
     def __init__(
         self,
@@ -65,30 +108,46 @@ class OpenAICompatibleClient(LLMClient):
         api_key: str,
         model: str,
         timeout: float = 60.0,
-        max_retries: int = 3,
+        max_retries: int = 4,
+        min_interval_seconds: float = 0.0,
+        extra_headers: dict[str, str] | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
+        self.min_interval_seconds = min_interval_seconds
+        self.extra_headers = extra_headers or {}
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                headers={"Authorization": f"Bearer {self.api_key}"},
+                headers={"Authorization": f"Bearer {self.api_key}", **self.extra_headers},
                 timeout=self.timeout,
             )
         return self._client
 
-    @retry(
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        stop=stop_after_attempt(3),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
-    )
     async def complete(self, request: LLMRequest) -> LLMResponse:
+        for attempt in range(self.max_retries + 1):
+            await _rate_limiter.wait(self.min_interval_seconds)
+            try:
+                return await self._complete_once(request)
+            except _RetryableStatus as e:
+                if attempt >= self.max_retries:
+                    raise ModelError(f"LLM API error: {e.status} after {attempt + 1} attempts") from e
+                wait = e.retry_after if e.retry_after is not None else min(2.0 ** (attempt + 1), 60.0)
+                logger.warning("llm_retrying", status=e.status, attempt=attempt + 1, wait_s=wait)
+                _rate_limiter.defer(wait)
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                if attempt >= self.max_retries:
+                    raise ModelError(f"LLM API unreachable: {e}") from e
+                _rate_limiter.defer(min(2.0 ** (attempt + 1), 30.0))
+        raise AssertionError("unreachable")
+
+    async def _complete_once(self, request: LLMRequest) -> LLMResponse:
         client = await self._get_client()
 
         payload = {
@@ -119,8 +178,11 @@ class OpenAICompatibleClient(LLMClient):
                 latency_ms=latency,
             )
         except httpx.HTTPStatusError as e:
-            logger.error("llm_api_error", status=e.response.status_code, error=e.response.text)
-            raise ModelError(f"LLM API error: {e.response.status_code}") from e
+            status = e.response.status_code
+            if status in _RETRYABLE_STATUS:
+                raise _RetryableStatus(status, _retry_after_seconds(e.response)) from e
+            logger.error("llm_api_error", status=status, error=e.response.text)
+            raise ModelError(f"LLM API error: {status}") from e
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
@@ -232,10 +294,26 @@ def create_llm_client(provider: str | None = None) -> LLMClient:
     if provider == "mock":
         return MockLLMClient()
 
-    if not settings.llm.api_key:
+    api_key = settings.llm.api_key
+    if provider == "openrouter" and not api_key:
+        api_key = os.getenv("OPENROUTER_API_KEY", "")
+
+    if not api_key:
         logger.warning("llm_api_key_missing_using_mock", provider=provider)
         return MockLLMClient()
 
+    if provider == "openrouter":
+        base_url = settings.llm.base_url
+        if "openai.com" in base_url:
+            base_url = OPENROUTER_BASE_URL
+        return OpenAICompatibleClient(
+            base_url,
+            api_key,
+            settings.llm.model,
+            max_retries=settings.llm.max_retries,
+            min_interval_seconds=settings.llm.min_interval_seconds,
+            extra_headers={"X-Title": "trading-agent"},
+        )
     if provider == "openai":
         return OpenAICompatibleClient(
             settings.llm.base_url,

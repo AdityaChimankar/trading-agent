@@ -123,3 +123,14 @@ async def get_symbol_intervals(symbol: str):
     parquet = get_parquet_store()
     intervals = parquet.get_intervals(symbol)
     return {"symbol": symbol, "intervals": intervals}
+
+
+@router.get("/{symbol}/technicals")
+def get_symbol_technicals(symbol: str, interval: str = Query("5minute")):
+    """Groww-style Bullish/Neutral/Bearish indicator vote (comparison view only)."""
+    from trading_agent.analysis.technical_summary import get_technical_summary
+
+    summary = get_technical_summary(symbol.upper(), interval)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Not enough candles for a technical summary")
+    return summary

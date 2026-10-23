@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
+import threading
 import time
 import signal
 from collections import defaultdict
@@ -371,6 +373,48 @@ def create_default_candle_handler(parquet_store=None) -> Callable[[CandleData], 
     return handler
 
 
+class BackgroundCandleWriter:
+    """Run a candle handler on its own thread.
+
+    KiteTicker calls on_ticks on its Twisted reactor thread. A blocking Parquet
+    or DB write there delays WebSocket ping/pong and Kite drops the socket with
+    code 1006, so the reactor only enqueues and this thread does the I/O.
+    """
+
+    _STOP = object()
+
+    def __init__(self, handler: Callable[[CandleData], None], maxsize: int = 10_000):
+        self.handler = handler
+        self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._thread = threading.Thread(target=self._run, name="candle-writer", daemon=True)
+        self._thread.start()
+
+    def __call__(self, candle: CandleData) -> None:
+        try:
+            self._queue.put_nowait(candle)
+        except queue.Full:
+            logger.error("candle_writer_queue_full", symbol=candle.symbol)
+
+    @property
+    def pending(self) -> int:
+        return self._queue.qsize()
+
+    def _run(self) -> None:
+        while True:
+            candle = self._queue.get()
+            if candle is self._STOP:
+                return
+            try:
+                self.handler(candle)
+            except Exception as e:
+                logger.error("candle_write_failed", symbol=candle.symbol, error=str(e))
+
+    def close(self, timeout: float = 10.0) -> None:
+        """Flush queued candles, then stop the thread."""
+        self._queue.put(self._STOP)
+        self._thread.join(timeout)
+
+
 def main() -> None:
     """Start the live Kite ticker and block until it stops."""
     from trading_agent.core.logging_config import setup_logging
@@ -385,8 +429,9 @@ def main() -> None:
     if not symbols:
         raise SystemExit("The watchlist is empty. Add symbols to symbols.txt.")
 
+    writer = BackgroundCandleWriter(create_default_candle_handler())
     ticker = LiveTicker(symbols=symbols, interval=get_settings().storage.candle_interval,
-                        on_candle=create_default_candle_handler())
+                        on_candle=writer)
     def stop(signum, frame):
         raise SystemExit(0)
 
@@ -398,6 +443,7 @@ def main() -> None:
             time.sleep(0.5)
     finally:
         ticker.stop()
+        writer.close()
         for sig, handler in previous.items():
             signal.signal(sig, handler)
 

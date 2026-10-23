@@ -32,15 +32,12 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
-from trading_agent.core.signals import (
-    prepare_symbol_series, simulate_trades, DEFAULT_PARAMS,
-    LOOKBACK_MIN, MAX_HOLD_CANDLES, SLIPPAGE,
-    verify_fast_path_matches_reference
-)
-from trading_agent.research.backtest import run_multi_backtest, get_all_watchlist_symbols, summarize
-from trading_agent.research.walk_forward_optimizer import run_walk_forward_multi, PARAM_GRID, TRAIN_CANDLES, TEST_CANDLES
-from trading_agent.storage.db import get_connection, get_watchlist_symbols
-from trading_agent.core.quant_indicators import load_candles, compute_atr
+from trading_agent.core.quant_indicators import atr as compute_atr
+from trading_agent.core.signals import DEFAULT_PARAMS
+from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
+from trading_agent.research.backtest import run_multi_backtest
+from trading_agent.research.walk_forward_optimizer import run_selftest, run_walk_forward_multi
+from trading_agent.storage.parquet_store import get_parquet_store
 
 
 def detect_optimal_workers(reserve_cores: int = 2, reserve_ram_gb: float = 4.0) -> int:
@@ -131,12 +128,12 @@ class SymbolMetrics:
 
 def compute_symbol_metrics(symbol: str, days: int = 60) -> Optional[SymbolMetrics]:
     """Compute liquidity/volatility metrics for a symbol to enable pre-filtering."""
-    df = load_candles(symbol, limit=375 * days)  # ~375 minute candles/day
+    df = get_parquet_store().read_latest(symbol, "minute", n=375 * days)  # ~375 minute candles/day
     if len(df) < 100:
         return None
 
     avg_volume = df["volume"].mean()
-    atr = compute_atr(df).iloc[-1]
+    atr = compute_atr(df["high"].to_numpy(float), df["low"].to_numpy(float), df["close"].to_numpy(float))[-1]
     close = df["close"].iloc[-1]
     avg_atr_pct = (atr / close) if close > 0 and not pd.isna(atr) else 0
     candle_count = len(df)
@@ -364,10 +361,10 @@ def run_backtest_config(symbols: list, params: dict, config_name: str) -> Optimi
     start = time.time()
 
     # Merge with defaults
-    test_params = {**DEFAULT_PARAMS, **params}
+    test_params = {**asdict(DEFAULT_PARAMS), **params}
 
-    # Run backtest
-    result = run_multi_backtest(symbols, parallel=True, max_workers=OPTIMAL_WORKERS)
+    # Run backtest with THIS config's thresholds
+    result = run_multi_backtest(symbols, test_params, parallel=True, max_workers=OPTIMAL_WORKERS)
 
     elapsed = time.time() - start
 
@@ -391,35 +388,30 @@ def run_walkforward_config(symbols: list, params: dict, config_name: str) -> Opt
     """Run walk-forward optimization for a config."""
     start = time.time()
 
-    # Temporarily override PARAM_GRID
-    import trading_agent.research.walk_forward_optimizer as wfo
-    original_grid = wfo.PARAM_GRID
-    wfo.PARAM_GRID = {k: [v] if not isinstance(v, list) else v for k, v in params.items()}
+    grid = {k: [v] if not isinstance(v, list) else v for k, v in params.items()}
 
-    try:
-        result = run_walk_forward_multi(symbols, parallel=True, max_workers=OPTIMAL_WORKERS)
-        elapsed = time.time() - start
+    result = run_walk_forward_multi(symbols, parallel=True, max_workers=OPTIMAL_WORKERS,
+                                    param_grid=grid)
+    elapsed = time.time() - start
 
-        # Aggregate per-symbol results
-        total_trades = sum(r["optimized"].get("trades", 0) for r in result["per_symbol"].values())
-        total_return = sum(r["optimized"].get("total_return_pct", 0) for r in result["per_symbol"].values())
-        avg_win_rate = np.mean([r["optimized"].get("win_rate", 0) for r in result["per_symbol"].values()])
+    # Aggregate per-symbol results
+    total_trades = sum(r["optimized"].get("trades", 0) for r in result["per_symbol"].values())
+    total_return = sum(r["optimized"].get("total_return_pct", 0) for r in result["per_symbol"].values())
+    avg_win_rate = np.mean([r["optimized"].get("win_rate") or 0 for r in result["per_symbol"].values()])
 
-        return OptimizationResult(
-            config_name=config_name,
-            params=params,
-            symbols_tested=len(result["per_symbol"]),
-            total_trades=total_trades,
-            win_rate=avg_win_rate,
-            avg_return_pct=total_return / max(len(result["per_symbol"]), 1),
-            sharpe_like=0,  # Not computed in walk-forward summary
-            max_drawdown_pct=0,
-            total_return_pct=total_return,
-            elapsed_seconds=elapsed,
-            timestamp=pd.Timestamp.now().isoformat()
-        )
-    finally:
-        wfo.PARAM_GRID = original_grid
+    return OptimizationResult(
+        config_name=config_name,
+        params=params,
+        symbols_tested=len(result["per_symbol"]),
+        total_trades=total_trades,
+        win_rate=avg_win_rate,
+        avg_return_pct=total_return / max(len(result["per_symbol"]), 1),
+        sharpe_like=0,  # Not computed in walk-forward summary
+        max_drawdown_pct=0,
+        total_return_pct=total_return,
+        elapsed_seconds=elapsed,
+        timestamp=pd.Timestamp.now().isoformat()
+    )
 
 
 def score_result(r: OptimizationResult, min_trades: int = 100) -> float:
@@ -566,21 +558,11 @@ def optimization_loop(
 
 
 def run_selftest_all(symbols: list = None) -> bool:
-    """Run self-test on all symbols to verify fast path matches reference."""
+    """Verify the vectorized fast path matches the slow reference loop."""
     if symbols is None:
         symbols = get_watchlist_symbols()[:20]  # Sample for speed
-
     print(f"Running self-test on {len(symbols)} symbols...")
-    all_passed = True
-    for symbol in symbols:
-        matches = verify_fast_path_matches_reference(symbol)
-        status = "PASS" if matches else "FAIL"
-        print(f"  {symbol}: {status}")
-        if not matches:
-            all_passed = False
-
-    print(f"\nSelf-test: {'PASSED' if all_passed else 'FAILED'}")
-    return all_passed
+    return run_selftest(symbols)
 
 
 if __name__ == "__main__":
@@ -597,8 +579,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.selftest:
-        run_selftest_all()
-        sys.exit(0)
+        sys.exit(0 if run_selftest_all() else 1)
 
     # Build symbol sets
     all_symbols = get_watchlist_symbols()

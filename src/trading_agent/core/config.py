@@ -148,10 +148,14 @@ class LLMSettings(BaseSettings):
         env_prefix="LLM_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    provider: Literal["openai", "anthropic", "mock"] = "mock"
+    provider: Literal["openrouter", "openai", "anthropic", "mock"] = "mock"
     base_url: str = "https://api.openai.com"
     api_key: str = ""
     model: str = "gpt-4o-mini"
+    # Free/low tiers 429 on bursts; 4.5s between calls keeps a full watchlist
+    # sentiment sweep under typical per-minute limits.
+    min_interval_seconds: float = 4.5
+    max_retries: int = 4
 
 
 class Settings(BaseSettings):

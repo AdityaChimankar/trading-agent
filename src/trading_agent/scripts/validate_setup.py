@@ -1,16 +1,19 @@
 """
-Pre-flight check - run this BEFORE ingest.live_ticker / scripts.scheduler /
-the dashboard API every trading day. Verifies Kite auth + API, news feeds,
-OpenRouter API, and the DB/watchlist are all actually working - so a dead
+Pre-flight check - run this BEFORE the live ticker / scheduler / dashboard API
+every trading day. Verifies Kite auth + market data, the DB and watchlist,
+news RSS feeds, and the OpenRouter LLM are all actually working - so a dead
 API key or an expired token surfaces here, not 5 minutes into market
 hours with a silent failure buried in a scheduler log.
 
-Usage: python -m scripts.validate_setup
+Usage: python -m trading_agent.scripts.validate_setup [--skip-llm]
 Exit code 0 = all checks passed, safe to start the pipeline.
 Exit code 1 = at least one check failed - fix before proceeding.
 """
+import argparse
+import asyncio
 import os
 import sys
+
 import feedparser
 from dotenv import load_dotenv
 
@@ -23,154 +26,182 @@ WARN_MARK = "[WARN]"
 
 def check_env_vars() -> bool:
     print("Checking environment variables...")
-    required = ["KITE_API_KEY", "KITE_API_SECRET", "OPENROUTER_API_KEY"]
-    missing = [k for k in required if not os.getenv(k) or "your_" in os.getenv(k, "")]
-    if missing:
-        print(f"  {FAIL_MARK} Missing or placeholder values in .env: {missing}")
-        return False
-    print(f"  {CHECK_MARK} All required .env variables are set")
-    
-    # Check for auto-login credentials
-    totp_creds = ["KITE_TOTP_SECRET", "KITE_USER_ID", "KITE_PASSWORD"]
-    totp_missing = [k for k in totp_creds if not os.getenv(k) or "your_" in os.getenv(k, "")]
-    if totp_missing:
-        print(f"  {WARN_MARK} Auto-login not configured (missing: {totp_missing}) - manual login required daily")
+    ok = True
+    for var in ("KITE_API_KEY", "KITE_API_SECRET"):
+        if os.getenv(var):
+            print(f"  {CHECK_MARK} {var} set")
+        else:
+            print(f"  {FAIL_MARK} {var} missing from .env")
+            ok = False
+    if os.getenv("LLM_API_KEY") or os.getenv("OPENROUTER_API_KEY"):
+        print(f"  {CHECK_MARK} OpenRouter key set")
     else:
-        print(f"  {CHECK_MARK} Auto-login credentials present")
-    return True
+        print(f"  {WARN_MARK} No LLM_API_KEY/OPENROUTER_API_KEY - sentiment and LLM agent disabled")
+    missing_totp = [v for v in ("KITE_TOTP_SECRET", "KITE_USER_ID", "KITE_PASSWORD") if not os.getenv(v)]
+    if missing_totp:
+        print(f"  {WARN_MARK} Auto-login disabled (missing {', '.join(missing_totp)}) - manual login needed daily")
+    return ok
 
 
 def check_kite_auth() -> bool:
     print("Checking Kite Connect authentication...")
-    
-    # Try to use auto-login if credentials are available
-    totp_secret = os.getenv("KITE_TOTP_SECRET")
-    if totp_secret and "your_" not in totp_secret:
+    from trading_agent.ingest.kite_auth import get_kite_client
+
+    if os.getenv("KITE_TOTP_SECRET"):
         try:
             from trading_agent.ingest.kite_auto_login import ensure_valid_token
-            token = ensure_valid_token()
-            print(f"  {CHECK_MARK} Kite auth valid (auto-login succeeded)")
-            return True
-        except Exception as e:
-            print(f"  {WARN_MARK} Auto-login failed: {e} - falling back to manual token")
-    
-    # Fall back to checking existing access token
-    if not os.path.exists(".access_token"):
-        print(f"  {FAIL_MARK} .access_token not found - run: python -m ingest.kite_auth")
-        return False
 
+            ensure_valid_token()
+        except Exception as e:
+            print(f"  {WARN_MARK} Auto-login failed ({e}); trying saved token")
     try:
-        from trading_agent.ingest.kite_auth import get_kite_client
-        kite = get_kite_client()
-        profile = kite.profile()
-        print(f"  {CHECK_MARK} Kite auth valid - logged in as {profile.get('user_name', 'unknown')}")
+        profile = get_kite_client().profile()
+        print(f"  {CHECK_MARK} Kite auth valid for {profile.get('user_id', '?')}")
         return True
     except Exception as e:
         print(f"  {FAIL_MARK} Kite auth failed: {e}")
-        print("        Access tokens expire daily (~7:30 AM IST) - re-run: python -m ingest.kite_auth")
+        print("        Run: trading-agent login")
         return False
 
 
 def check_kite_data_access() -> bool:
-    print("Checking Kite market data access...")
+    print("Checking Kite market data...")
     try:
         from trading_agent.ingest.kite_auth import get_kite_client
-        kite = get_kite_client()
-        # NIFTY 50 index token - a stable, always-valid instrument to test against
-        quote = kite.quote(["NSE:INFY"])
-        if quote:
-            print(f"  {CHECK_MARK} Live market data access working (test quote: NSE:INFY)")
-            return True
-        print(f"  {FAIL_MARK} Quote request returned empty - check your Kite Connect plan/subscription")
-        return False
+
+        quote = get_kite_client().quote(["NSE:INFY"])
+        price = quote["NSE:INFY"]["last_price"]
+        print(f"  {CHECK_MARK} Quote OK (INFY {price})")
+        return True
     except Exception as e:
-        print(f"  {FAIL_MARK} Market data request failed: {e}")
-        print("        If this says 'permission denied', your Kite Connect subscription "
-              "may not include market data access (needs the paid plan, not just order APIs)")
+        print(f"  {FAIL_MARK} Quote failed: {e} (market data subscription active?)")
+        return False
+
+
+def check_database() -> bool:
+    print("Checking database...")
+    try:
+        from trading_agent.storage.db import get_connection
+
+        conn = get_connection()
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+        mark = CHECK_MARK if mode.lower() == "wal" else WARN_MARK
+        print(f"  {mark} SQLite journal_mode={mode}")
+        return True
+    except Exception as e:
+        print(f"  {FAIL_MARK} Database unavailable: {e}")
         return False
 
 
 def check_watchlist() -> bool:
-    print("Checking watchlist is populated...")
+    print("Checking watchlist...")
     try:
-        from trading_agent.storage.db import get_watchlist_symbols
+        from trading_agent.ingest.instrument_lookup import get_instrument_lookup
+        from trading_agent.ingest.watchlist_resolved import get_watchlist_symbols
+
         symbols = get_watchlist_symbols()
         if not symbols:
-            print(f"  {FAIL_MARK} Watchlist is empty - run: python -m ingest.fetch_historical")
+            print(f"  {FAIL_MARK} Watchlist is empty - run: python -m trading_agent.ingest.build_nifty500_symbols")
             return False
+        lookup = get_instrument_lookup()
+        unresolved = [s for s in symbols if not lookup.get_token(s)]
         print(f"  {CHECK_MARK} Watchlist has {len(symbols)} symbol(s)")
+        if unresolved:
+            print(f"  {WARN_MARK} {len(unresolved)} without instrument token: {', '.join(unresolved[:10])}")
         return True
     except Exception as e:
         print(f"  {FAIL_MARK} Could not read watchlist: {e}")
-        print("        Run: python -m storage.db")
         return False
 
 
 def check_news_feeds() -> bool:
     print("Checking news RSS feeds...")
-    from trading_agent.ingest.fetch_news import FEEDS, _fetch_feed
-    all_ok = True
-    for source, feed_url in FEEDS:
+    from trading_agent.ingest.fetch_news import DEFAULT_RSS_FEEDS
+
+    reachable = 0
+    for feed_url in DEFAULT_RSS_FEEDS:
+        feed = feedparser.parse(feed_url)
+        if feed.entries:
+            reachable += 1
+            print(f"  {CHECK_MARK} {feed_url} - {len(feed.entries)} entries")
+        else:
+            print(f"  {WARN_MARK} {feed_url} - no entries ({feed.get('bozo_exception', 'empty')})")
+    # One dead feed is tolerable; none means no news at all.
+    return reachable > 0
+
+
+def check_llm() -> bool:
+    print("Checking OpenRouter LLM...")
+    from trading_agent.core.config import get_settings
+    from trading_agent.core.llm_client import LLMRequest, MockLLMClient, create_llm_client
+
+    settings = get_settings().llm
+    client = create_llm_client()
+    if isinstance(client, MockLLMClient):
+        print(f"  {WARN_MARK} LLM provider is mock - no sentiment or LLM agent output")
+        return True
+
+    async def ping():
         try:
-            entries = _fetch_feed(feed_url)
-            if entries:
-                print(f"  {CHECK_MARK} {source} - {len(entries)} entries")
-            else:
-                print(f"  {WARN_MARK} {source} - reachable but returned 0 entries")
-        except Exception as e:
-            print(f"  {FAIL_MARK} {source} - failed: {e}")
-            all_ok = False
-    return all_ok
+            return await client.complete(LLMRequest(
+                system_prompt="You are a health check.",
+                user_prompt="Reply with exactly one word: OK",
+                max_tokens=5,
+                temperature=0.0,
+            ))
+        finally:
+            await client.close()
 
-
-def check_openrouter_api() -> bool:
-    print("Checking OpenRouter API...")
     try:
-        from trading_agent.core.llm_client import complete, get_model
-        reply = complete("Reply with exactly one word: OK")
-        print(f"  {CHECK_MARK} OpenRouter responding (model: {get_model()}, got: '{reply[:30]}')")
+        reply = asyncio.run(ping())
+        print(f"  {CHECK_MARK} {settings.model} responding ({reply.latency_ms:.0f} ms, got '{reply.content[:20]}')")
         return True
     except Exception as e:
-        print(f"  {FAIL_MARK} OpenRouter API call failed: {e}")
-        print("        Check OPENROUTER_API_KEY is valid at https://openrouter.ai/keys")
+        print(f"  {FAIL_MARK} LLM call failed: {e}")
+        print("        Check OPENROUTER_API_KEY at https://openrouter.ai/keys")
         return False
 
 
-def main():
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    parser.add_argument("--skip-llm", action="store_true", help="Don't spend an LLM call")
+    args = parser.parse_args(argv)
+
     print("=" * 60)
     print("Pre-flight check - verifying all APIs before pipeline start")
     print("=" * 60)
 
-    results = {
-        "Environment variables": check_env_vars(),
-    }
+    results = {"Environment variables": check_env_vars()}
     print()
     results["Kite authentication"] = check_kite_auth()
     print()
     if results["Kite authentication"]:
         results["Kite market data"] = check_kite_data_access()
         print()
+    results["Database"] = check_database()
+    print()
     results["Watchlist"] = check_watchlist()
     print()
     results["News feeds"] = check_news_feeds()
-    print()
-    results["OpenRouter API"] = check_openrouter_api()
+    if not args.skip_llm:
+        print()
+        results["OpenRouter LLM"] = check_llm()
 
     print()
     print("=" * 60)
     print("Summary")
     print("=" * 60)
     for name, passed in results.items():
-        mark = CHECK_MARK if passed else FAIL_MARK
-        print(f"  {mark} {name}")
+        print(f"  {CHECK_MARK if passed else FAIL_MARK} {name}")
 
     if all(results.values()):
-        print("\nAll checks passed - safe to start `python -m ingest.live_ticker` / "
-              "`python -m scripts.scheduler` / the dashboard API")
+        print("\nAll checks passed - safe to start the live ticker, scheduler and dashboard API")
         sys.exit(0)
-    else:
-        print("\nOne or more checks failed - fix the issues above before starting the pipeline.")
-        sys.exit(1)
+    print("\nOne or more checks failed - fix the issues above before starting the pipeline.")
+    sys.exit(1)
 
 
 if __name__ == "__main__":
