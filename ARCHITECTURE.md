@@ -1,8 +1,8 @@
 # Architecture decisions
 
-Last reviewed: 2026-10-19
+Last reviewed: 2026-10-24
 
-This file records decisions that constrain future changes. [DESIGN.md](DESIGN.md) describes the current components; [README.md](README.md) describes how to run them.
+This file records decisions that constrain future changes. [DESIGN.md](DESIGN.md) describes the current components; [README.md](README.md) describes how to run them; [MEMORY.md](MEMORY.md) tracks status and the history behind these decisions.
 
 ## ADR-001: Installable `src` package
 
@@ -49,7 +49,9 @@ Status: accepted
 
 Rule, ML, optional LLM, and shadow/hybrid decisions remain identifiable. They may share prepared market data and risk primitives, but one path must not silently overwrite another path's evidence.
 
-The default LLM provider is `mock`. External LLM calls require explicit provider, URL, key, and model configuration.
+The rule agent is the validated path. ML and LLM agents run in parallel, write to their own tables and never override the rule signal; Rules + ML holds when ML is not available.
+
+Revised 2026-10-23: OpenRouter is the only supported external LLM provider. The code default remains `mock` (no calls). Calls go through one process-wide rate limiter with retries on 429/5xx that honour `Retry-After`.
 
 ## ADR-005: Time-bounded research inputs
 
@@ -61,9 +63,9 @@ Backtests and historical replays must pass their current historical slice to can
 
 ## ADR-006: Paper trading only
 
-Status: accepted
+Status: superseded by ADR-014 (2026-10-23)
 
-The repository does not place broker orders. Position and wallet records are simulations. Any future order-execution feature requires a separate security/risk ADR, explicit user controls, reconciliation, idempotency, and audit logging.
+The repository did not place broker orders. ADR-014 adds a guarded order router that keeps paper as the default and meets this ADR's preconditions: explicit user controls, reconciliation, audit logging and pre-trade risk checks. Idempotent intent IDs remain open work.
 
 ## ADR-007: Market timezone
 
@@ -144,7 +146,7 @@ Add or revise an ADR when a change affects persistence format, live-vs-backtest 
 
 Status: accepted for local paper operations, 2026-10-19
 
-The active console targets `/api/v1`. Legacy frontend panels remain unmounted. The persistent paper book is derived from all `open_positions` rows; it is gross entry-cost accounting, not broker cash or mark-to-market. Risk admission and duplicate checks are serialized in SQLite. New entries can be disabled while exits remain available.
+The active console targets `/api/v1`. Revised 2026-10-23: the classic panels are mounted again through ADR-017; they are not a second source of trading decisions. The persistent paper book is derived from all `open_positions` rows; it is gross entry-cost accounting, not broker cash or mark-to-market. Risk admission and duplicate checks are serialized in SQLite. New entries can be disabled while exits remain available.
 
 ## ADR-012: Single-host candle durability and health
 
@@ -156,4 +158,40 @@ Writers use immutable, atomically published Parquet batches under per-symbol/int
 
 Status: accepted
 
-Docker runs a compiled static frontend behind Nginx; only loopback ports are exposed. Bearer authentication is optional for local use and required before sharing access. No fake deployment jobs or unsupported scheduling success responses are allowed. Institutional-readiness gates and verification evidence live in [READINESS.md](READINESS.md); live order routing requires a separate approved design.
+Docker runs a compiled static frontend behind Nginx; only loopback ports are exposed. Bearer authentication is optional for local use and required before sharing access. No fake deployment jobs or unsupported scheduling success responses are allowed. Institutional-readiness gates and verification evidence live in [READINESS.md](READINESS.md); live order routing follows ADR-014.
+
+## ADR-014: Guarded order router
+
+Status: accepted, 2026-10-23
+
+Every entry and exit goes through `execution/router.py`. On entry, the router checks the participation cap, then reserves the position through the same serialized ledger transaction as manual entries. That transaction applies the kill switch, session gates, trade cap and ledger limits. Only then does it send the order, and it rewrites the position at the fill price. A broker rejection deletes the reservation. Risk checks therefore never run after a real fill.
+
+Paper mode is the default and fills at the reference price moved by `EXECUTION_SLIPPAGE_BPS`. Live mode (Kite MARKET, product MIS) requires both `EXECUTION_MODE=live` and `EXECUTION_LIVE_CONFIRMATION=I-ACCEPT-REAL-MONEY-RISK`. Orders persist in the `orders` table (migration 003). Reconciliation compares ledger and broker net quantities.
+
+Consequences: the router is the only code allowed to call a broker order API. Partial fills, cancels and reconnect replay are not yet handled; see [READINESS.md](READINESS.md#gates-before-institutional-or-unattended-live-use).
+
+## ADR-015: Intraday session controls
+
+Status: accepted, 2026-10-23
+
+`risk/controls.py` owns:
+
+- the kill switch, persisted in `DATA_DIR/controls`; an unreadable state fails closed;
+- session gates: no entries before 09:15 IST, after `PAPER_ENTRY_CUTOFF` or at weekends;
+- the daily trade cap;
+- square-off of all open positions at `PAPER_SQUARE_OFF_TIME`, triggered by the scheduler;
+- an append-only daily JSONL audit trail.
+
+`PAPER_ENFORCE_SESSION=false` disables only the time gates and exists for tests. Exits are never blocked.
+
+## ADR-016: Drift withdraws ML instead of degrading silently
+
+Status: accepted, 2026-10-23
+
+`strategy/model_monitoring.py` logs live ML inputs and compares them with a baseline (PSI and KS). When enough features drift, a persisted fallback makes the research scan use `ml_model.previous.joblib` if present, otherwise a withheld model that reports ML as unavailable, so hybrid decisions hold. An operator clears the fallback explicitly. Drifted ML must never keep voting unnoticed.
+
+## ADR-017: One scan snapshot behind both UIs
+
+Status: accepted, 2026-10-23
+
+The classic React pages (restored from `gemini-old-interface`) and the research workspace run in one app (`frontend/src/App.tsx`, hash routes, Material UI theme). The classic `/api` routes in `api/routers/legacy_ui.py` adapt the research scan snapshot (`research_jobs.snapshot()`) to the old response shapes. They do not compute their own rankings. Rankings, opportunities, sizing and the pipeline therefore agree across pages.

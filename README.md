@@ -1,68 +1,33 @@
 # Trading Agent
 
-Trading Agent is a local-first research and paper-trading system for NSE intraday data. It can ingest Kite Connect candles, store time-series data in Parquet, evaluate rule/ML/LLM decision paths, backtest strategies, monitor paper positions, and expose the results through a FastAPI API and React dashboard.
+Trading Agent is a local-first intraday workbench for NSE equities. It ingests Kite Connect candles and RSS news, scores every watchlist symbol with rule, ML and LLM paths, sizes trades against portfolio and intraday risk limits, routes orders through one guarded router, and reports performance net of Zerodha charges. It runs as a FastAPI backend with a React + Material UI dashboard.
 
-> This project does not place broker orders. It is research and paper-trading software, not financial advice.
+> **Paper mode is the default.** Live Zerodha orders need two explicit settings (see [Risk controls and execution](#risk-controls-and-execution)) and have not been verified against a real account. No strategy edge has been demonstrated. This is not financial advice.
 
-The supported interface is the restored research dashboard: full-watchlist hybrid rankings, bullish/bearish opportunities, Plotly charts, news sentiment, and risk-based plans. The **Paper operations** tab retains the persistent paper book. This is **not an institutional live-trading platform**. See [READINESS.md](READINESS.md) for limitations and release gates.
+Project status, open work and decision history: [MEMORY.md](MEMORY.md).
 
-## Unified dashboard workflow
+## Dashboard
 
-One symbol selection and shared settings connect the workspace:
+| Tab | What it is for |
+|---|---|
+| **Dashboard** | Classic view: watchlist sidebar with bias and contradictions, bullish/bearish Top Opportunity, symbol detail (chart, patterns, technical summary, sizing, news, rule/LLM/ML signals), wallet, position monitor, morning digest |
+| **Research** | Find → Inspect → Validate → Paper review workflow: full-watchlist scan, Plotly chart, walk-forward optimizer, trade-outcome validation, BUY/SELL outcome models |
+| **Paper operations** | Persistent paper book: open, monitor and close positions |
+| **Risk & execution** | Kill switch, square-off, session status, router orders, reconciliation, cost calculator, audit trail |
+| **Analytics** | Net-of-cost performance and attribution, volume board (RVOL, VWAP, liquidity), ML drift monitor |
+| **Signal Pipeline** | Latest rule/LLM/ML decision per symbol |
+| **Transactions** | Transaction history and strategy status |
+| **News** | Headlines matched to the watchlist, with cached sentiment |
 
-The opening view puts paper equity, available cash, open positions and the best eligible bullish/bearish picks together. Quick symbol buttons and cached headlines keep routine review on one screen; advanced sizing and evidence controls are available on demand. Research validation remains a separate explicit step.
-
-1. **Find opportunities** — explicitly scan the configured universe; inspect progress and completed bullish/bearish plans.
-2. **Inspect selected stock** — selecting a top pick opens its Plotly chart, rule/ML decision, scan-based stop/target/size and cached news.
-3. **Validate strategy** — run the Walk-Forward Optimizer, check fixed-rule trade outcomes, and inspect BUY/SELL model qualification. Results remain tied to their exact inputs while navigating this page session.
-4. **Paper review** — the selected symbol and interval carry into the persistent paper workspace. Entries remain manual; changing symbol clears unsubmitted price/quantity fields.
-
-Walk-forward tuning does **not** automatically apply parameters, qualify a scan or promote ML. Rule and promoted-ML policy buttons explicitly update shared settings for your review; you must still start a fresh scan. New validation evidence, refreshed news or paper-book changes invalidate existing scan plans in this workspace. Refreshing views or changing steps never starts training, scanning, news-provider calls or orders.
-
-After installing this UI update in Docker, run `docker compose build api frontend`, then `docker compose up -d api frontend`, and reload your browser. No image pruning or data reset is needed. Local frontend developers can use `npm.cmd run build` from `frontend` on Windows (or `npm run build` on other shells). See [USER_GUIDE.md](USER_GUIDE.md#research-panels) for the coordinated workflow and evidence boundaries.
+All tabs read the same research scan snapshot, so rankings, opportunities and sizing agree. Refreshing a page never starts a scan, an LLM call or an order.
 
 ## What works without broker credentials
 
-The API, dashboard, tests, stored-data analysis, and backtests can run without Kite credentials. Kite credentials and a current daily access token are needed only for downloading or streaming broker data.
-
-## Evidence-gated opportunities
-
-The scanner still checks the entire configured watchlist. **Require qualified outcome evidence** is on by default: missing, failed, mismatched or expired evidence gives no eligible plan, not an invented win probability. Legacy ML/hybrid rankings remain exploratory. Separately trained BUY/SELL outcome models can qualify in **ML only** mode only after explicit historical and forward-paper promotion gates.
-
-For a selected stock, use **Trade Outcome Validation** in the dashboard after importing sufficient history (at least 1,000 completed candles; qualifying usually needs much more). It replays fixed rules with next-open entries, ATR stops, targets, costs and session exits. It fits calibration on the middle window and evaluates it on a later untouched holdout. It does not retrain or replace the active model.
-
-A qualified **Rules only** report supplies rule estimates for later candles with the same reward/risk; a promoted outcome model supplies model estimates under its frozen policy in **ML only** mode. Wait for a new completed candle, then scan again. Revalidate when evidence expires (at most seven days, also bounded by the data date) or the policy changes—not on every page refresh. Disabling the gate is explicitly exploratory. A high score or historical win rate does not promise a winning trade.
-
-Freshness is rechecked when scanning finishes and whenever results are fetched. Minute signals expire after 2 minutes 15 seconds from their candle timestamp; other intervals use two bars plus 15 seconds. A long full-universe scan may therefore produce no fresh eligible picks. Incremental streaming scans and independent hybrid validation remain future work. See [USER_GUIDE.md](USER_GUIDE.md#trade-outcome-validation-and-win-estimates) for gates and assumptions.
-
-## BUY/SELL outcome model lifecycle (optional research)
-
-This is separate from legacy `optimize ml-model-v2`. It trains two calibrated profit-outcome classifiers with one shared feature/artifact contract, not a BUY/HOLD/SELL direction classifier.
-
-The first five-stock candidate was trained on 2026-10-20 using 100,000 stored minute candles. **It failed qualification**: neither side found a tuning threshold meeting the win/expectancy/sample requirements. Both sides abstain, so test win rates are unavailable—not 0% or 100%. Nothing was promoted. The dashboard's **BUY / SELL Outcome Models** panel shows candidate results.
-
-| When to run | Local command | Purpose |
-|---|---|---|
-| Inspect candidates or troubleshoot | `python -m trading_agent.strategy.outcome_cli status` | Shows active and candidate status; no training or promotion |
-| Start a new experiment with sufficient history and a genuinely new test period; not daily | `python -m trading_agent.strategy.outcome_cli train RELIANCE TCS HDFCBANK ICICIBANK INFY` | Trains separate side models; saves a candidate without replacing the active model |
-| During market sessions, **after historical gates pass**, with stored candles updating | `python -m trading_agent.strategy.outcome_cli paper CANDIDATE_ID --watch` | Records prospective shadow intents every 10 seconds and settles them as future candles arrive; Ctrl+C stops safely |
-| Once both historical and forward gates pass; repeat only to renew qualified evidence or change candidate | `python -m trading_agent.strategy.outcome_cli promote CANDIDATE_ID` | Verifies evidence and atomically selects the candidate; there is no force flag |
-
-Replace `CANDIDATE_ID` with a qualifying ID from `status`. Do not run the failed first candidate as if it had passed. To run any command in Docker, prefix the same Python command with `docker compose run --rm tools`, for example:
-
-```powershell
-docker compose run --rm tools python -m trading_agent.strategy.outcome_cli status
-```
-
-Rebuild after code changes with `docker compose build api frontend`, then `docker compose up -d api frontend`. No pruning, database reset or credential changes are required. After promotion, use **ML only**, **minute**, **2:1 reward/risk**, keep the evidence gate enabled and run a fresh scan. Predictions apply only to explicitly trained symbols; the first candidate does not cover all 2,319 stocks.
-
-Both directions must independently exceed 60% wins, have Wilson and session-bootstrap 95% lower win bounds above 60%, and have positive bootstrap lower net expectancy. Historical minimum: 100 selected trades across 10 sessions per side. Forward minimum: 100 settled trades across 20 sessions per side. Pending, invalid, stale or missing evidence blocks promotion. These criteria do not guarantee future returns.
-
-Artifacts, reports, reserved test periods and forward evidence live under `models/outcome_candidates/`; the active pointer is `models/outcome-active.json`. Back them up together. Do not delete the test-reservation ledger to rerun an inspected period. The CLI rejects overlapping test dates even if symbols change. See [USER_GUIDE.md](USER_GUIDE.md#buy-sell-outcome-models) for exact execution and evaluation assumptions.
+The API, dashboard, tests, stored-data analysis, backtests and paper trading run without Kite credentials. Credentials and a current daily access token are needed only to download or stream broker data, or to place live orders.
 
 ## Quick start: local
 
-Use Python 3.11 or 3.12 and Node 22 for the frontend. Docker and CI use Python 3.11. Tests also passed in the existing Python 3.13 environment, but use 3.11/3.12 for fresh installations of the pinned legacy-model dependencies. Only copy `.env.example` on first setup: do not overwrite your existing configuration.
+Use Python 3.11 or 3.12 and Node 22. Copy `.env.example` only on first setup.
 
 ```powershell
 # Windows PowerShell
@@ -71,355 +36,254 @@ python -m venv .venv
 python -m pip install --upgrade pip
 pip install -e ".[dev]"
 Copy-Item .env.example .env
-
-# Start the API; the SQLite schema is created automatically.
-trading-agent-api
+python -m trading_agent.scripts.validate_setup --skip-llm   # pre-flight check
+trading-agent-api                                           # creates the SQLite schema
 ```
 
 ```bash
 # macOS/Linux
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -e ".[dev]"
 cp .env.example .env
+python -m trading_agent.scripts.validate_setup --skip-llm
 trading-agent-api
 ```
 
-Open:
-
-- API: http://localhost:8000
-- Swagger API documentation: http://localhost:8000/docs
-- Health check: http://localhost:8000/api/v1/health
-
-To run the dashboard in a second terminal:
+Dashboard, in a second terminal:
 
 ```bash
 cd frontend
 npm ci
-npm run dev
+npm run dev        # PowerShell: npm.cmd run dev
 ```
 
-Then open http://localhost:5173. Vite proxies `/api` to the backend on port 8000. On PowerShell, use `npm.cmd` if execution policy blocks `npm.ps1`.
+Open http://localhost:5173 (dashboard), http://localhost:8000/docs (API) and http://localhost:8000/api/v1/health.
 
 ## Quick start: Docker
 
-Docker Compose uses the same SQLite/Parquet storage model as local execution. `./data` and `./models` are mounted into every Python service. The frontend is a compiled bundle served by unprivileged Nginx, not a development server. Host ports are bound to loopback only.
+Compose uses the same SQLite/Parquet storage as local runs. `./data` and `./models` are mounted into every Python service; ports bind to loopback only.
 
 ```bash
-cp .env.example .env       # PowerShell: Copy-Item .env.example .env
+cp .env.example .env
 docker compose --profile live build
 docker compose up -d api frontend
 docker compose ps
 ```
 
-Open the dashboard at http://localhost:5173 or the API docs at http://localhost:8000/docs.
+### Daily operating schedule
 
-The dashboard opens in the original research layout: watchlist sidebar, bullish/bearish **Top Opportunity** cards, **Plotly** chart, **Hybrid Decision Maker**, stop/target/position sizing, and news sentiment. Click **Scan entire watchlist** to evaluate every unique symbol in `symbols.txt`; the current file contains 2,319, not a hard-coded 2,270. Skipped symbols and data errors are reported. Refreshing the page does not launch a scan.
+| When | Command | Purpose |
+|---|---|---|
+| Before the first market-data operation each day | `docker compose run --rm tools trading-agent login` | Refresh the Kite token in `data/.access_token` |
+| After downtime | `docker compose run --rm tools trading-agent heal-gaps --interval 5minute --limit 100` | Replay a one-day overlap and catch up; drop `--limit` after reviewing |
+| Market session | `docker compose --profile live up -d api frontend ticker scheduler` | Live candles, scheduled decisions, 15:15 square-off, 15:40 drift check |
+| After startup | `docker compose ps` | Confirm services are healthy |
+| Troubleshooting | `docker compose logs -f --tail=200 api ticker scheduler` | Stream logs; `Ctrl+C` leaves the view only |
+| End of session | `docker compose down` | Stop containers; data and token are kept |
+| After code or dependency changes | `docker compose --profile live build`, then the `up -d` command again | Rebuilding alone does not replace running containers |
 
-The existing `models/ml_model.joblib` is a legacy nine-feature classifier. The restored inference adapter reproduces its original feature formulas and class mapping. Use **1 minute** with this artifact; other intervals must use rules-only until a compatible artifact is supplied. Missing/incompatible models are explicitly unavailable, never fabricated predictions. The artifact lacks training provenance and interval metadata, so its performance must be revalidated; minute data follows the original loader's convention.
+Use the same interval as `STORAGE_CANDLE_INTERVAL` (default `5minute`) for gap healing; minute and five-minute data are stored separately. Exit code 1 from `heal-gaps` means failure: read the `errors` summary before retrying, and run one download at a time.
 
-The saved classifier embeds scikit-learn **1.5.2**, now pinned in the project dependencies. Its Windows-specific `_loss` class alias is resolved explicitly on Linux without rewriting the model. Version-mismatched artifacts are rejected: [scikit-learn does not support loading persisted estimators across versions](https://scikit-learn.org/stable/model_persistence.html#security-maintainability-limitations). This compatibility fix is not proof of predictive performance. Docker caches dependencies/browser installation separately from source-only edits.
+## Kite setup
 
-Choose capital, per-trade risk and target reward/risk before scanning. BUY/SELL disagreements produce HOLD. Stops use 1.5×ATR; targets use the selected reward/risk. The ranked basket reserves exposure and risk across both directions and excludes held/stale/over-budget entries from eligible top picks. Older signals remain visible in the sidebar as research only. Plans are snapshots, not executable quotes or broker orders.
+1. Set `KITE_API_KEY`, `KITE_API_SECRET`, `KITE_USER_ID`, `KITE_PASSWORD`, `KITE_TOTP_SECRET` and the redirect URL registered with Kite in `.env`.
+2. Once: `playwright install chromium`.
+3. Each trading day: `trading-agent login` (automated) or `python manual_login.py` (manual fallback).
 
-**Refresh selected symbol news** fetches up to 10 recent headlines. Tick the LLM checkbox only if you want to invoke your configured provider (charges may apply). Mock mode supplies no real sentiment score. Scans consume cached sentiment only; they do not download candles or call an LLM for thousands of stocks. The **Paper operations** tab manages existing positions.
-
-### Walk-Forward Optimizer (optional research)
-
-Select a stock and interval, then use **Walk-Forward Optimizer → Run walk-forward evaluation**. This tunes rule thresholds on each training window and compares them with default rules on the following unseen test window. It does **not** train ML, change your active configuration, or place orders. Run it after adding history or when researching rule changes, not on every startup. Default windows require 4,500 candles (3,750 training + 750 test); the panel explicitly reports insufficient history or too few training trades.
-
-For the same optional check from a terminal:
-
-```powershell
-# Local, with the virtual environment active
-python -m trading_agent.research.walk_forward_optimizer RELIANCE --interval minute --train-candles 3750 --test-candles 750 --cost-bps 5
-
-# Docker alternative; uses stored data, no login or download
-docker compose run --rm tools python -m trading_agent.research.walk_forward_optimizer RELIANCE --interval minute --train-candles 3750 --test-candles 750 --cost-bps 5
-```
-
-Costs are an adjustable round-trip assumption in basis points, not an exchange/broker fee estimate. Training outcomes cannot cross into the test window. Both paths use next-bar open entry, fixed 12-bar exit and non-overlapping positions. Reported sums of trade returns are **not portfolio performance**. This is rule-only research, not validation of the hybrid ML model; retain a separate final holdout and see [USER_GUIDE.md](USER_GUIDE.md) for limitations.
-
-The build command is required on first setup and after pulling or making application/dependency changes. It is not a daily command.
-
-Compose overrides the local `.env` log-file setting and writes to `data/logs/trading-agent.log` on the host. This keeps file logging writable for the non-root container user and preserves logs across container replacement.
-
-If startup reports `dependency failed to start` or an unhealthy API, run `docker compose logs --tail=100 api` to find the underlying error. For `PermissionError: ... 'logs'` from an older Compose configuration, update the project and run `docker compose up -d api frontend` to apply the corrected log path; no image rebuild or data deletion is needed for this configuration-only fix.
-
-## Docker operating schedule
-
-These are the commands an operator may need to repeat. Run them from the repository root.
-
-| When | Required? | Command | Purpose |
-|---|---|---|---|
-| Before the first market-data operation of each trading day, or whenever Kite rejects the token | Yes, for broker data | `docker compose run --rm tools trading-agent login` | Automatically signs in and saves the current token in `data/.access_token` |
-| After login on first use, after downtime, or when candles are missing | As needed | See **Catch up missing candles** below | Replays a one-day overlap and catches up the selected interval |
-| Whenever the dashboard/API should run | Yes | `docker compose up -d api frontend` | Starts the API and dashboard without live broker processes |
-| At the start of a live market-data session | Yes, for live mode | `docker compose --profile live up -d api frontend ticker scheduler` | Starts the complete application, live ticker, and scheduler |
-| Immediately after startup | Recommended | `docker compose ps` | Confirms that the requested services started and the API is healthy |
-| While monitoring or troubleshooting | Optional | `docker compose logs -f --tail=200 api frontend ticker scheduler` | Streams logs; press `Ctrl+C` to leave the log view without stopping containers |
-| At the end of a session or before maintenance | Optional | `docker compose down` | Stops containers without deleting candle data, models, or the access token |
-| After source, dependency, Dockerfile, or Compose changes | Required after such changes | `docker compose --profile live build` | Rebuilds images; rerun the appropriate `up -d` command afterward to replace old containers |
-
-### Normal trading-day sequence
-
-Authenticate first, catch up missing candles if the application was not continuously running, and then start live mode:
-
-```bash
-docker compose run --rm tools trading-agent login
-
-# Run the catch-up command from the next section when needed.
-
-docker compose --profile live up -d api frontend ticker scheduler
-docker compose ps
-docker compose logs -f --tail=200 api frontend ticker scheduler
-```
-
-The login command reuses a still-valid token when possible and automatically logs in when a new token is required. `Ctrl+C` only exits the final log-view command; the application continues running in Docker.
-
-### Catch up missing candles
-
-Run this after login when the system has been offline or a download was interrupted. Start with 100 symbols, review the summary, then omit `--limit` to process the complete watchlist. Choose the **same interval as `STORAGE_CANDLE_INTERVAL`** (default `5minute`); one-minute and five-minute datasets are separate and are not automatically resampled.
-
-The command replays one day before each latest stored candle, correcting recent partial live bars and catching up through the last completed bar. A new symbol defaults to 30 days. Reads deduplicate retries by timestamp. This is not a complete interior-gap audit: use an explicit historical ingest for older holes. Physical storage row counts include replay copies until compaction.
-
-Symbols that are no longer present in Kite's current NSE equity instrument list are logged as `gap_heal_symbol_skipped` and do not stop the remaining watchlist from being processed.
-
-```bash
-# Bounded validation first; replace 5minute with minute if configured that way.
-docker compose run --rm tools trading-agent heal-gaps --interval 5minute --limit 100
-# Full watchlist, only when needed:
-docker compose run --rm tools trading-agent heal-gaps --interval 5minute
-```
-
-For a long run in Windows PowerShell, save the output so progress and failures can be reviewed later:
-
-```powershell
-docker compose run --rm tools trading-agent heal-gaps --interval 5minute --limit 100 *> data\backfill_latest.log
-$LASTEXITCODE
-Get-Content data\backfill_latest.log -Tail 100
-```
-
-If interrupted, rerun after checking authentication. Exit code 1 means failure; inspect `errors` and logs. Invalid instruments are listed under `skipped`; `rows_written` includes overlap, not just newly discovered candles. Authentication or open-breaker failures stop the batch. Investigate the first error before retrying; run only one historical-data job at a time because pacing is process-local.
-
-### Other occasional Docker commands
-
-```bash
-# Run any CLI command in a temporary tools container
-docker compose run --rm tools trading-agent --help
-docker compose run --rm tools trading-agent storage-stats
-docker compose run --rm tools trading-agent ingest RELIANCE TCS --days 30
-
-# Inspect a specific service after an error
-docker compose logs --tail=200 api
-```
-
-The `live` profile is deliberately opt-in because it uses broker/network resources and starts scheduled jobs.
-
-## Kite setup and daily authentication
-
-1. Copy `.env.example` to `.env`.
-2. Set `KITE_API_KEY`, `KITE_API_SECRET`, `KITE_USER_ID`, `KITE_PASSWORD`, `KITE_TOTP_SECRET`, and the redirect URL registered with Kite.
-3. Authenticate each trading day:
-
-```bash
-# Automated TOTP/Playwright flow
-trading-agent login
-
-# Manual browser flow if automation is unavailable
-python manual_login.py
-```
-
-The generated token is stored at `data/.access_token`, which is ignored by Git and shared with Docker through the data mount.
-
-For automatic login, install Chromium locally once:
-
-```bash
-playwright install chromium
-```
+The token is stored at `data/.access_token`, ignored by Git and shared with Docker.
 
 ## Common workflow
 
 ```bash
-# Download history. Omitting symbols uses the configured/default watchlist.
+# Watchlist and data
+python -m trading_agent.ingest.build_nifty500_symbols          # resolves instrument tokens; --no-resolve to skip
 trading-agent ingest RELIANCE TCS INFY --days 100
-trading-agent backfill RELIANCE --years 2
+trading-agent backfill RELIANCE --years 2                       # chunked, resumable, rate limited
 trading-agent storage-stats
 
-# Research stored data
+# Research
 trading-agent diagnose RELIANCE TCS
 trading-agent backtest RELIANCE TCS --start 2025-01-01 --end 2025-06-30
-trading-agent optimize walk-forward RELIANCE TCS
-trading-agent optimize ml-model-v2 RELIANCE TCS
+python -m trading_agent.research.walk_forward_optimizer --selftest   # vectorized vs loop reference
+python -m trading_agent.research.walk_forward_optimizer RELIANCE --interval minute --cost-bps 5
+python -m trading_agent.research.walk_forward_optimizer --all        # whole watchlist, expensive
 
-# One pipeline pass
-trading-agent pipeline RELIANCE TCS
+# ML drift monitoring
+python -m trading_agent.strategy.model_monitoring baseline      # once, before drift reports mean anything
+python -m trading_agent.strategy.model_monitoring report
 
-# Long-running market-hours processes
+# Market hours (local)
 trading-agent-ticker
 trading-agent-scheduler
 ```
 
-Run `trading-agent --help` or `trading-agent COMMAND --help` for the exact options. `python -m trading_agent.cli` is an equivalent fallback when console scripts are not on `PATH`.
+`trading-agent --help` and `trading-agent COMMAND --help` list every option. Prefix any command with `docker compose run --rm tools` to run it in Docker.
+
+## Decision paths
+
+- **Rule agent**: the validated path, and the only one that sizes trades by default.
+- **ML and LLM agents**: run in parallel and write to their own tables (`ml_signals`, `llm_signals`). They never override the rule signal. Rules + ML mode holds when the paths disagree or when ML is unavailable or withdrawn for drift.
+- **LLM**: OpenRouter only (`LLM_PROVIDER=openrouter`). Calls are spaced by `LLM_MIN_INTERVAL_SECONDS` and retried on 429/5xx, honouring `Retry-After`. The code default is `mock`, which makes no calls.
+- **Evidence gate**: with **Require qualified outcome evidence** on (the default), a scan only proposes plans backed by passing trade-outcome validation. Missing or expired evidence gives no plan, never an invented probability. See [USER_GUIDE.md](USER_GUIDE.md#trade-outcome-validation-and-win-estimates).
+- **Outcome models**: `python -m trading_agent.strategy.outcome_cli status|train|paper|promote`. The first candidate failed qualification and nothing is promoted. See [USER_GUIDE.md](USER_GUIDE.md#buysell-outcome-models).
+
+## Risk controls and execution
+
+Every entry, whether from the dashboard, the paper book or the API, passes the same checks before any order is sent:
+
+- Kill switch (persists across restarts; an unreadable state file blocks entries).
+- Session: no entries before 09:15, after `PAPER_ENTRY_CUTOFF` (15:00) or on weekends.
+- Daily trade cap (`PAPER_MAX_TRADES_PER_DAY`).
+- Portfolio exposure, stop risk, position count, single-name cap, realized daily loss and drawdown.
+- Participation cap: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value.
+
+The scheduler squares off every open position at `PAPER_SQUARE_OFF_TIME` (15:15). Each entry, exit, fill, rejection and halt is written to `data/controls/audit-YYYY-MM-DD.jsonl`.
+
+Paper fills move `EXECUTION_SLIPPAGE_BPS` (5 bps) against you. Net P&L subtracts modelled Zerodha intraday charges: brokerage, STT, exchange, SEBI, stamp duty and GST.
+
+Live mode sends Kite MARKET orders with product MIS and needs **both**:
+
+```dotenv
+EXECUTION_MODE=live
+EXECUTION_LIVE_CONFIRMATION=I-ACCEPT-REAL-MONEY-RISK
+```
+
+Do a small supervised round trip and check reconciliation before relying on it.
 
 ## Configuration
 
-Settings come from process environment variables first, then `.env`. Important values are:
+Settings come from environment variables, then `.env`, then code defaults. Full list: [.env.example](.env.example).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DB_URL` | `sqlite:///data/trading.db` | SQLAlchemy database URL |
-| `DATA_DIR` | `data` | Runtime data and access-token directory |
-| `STORAGE_PARQUET_ROOT` | `data/parquet` | Candle storage |
-| `ML_MODEL_DIR` | `models` | Model registry and artifacts |
-| `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Local bind address; Compose overrides inside its containers |
-| `API_AUTH_TOKEN` | empty | Optional bearer authentication; enable before sharing access |
-| `STORAGE_CANDLE_INTERVAL` | `5minute` | Ticker, scheduler, and position-monitor interval |
-| `PAPER_INITIAL_CAPITAL` | `1000000` | Initial paper capital; keep fixed for an existing ledger |
-| `PAPER_ENTRIES_ENABLED` | `true` | Set `false` and restart API to block new paper entries (closing remains allowed) |
-| `PAPER_MAX_POSITIONS` | `10` | Maximum open paper positions |
-| `PAPER_MAX_EXPOSURE_PCT` / `PAPER_MAX_RISK_PCT` | `0.50` / `0.06` | Aggregate notional and stop-risk fractions of gross book equity |
-| `PAPER_MAX_TRADE_RISK_PCT` | `0.02` | Maximum stop risk per paper entry |
-| `PAPER_MAX_SINGLE_POSITION_PCT` | `0.10` | Maximum notional per symbol, applied to both scan sizing and manual entries |
-| `PAPER_MAX_DAILY_LOSS_PCT` | `0.03` | Block entries after realized losses reach 3% of IST session-start equity |
-| `PAPER_MAX_DRAWDOWN_PCT` | `0.15` | Block entries at a 15% realized equity drawdown from the ledger's peak |
-| `API_CORS_ORIGINS` | local frontend origins | JSON list of allowed origins |
-| `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `console` | Logging behavior |
-| `LLM_PROVIDER` | `mock` | `mock`, `openai`, or `anthropic` |
-| `LLM_BASE_URL` | OpenAI | Base URL for an OpenAI-compatible API |
-| `LLM_API_KEY` / `LLM_MODEL` | empty / `gpt-4o-mini` | Optional LLM credentials/model |
+| `DB_URL` | `sqlite:///data/trading.db` | SQLite database (WAL mode) |
+| `DATA_DIR` / `STORAGE_PARQUET_ROOT` | `data` / `data/parquet` | Runtime data and candles |
+| `ML_MODEL_DIR` | `models` | Model artifacts and drift baseline |
+| `STORAGE_CANDLE_INTERVAL` | `5minute` | Ticker, scheduler and monitor interval |
+| `API_HOST` / `API_PORT` / `API_WORKERS` | `127.0.0.1` / `8000` / `1` | Keep one worker |
+| `API_AUTH_TOKEN` | empty | Optional bearer token; set before sharing access |
+| `PAPER_INITIAL_CAPITAL` | `1000000` | Keep fixed for an existing ledger |
+| `PAPER_ENTRIES_ENABLED` | `true` | `false` blocks new entries after restart; exits stay available |
+| `PAPER_MAX_POSITIONS` | `10` | Open positions |
+| `PAPER_MAX_EXPOSURE_PCT` / `PAPER_MAX_RISK_PCT` | `0.50` / `0.06` | Aggregate notional and stop risk |
+| `PAPER_MAX_TRADE_RISK_PCT` / `PAPER_MAX_SINGLE_POSITION_PCT` | `0.02` / `0.10` | Per-trade risk and per-symbol notional |
+| `PAPER_MAX_DAILY_LOSS_PCT` / `PAPER_MAX_DRAWDOWN_PCT` | `0.03` / `0.15` | Realized loss limits |
+| `PAPER_MAX_TRADES_PER_DAY` | `20` | Daily entry cap |
+| `PAPER_ENTRY_CUTOFF` / `PAPER_SQUARE_OFF_TIME` | `15:00` / `15:15` | IST session discipline |
+| `PAPER_ENFORCE_SESSION` | `true` | `false` disables time gates (tests); the trade cap still applies |
+| `EXECUTION_MODE` / `EXECUTION_LIVE_CONFIRMATION` | `paper` / empty | Live orders need both set |
+| `EXECUTION_SLIPPAGE_BPS` / `EXECUTION_PRODUCT` | `5` / `MIS` | Paper slippage; live product |
+| `EXECUTION_MAX_PARTICIPATION_PCT` | `0.01` | Share of average daily traded value |
+| `LLM_PROVIDER` | `mock` in code, `openrouter` in `.env.example` | `mock` makes no calls |
+| `LLM_API_KEY` / `OPENROUTER_API_KEY` / `LLM_MODEL` | empty / empty / `gpt-4o-mini` in code (`.env.example`: `google/gemini-2.0-flash-001`) | OpenRouter credentials and model id |
+| `LLM_MIN_INTERVAL_SECONDS` / `LLM_MAX_RETRIES` | `4.5` / `4` | Throttling and 429 retries |
+| `MONITOR_PSI_WARN` / `MONITOR_PSI_DRIFT` | `0.1` / `0.25` | Drift thresholds per feature |
+| `MONITOR_DRIFT_FEATURES_TO_FALLBACK` | `3` | Drifted features that withdraw ML |
 
-Keep `LLM_PROVIDER=mock` to guarantee that the comparison path makes no external LLM calls. See [.env.example](.env.example) for every supported setting.
-
-The dashboard shows its access-token form only when the server has `API_AUTH_TOKEN` configured; it stays hidden for ordinary local use without API authentication. A public `/api/v1/auth/status` endpoint returns only whether authentication is required, never the token. Supplied tokens stay in browser memory only. This is separate from Kite autologin, which handles broker access. Do not put secrets in frontend build variables. With authentication enabled, browser Swagger access also requires an Authorization header; ordinary direct navigation does not supply one. Remote access additionally needs TLS, an authenticated gateway, and an operator/security review.
-
-Paper wallet totals come from persisted `open_positions` records, including closed rows. They are gross entry-cost accounting: no live mark-to-market, fees, slippage, deposits, or broker reconciliation. Manual closes use the price you enter. Stops generate advisory alerts, not guaranteed fills or automatic broker exits. Do not change initial capital to conceal losses.
+The dashboard shows an access-token form only when `API_AUTH_TOKEN` is set. Tokens stay in browser memory. Remote access additionally needs TLS and an authenticated gateway.
 
 ## Architecture
 
 ```text
-Kite/RSS -> ingest -> Parquet + SQLite
-                         |
-              core indicators/signals
-                         |
-        strategy (rule / ML / optional LLM)
-                         |
-             analysis + paper-risk layer
-                         |
-                 FastAPI -> React UI
+Kite REST/WebSocket, RSS -> ingest -> Parquet candles + SQLite (WAL)
+                                  |
+                core indicators, patterns, signals
+                                  |
+          strategy: rule (authoritative) | ML | LLM (parallel)
+                                  |
+     analysis: research scan, opportunities, volume, performance
+                                  |
+  risk controls -> execution router -> paper fill | Kite order
+                                  |
+             FastAPI (/api, /api/v1) -> React + MUI
 ```
-
-The source layout is:
 
 ```text
 src/trading_agent/
-  api/        FastAPI app and routers
-  analysis/   rankings, opportunities, sentiment, digests
-  core/       config, indicators, signals, logging, resilience
-  ingest/     Kite auth/history/live ticker, news, watchlists
-  optimize/   optimization CLI
-  research/   backtests, diagnostics, walk-forward studies
-  risk/       paper wallet, portfolio limits, position monitor
-  scripts/    scheduler, health checks, maintenance
-  storage/    SQLAlchemy schema and Parquet store
-  strategy/   candidate generation and decision paths
-frontend/     React + TypeScript dashboard
-migrations/   Alembic database migrations
-tests/        unit and integration tests
+  api/        FastAPI app; routers incl. legacy_ui (/api) and operations (/api/v1)
+  analysis/   research scan, opportunities, technical summary, volume, performance
+  core/       config, indicators, patterns, signals, LLM client, freshness
+  execution/  order router, Zerodha costs, reconciliation
+  ingest/     Kite auth/history/live ticker, instruments, news, watchlists
+  research/   backtests, diagnostics, walk-forward optimizer
+  risk/       ledger guard, portfolio limits, controls, position monitor
+  scripts/    scheduler, validate_setup, supervisor, maintenance
+  storage/    SQLAlchemy models, Parquet store
+  strategy/   candidates, ML/LLM agents, outcome models, drift monitoring
+frontend/     React + TypeScript + Vite + MUI
+migrations/   Alembic revisions 001-003
+tests/        unit, integration and browser smoke tests
 ```
-
-SQLite is the supported runtime database today. PostgreSQL is not advertised until the remaining direct `sqlite3` consumers are migrated.
 
 ## Database lifecycle
 
-The API creates missing tables on startup for a zero-setup local experience. For explicit migration-controlled environments, run:
+The API creates missing tables on startup. Migration-controlled deployments run:
 
 ```bash
-alembic upgrade head
+alembic upgrade head       # Docker: docker compose run --rm tools alembic upgrade head
 alembic current
-# Docker equivalent (new databases / migration-managed deployments):
-docker compose run --rm tools alembic upgrade head
 ```
 
-Do not edit an already-applied initial migration in a deployed database; add a new Alembic revision instead.
-
-For a new migration-managed database, run migrations **before** starting the API. An older auto-created database may have tables but no Alembic revision: back it up and compare its schema before adopting migrations; do not blindly stamp, drop tables, or run the initial creation over it. Stop writers before filesystem backups and verify restoration into a separate directory. `docker compose down` preserves bind-mounted data; image pruning is not required for an upgrade.
+Revision 003 adds the `orders` table. Back up an existing database with the SQLite backup API and stop writers before upgrading. Never edit an applied migration; add a new revision. See [USER_GUIDE.md](USER_GUIDE.md#database-upgrades).
 
 ## Development checks
 
 ```bash
-pytest
-pytest --cov=trading_agent --cov-report=term-missing
+PYTHONPATH=src python -m pytest -q -p no:cacheprovider --ignore=tests/docker_smoke.py --ignore=tests/dashboard_auth_smoke.py --ignore=tests/dashboard_workflow_smoke.py
 ruff check src migrations
-
-cd frontend
-npm run typecheck
-npm run build
+cd frontend && npm run typecheck && npm run build && cd ..
+python tests/dashboard_workflow_smoke.py
+python tests/dashboard_auth_smoke.py
 ```
 
-The suite includes storage replay/concurrency, broker-message normalization, paper-ledger/API contracts, and fresh-database migration checks. See [READINESS.md](READINESS.md) for validation evidence and limitations; a build alone is not a live-session test.
+`PYTHONPATH=src` avoids importing a different installed copy of the package. CI runs on `main`, `develop`, `gemini`, `rework` and `unified-platform`. Evidence and gates: [READINESS.md](READINESS.md).
 
-CI runs on pushes and pull requests for `gemini` and `rework` as well as `main` and `develop`. Container publication remains limited to `main` and `develop` pushes. Tests use temporary stores; do not use your real paper ledger as a test database.
+## Linked worktree layout
 
-## Moving from rework
-
-Keep the familiar dashboard layout while using the packaged backend. Run `pip install -e ".[dev]"` in a separate virtual environment for each branch, then `trading-agent-api` and the frontend's `npm run dev`. Old `python -m api.main` / flat-package imports are replaced by `trading_agent.*`; browser endpoints use `/api/v1`.
-
-The old `data/trading_agent.db` and the current `data/trading.db` have different contracts. Preserve the old database as a backup and use a separate database for the new branch until its schema and ledger records have been checked. Do not point the new API at the old database simply to recover a balance. Likewise keep interval-specific Parquet history, model metadata and evidence stores together; switching source branches does not migrate stored data. No schema or real-data migration is performed by this repair.
-
-The overview and paper ledger require only the API and frontend. Ingestion, scheduled strategy decisions, validation, retraining and model promotion each remain optional operations. See [the user guide](USER_GUIDE.md#optional-automatic-research) for the separate stored-data scanner and its limits.
-
-If your main checkout is still `rework` and the repaired `gemini` branch is in `.worktrees/gemini-repair`, build from that worktree and resolve runtime mounts against the main project directory:
+If the main checkout is on another branch and this branch is in `.worktrees/gemini-repair`, build from the worktree and keep the main folder's `.env`, `data` and `models`:
 
 ```powershell
-$repo = (Get-Location).Path # Run from the main trading-agent folder
-$repair = Join-Path $repo '.worktrees/gemini-repair'
-docker build -t trading-agent-app:latest $repair
-if ($LASTEXITCODE -ne 0) { throw 'API build failed' }
-docker build -t trading-agent-frontend:latest "$repair/frontend"
-if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
-docker compose --project-directory $repo -f "$repair/docker-compose.yml" up -d --no-build api frontend
-# Only when you use the live ticker/scheduler, recreate those against the same image:
-docker compose --project-directory $repo -f "$repair/docker-compose.yml" --profile live up -d --no-build ticker scheduler
+$repo = (Get-Location).Path   # main trading-agent folder
+$wt = Join-Path $repo '.worktrees/gemini-repair'
+docker build -t trading-agent-app:latest $wt
+docker build -t trading-agent-frontend:latest "$wt/frontend"
+docker compose --project-directory $repo -f "$wt/docker-compose.yml" up -d --no-build api frontend
+docker compose --project-directory $repo -f "$wt/docker-compose.yml" --profile live up -d --no-build ticker scheduler
 ```
 
-This keeps the original `.env`, `data` and `models` mounts. Building from the main `rework` folder uses different source. A healthy API alone does not establish that the scheduler or live feed is healthy; check every requested service's status.
+Keep separate databases per branch until schemas are checked; `data/trading_agent.db` (old) and `data/trading.db` (current) have different contracts.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `trading-agent` is not found | Activate the virtual environment and run `pip install -e .`, or use `python -m trading_agent.cli` |
-| `No data available` | Authenticate, run `trading-agent ingest SYMBOL`, then check `trading-agent storage-stats` |
-| Kite token rejected | Run `trading-agent login` again; Kite access tokens are short-lived |
-| Playwright browser missing | Run `playwright install chromium`, or use `python manual_login.py` |
-| Port 8000/5173 is busy | Change the port mapping in `docker-compose.yml` or use CLI/API port options |
-| Docker frontend cannot reach API | Confirm `api` is healthy with `docker compose ps` and inspect `docker compose logs api` |
-| Compose reports `no configuration file provided` from the main `rework` folder | Use the worktree commands above. For status from that folder, run `docker compose --project-directory . -f ./.worktrees/gemini-repair/docker-compose.yml --profile live ps`. Build images from the explicit worktree contexts shown above. |
-| API image build reports `files.pythonhosted.org` read timeout | Retry the build. Python package downloads use a 300-second socket timeout, 10 connection retries, and a persistent BuildKit package cache. For longer network stalls, add `--build-arg PIP_DEFAULT_TIMEOUT=600` to `docker build`. A failed partial download may restart; completed cached downloads can be reused. |
-| SQLite is locked | Avoid multiple ad-hoc writers; stop duplicate ticker/scheduler processes |
-| Wallet/positions return 500 with `no such column` | An older database needs migration `002`. Back up SQLite with its backup API, stop API/scheduler writers, and run `alembic upgrade head` using the new image and existing data mount; then restart services. See the user guide's database upgrade procedure. Never delete the database to resolve this. |
-| Rebuilt code appears unchanged | Rerun `docker compose up -d api frontend` (and live services if used); rebuilding alone does not replace running containers |
-| `kite_historical` breaker is OPEN | Review the first underlying failure, check login, wait for broker recovery, then retry a bounded batch; avoid concurrent backfills |
-| API returns 401 | Enter the configured bearer token in the console; never disable authentication to expose a public service |
-| Paper entry returns 409 | Read the error: duplicate symbol, entry switch, capital, position, exposure, daily loss, drawdown, or stop-risk limit; closes remain available |
+| `trading-agent` not found | Activate the virtual environment and `pip install -e .`, or use `python -m trading_agent.cli` |
+| Tests import stale code | Run with `PYTHONPATH=src` |
+| `No data available` | Log in, `trading-agent ingest SYMBOL`, then `trading-agent storage-stats` |
+| Kite token rejected | `trading-agent login` again |
+| Playwright browser missing | `playwright install chromium`, or `python manual_login.py` |
+| Entry rejected with 409 | Read the reason: kill switch, after 15:00, weekend, trade cap, duplicate symbol, exposure, risk, daily loss, drawdown or participation |
+| Entry rejected with 502 | The broker rejected the order; the reservation was removed. Check the audit log |
+| Sentiment calls return 429 | Raise `LLM_MIN_INTERVAL_SECONDS`; retries already honour `Retry-After` |
+| Drift monitor says "no baseline" | Run `python -m trading_agent.strategy.model_monitoring baseline` |
+| ML shows as withdrawn | Drift fallback is active; review **Analytics → ML drift monitor**, then **Restore ML** |
+| SQLite is locked | Stop duplicate ticker/scheduler processes |
+| `no such column` / missing `orders` table | Back up, stop writers, `alembic upgrade head` |
+| Rebuilt code appears unchanged | Rerun `docker compose up -d ...`; building does not replace containers |
+| API returns 401 | Enter the configured bearer token in the dashboard |
 
 ## Documentation map
 
-- [USER_GUIDE.md](USER_GUIDE.md): detailed setup, daily operation, and recovery steps
-- [READINESS.md](READINESS.md): integration audit, evidence, and institutional-readiness gates
-- [ARCHITECTURE.md](ARCHITECTURE.md): architectural decisions
-- [DESIGN.md](DESIGN.md): components, data flow, and deployment design
-- [STRATEGIES.md](STRATEGIES.md): strategy hypotheses and promotion rules
-- [EDGE_ANALYSIS.md](EDGE_ANALYSIS.md): measured signal-edge research
-- [ML_REDESIGN_SUMMARY.md](ML_REDESIGN_SUMMARY.md): ML v2 design notes
-- [PRD.md](PRD.md): product goals and constraints
+- [MEMORY.md](MEMORY.md): **project status, feature map, open work and decision log**
+- [USER_GUIDE.md](USER_GUIDE.md): detailed operation and recovery
+- [READINESS.md](READINESS.md): verification commands, evidence and release gates
+- [ARCHITECTURE.md](ARCHITECTURE.md): binding decisions
+- [DESIGN.md](DESIGN.md): components and data flow
+- [PRD.md](PRD.md): product scope
 - [RULES.md](RULES.md): contributor rules
-- [TASKS.md](TASKS.md): active work and known limitations
-- [MEMORY.md](MEMORY.md): historical decision log
-- [TASKS_INTEGRATION.md](TASKS_INTEGRATION.md): archived integration implementation brief
+- [STRATEGIES.md](STRATEGIES.md), [EDGE_ANALYSIS.md](EDGE_ANALYSIS.md): historical strategy research
 
 ## License
 
-No license file is currently included. Treat the repository as all-rights-reserved unless the owner adds an explicit license.
+No license file is included. Treat the repository as all-rights-reserved unless the owner adds one.

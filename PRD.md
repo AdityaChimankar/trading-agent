@@ -1,14 +1,14 @@
 # Product requirements
 
-Last reviewed: 2026-10-19
+Last reviewed: 2026-10-24
 
 ## Product statement
 
-Trading Agent is a local-first NSE intraday research and paper-trading workbench. It collects market/news data, evaluates multiple decision approaches independently, measures them against honest baselines, applies portfolio constraints, and presents results through a CLI, API, and dashboard.
+Trading Agent is a single local-first NSE intraday trading application. It collects market and news data and evaluates rule, ML and LLM decision paths independently, measuring them against honest baselines. It sizes trades within portfolio and intraday risk limits, routes them through one guarded order router, and reports performance net of costs. Results are available through a CLI, an API and one dashboard.
 
-It is not an order execution system and must never imply that simulated fills or balances reflect a broker account.
+Paper mode is the default. Simulated fills and balances must never be presented as broker results. Live routing exists behind an explicit double opt-in and is not yet certified.
 
-Institutional readiness is a roadmap, not a current product claim. The tested operating boundary and release gates are maintained in [READINESS.md](READINESS.md). The deployed UI currently supports stored-candle inspection, pipeline status, and persistent manual paper positions; legacy research panels require contract migration before activation.
+Institutional readiness is a roadmap, not a current product claim. Release gates are in [READINESS.md](READINESS.md); status and open work are in [MEMORY.md](MEMORY.md).
 
 ## Users
 
@@ -32,7 +32,7 @@ A user can run an edge diagnostic, backtest, walk-forward optimization, or model
 
 ### Paper operation
 
-A user can view opportunities, record/monitor paper positions, and inspect paper wallet metrics without any real-order path.
+A user can view opportunities, open trades through the router in paper mode, monitor and square off positions, and review net-of-cost analytics. A user can halt all entries with one control.
 
 ### Deployment
 
@@ -52,8 +52,14 @@ A user can start the API/dashboard with Docker Compose and explicitly opt into b
 | P1 | Independent LLM comparison path | implemented; mock by default |
 | P1 | Scheduled decisions and monitoring | implemented; `live` profile |
 | P1 | Drift-triggered/weekly retraining | implemented; needs operational evidence |
+| P0 | Intraday risk controls (kill switch, session gates, trade cap, square-off, audit) | implemented |
+| P0 | Order router with pre-trade checks, Zerodha costs and reconciliation | implemented; live mode unverified |
+| P1 | Performance analytics net of costs | implemented |
+| P1 | Volume-based recommendations and participation cap | implemented; heuristic, not backtested |
+| P1 | ML drift monitoring with automatic fallback | implemented; needs a real baseline |
+| P1 | Classic dashboard alongside research workspace (Material UI) | implemented |
 | P2 | PostgreSQL runtime | not supported yet |
-| Out of scope | Real broker order placement | intentionally absent |
+| P2 | Partial fills, cancels, idempotent order intents | not implemented |
 
 ## Quality requirements
 
@@ -92,16 +98,12 @@ Do not treat historical experimental returns in research notes as product guaran
 | Broker UI changes break automation | manual login remains supported |
 | SQLite write contention | single intended ticker/scheduler, short transactions, clear unsupported PostgreSQL status |
 | Look-ahead bias | explicit `generate_from_data` contract and regression tests |
-| Paid/unintended LLM calls | mock provider is default; explicit credentials required |
+| Paid/unintended LLM calls | mock provider is the code default; OpenRouter needs an explicit key; calls are rate limited |
+| Unintended live orders | paper default; live needs `EXECUTION_MODE=live` plus the confirmation phrase; kill switch |
 | Strategy overfitting | walk-forward evaluation and documented promotion rules |
-| Users confuse paper and real positions | repeated paper-only labeling and no order API |
+| Users confuse paper and real positions | execution mode shown on Risk & execution; orders record `mode` |
 | Documentation drift | commands validated during release review; docs link to one canonical quick start |
 
 ## Next product milestones
 
-1. Add API/startup smoke tests around a fresh migrated database.
-2. Bring lint/type-check baselines to zero incrementally and then make them strict CI gates.
-3. Add measured operational evidence for weekly retraining and drift alerts.
-4. Unify or retire remaining legacy SQLite schema paths.
-5. Optimize the frontend Plotly chunk.
-6. Decide whether PostgreSQL support is valuable enough to migrate all direct SQLite consumers.
+See the prioritized **Open work** table in [MEMORY.md](MEMORY.md#open-work).

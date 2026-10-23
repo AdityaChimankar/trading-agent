@@ -1,6 +1,8 @@
 # System design
 
-Last reviewed: 2026-10-20
+Last reviewed: 2026-10-24
+
+Project status and open work: [MEMORY.md](MEMORY.md).
 
 ## Outcome-evidence boundary
 
@@ -30,16 +32,19 @@ RSS/news ------------->|                   |--> caches
                 | rule | ML | optional LLM | shadow|
                 +----------------+----------------+
                                  |
-                    opportunities + paper risk
+             research scan snapshot (rankings, plans, volume)
                                  |
-                    SQLite <--> FastAPI <--> React
+        risk controls -> order router -> paper fill | Kite order
+                                 |
+                    SQLite <--> FastAPI <--> React + MUI
 ```
 
-The system is local-first and paper-only. It can be useful in three independent modes:
+The system is local-first; orders are paper unless live mode is explicitly enabled (ARCHITECTURE ADR-014). It can be useful in four independent modes:
 
 1. stored-data research and backtests;
 2. API/dashboard over existing data;
-3. market-hours ingestion and scheduled paper analysis.
+3. market-hours ingestion and scheduled paper analysis;
+4. supervised live routing, once the readiness gates are evidenced.
 
 ## Components
 
@@ -56,6 +61,43 @@ The system is local-first and paper-only. It can be useful in three independent 
 | `api/routers/research.py` | Scan/status/cancel, selected-symbol chart/evidence and explicit news actions |
 
 No inference path retrains or overwrites models. No scan makes broker requests, paid AI calls or paper entries. Full scans include every unique configured symbol; the displayed top lists are derived only after coverage is known. Missing data/model/news is not a substitute BUY signal. The old compatibility helpers are not the dashboard's primary engine.
+
+### Unified frontend
+
+`frontend/src/App.tsx` hosts eight hash routes (`lib/router.ts`) under a Material UI theme (`theme.ts`, shared primitives in `components/ui.tsx`, `NavBar.tsx`):
+
+| Route | Component(s) | Backend |
+|---|---|---|
+| `dashboard` | `Sidebar`, `OpportunityPanel`, `SymbolDetail`, `WalletPanel`, `PositionMonitor`, `DigestPanel` | `/api/*` (`legacy_ui.py`) |
+| `research` | `ResearchDashboard` (embedded) | `/api/v1/research` |
+| `paper` | `OperatingConsole` | `/api/v1/positions`, `/api/v1/wallet` |
+| `risk` | `RiskExecutionPage` | `/api/v1/controls`, `/api/v1/execution` |
+| `analytics` | `AnalyticsPage` | `/api/v1/analytics` |
+| `pipeline`, `history`, `news` | `PipelinePage`, `TransactionsPage`, `NewsPage` | `/api/*` |
+
+`api/routers/legacy_ui.py` adapts the research scan snapshot to the classic response shapes. It includes blocked rows with a flag, checks plan freshness with `_fresh_plan`, batches the pipeline query, and builds the digest in the background with a 15-minute cache. Deposits and withdrawals return 409 because the ledger is derived.
+
+### `execution`
+
+| Module | Responsibility |
+|---|---|
+| `execution/router.py` | `OrderRouter.enter/exit_position`: participation check, ledger reservation, broker call, fill rewrite, rejection rollback; `PaperBroker` (slippage) and `KiteBroker` (MARKET/MIS, polls order history) |
+| `execution/costs.py` | Zerodha intraday charges, round trip, break-even move, slipped price |
+| `execution/reconcile.py` | Ledger vs broker net quantities, unconfirmed/stale orders |
+
+### Intraday controls, analytics and monitoring
+
+| Module | Responsibility |
+|---|---|
+| `risk/controls.py` | Kill switch, session gates, trade cap, square-off, JSONL audit |
+| `risk/ledger_guard.py` | Realized equity, daily-loss and drawdown state inside `BEGIN IMMEDIATE` |
+| `analysis/performance.py` | Closed-trade rows net of order or modelled charges; summary, attribution, equity curve |
+| `analysis/volume_insights.py` | Time-of-day RVOL, VWAP, liquidity tier, participation-capped size, agreement with scan |
+| `analysis/technical_summary.py` | Groww-style indicator votes and verdict |
+| `strategy/model_monitoring.py` | Live-feature log, PSI/KS drift report, persisted fallback, CLI |
+| `api/routers/operations.py` | `/api/v1/controls`, `/execution`, `/analytics` endpoints |
+
+The scheduler adds `square_off_cycle` at the square-off time and `drift_check_cycle` at 15:40 IST.
 
 ### `core`
 
@@ -96,7 +138,7 @@ Backtests, edge diagnosis, strategy experiments, and walk-forward optimization. 
 
 ### `risk`
 
-Paper-wallet accounting, portfolio exposure/risk constraints, and open-position monitoring. Stop/target evaluation uses candle extremes; monitoring writes recommendations/alerts and does not place broker orders.
+Paper-wallet accounting, portfolio exposure/risk constraints, intraday controls and open-position monitoring. Stop/target evaluation uses candle extremes; monitoring writes recommendations/alerts. Only the order router (`execution/`) places orders.
 
 ### `api`
 
@@ -104,7 +146,7 @@ FastAPI application with routers for health, symbols/history, opportunities, pap
 
 ### `frontend`
 
-React + TypeScript, built with Vite. `OperatingConsole.tsx` consumes same-origin `/api/v1` contracts. Local development uses a Vite proxy to `127.0.0.1:8000`; Docker serves static assets with unprivileged Nginx and proxies to `api:8000`. Legacy screens remain unmounted until their contracts are migrated.
+React + TypeScript + Material UI, built with Vite; see **Unified frontend** above. All calls are same-origin (`/api`, `/api/v1`). Local development uses a Vite proxy to `127.0.0.1:8000`; Docker serves static assets with unprivileged Nginx and proxies to `api:8000`.
 
 ### `scripts`
 
@@ -157,7 +199,9 @@ Parquet range -> chronological timestamps -> historical slice
 | `data/parquet` | candle partitions |
 | `data/.access_token` | current Kite token; secret and Git-ignored |
 | `data/cache` or `.cache` | instrument/derived caches |
-| `models` | model files and registry |
+| `data/controls` | kill switch state and daily audit JSONL |
+| `data/ml_monitoring` | live ML feature log and drift/fallback status |
+| `models` | model files, registry and `feature_baseline.json` |
 
 ### Important tables
 
@@ -167,6 +211,7 @@ Parquet range -> chronological timestamps -> historical slice
 | `candles` | legacy relational candles; monitor prefers canonical Parquet |
 | `signals` | independent strategy-tagged decisions |
 | `open_positions` | canonical open AND closed paper positions, risk fields, and gross realized PnL |
+| `orders` | router orders: client id, position, side, quantity, purpose, mode, reference/fill price, charges, slippage, status, broker id |
 | `position_alerts` | monitor findings |
 | `trades` | legacy/research trade records; not the manual console's accounting source |
 | `opportunities` | ranked candidates |
@@ -216,7 +261,8 @@ The research dashboard also exposes a bounded `POST /api/v1/research/walk-forwar
 - Some older operational tables described in historical research documents are not first-class SQLAlchemy models.
 - The Plotly bundle is large and causes a frontend build warning.
 - Automatic Kite login depends on broker page stability; manual login remains the fallback.
-- No real-order execution or broker position reconciliation exists.
+- Live order routing and broker reconciliation exist but are unverified against a real account; partial fills and cancels are not handled.
+- Session gates use weekday/time rules, not the NSE holiday calendar.
 
 ## Validation
 

@@ -1,79 +1,157 @@
-# Project decision log
+# Project memory
 
-This is a concise historical log. Current operating instructions live in [README.md](README.md) and [USER_GUIDE.md](USER_GUIDE.md); binding decisions live in [ARCHITECTURE.md](ARCHITECTURE.md).
+This file is the **single source of truth for project status**: what exists, what is verified, what is open, and why past decisions were made. Update it in the same commit as any change to features, priorities or verification evidence. Other documents describe *how* to run and *how* it is built; they link here for status instead of keeping their own task lists.
 
-## 2026-10-19: Paper operating-path hardening
+| Need | Document |
+|---|---|
+| Quick start and daily commands | [README.md](README.md) |
+| Detailed operation and recovery | [USER_GUIDE.md](USER_GUIDE.md) |
+| Binding design decisions | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Components and data flow | [DESIGN.md](DESIGN.md) |
+| Verification commands, evidence and release gates | [READINESS.md](READINESS.md) |
+| Product scope | [PRD.md](PRD.md) |
+| Contributor rules | [RULES.md](RULES.md) |
+| Strategy hypotheses / historical edge research | [STRATEGIES.md](STRATEGIES.md), [EDGE_ANALYSIS.md](EDGE_ANALYSIS.md) |
 
-The follow-up audit found destructive partition overwrites, incorrect live volume/bucket handling, disconnected wallet/monitor data sources, dummy portfolio sizing, and incompatible frontend endpoints. The operating path now uses immutable Parquet batches, exchange-aware timestamps, persisted paper accounting, serialized entry caps, and a versioned console. Docker serves a compiled UI. Tests and unresolved institutional requirements are recorded in [READINESS.md](READINESS.md). No broker-order execution was added; live-session certification remains outstanding.
+## Current status
 
-## 2026-10-19: End-to-end contract audit
+Last updated: 2026-10-24. Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
 
-Findings:
+The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
-- nested settings did not read flat `.env` values consistently;
-- a generic host `DEBUG=release` value could prevent any package import;
-- Docker invoked nonexistent console modules and mounted Alembic Python files as PostgreSQL initialization SQL;
-- the application still had direct SQLite consumers, so advertised PostgreSQL support was misleading;
-- ORM, bootstrap SQL, and the initial migration disagreed on paper-position columns;
-- scheduler wrappers passed symbol strings into APIs that require `Candidate` objects;
-- an async news job was scheduled as a plain callable;
-- backtests generated signals by reading the newest Parquet data during historical replay;
-- backtest trades discarded stop/target values used by exit checks;
-- ML retraining referenced APIs that no longer existed;
-- the Docker Vite proxy targeted the frontend container itself.
+**Verified** (2026-10-24, after the documentation cleanup): 487 Python tests passed (`PYTHONPATH=src`), both offline browser smokes passed, and the frontend production build passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
 
-Decisions:
+**Not verified:**
 
-- support SQLite explicitly until all direct consumers are migrated;
-- align schema contracts and retain Python compatibility aliases;
-- add `generate_from_data` for time-bounded research;
-- make live Docker services opt-in profiles;
-- default external LLM work to a mock client;
-- use `data/.access_token` as the shared token location;
-- keep one canonical pytest configuration in `pyproject.toml`.
+- Live Zerodha orders and broker-side reconciliation (tested only against a stubbed Kite client).
+- A full live market session with ticker, scheduler, square-off and drift check running.
+- The cost model against the current Zerodha charge sheet.
+- Any trading edge. Volume signals are rules of thumb. The first BUY/SELL outcome-model candidate failed qualification. Rule walk-forward results on RELIANCE were negative after costs.
 
-Verification at the time of the audit: 156 backend tests passed and the frontend production build completed. Docker image build and a credentialed live session still require an appropriate external environment.
+Keep paper mode until those are evidenced.
 
-## 2026-10-18: Installable package and Docker image
+## Feature map
 
-Runtime modules were moved under `src/trading_agent`, with console entry points managed by `pyproject.toml`. A multi-stage Docker build and `.dockerignore` were added to keep build context and runtime layers bounded.
+| Area | Feature | Where |
+|---|---|---|
+| Data | Chunked, resumable, rate-limited Kite backfill; one-day overlap gap healing | `ingest/`, `trading-agent backfill / heal-gaps` |
+| Data | Live WebSocket candles; DB writes in a background thread (prevents 1006 disconnects) | `ingest/live_ticker.py` (`BackgroundCandleWriter`) |
+| Data | Nifty 500 watchlist builder with automatic instrument-token lookup and stale-cache fallback | `ingest/build_nifty500_symbols.py`, `ingest/instrument_lookup.py` |
+| Data | RSS news matched to the watchlist | `ingest/fetch_news.py` |
+| Data | SQLite WAL, `busy_timeout`, Alembic migrations 001–003; immutable Parquet batches | `storage/db.py`, `storage/parquet_store.py`, `migrations/` |
+| Data | Pre-flight check (env, Kite, DB WAL, watchlist tokens, RSS, LLM) | `python -m trading_agent.scripts.validate_setup [--skip-llm]` |
+| Analysis | RSI, ATR, ADX, MACD, Stochastic, Williams %R, CCI, +DI/-DI | `core/quant_indicators.py` |
+| Analysis | Doji, hammer, engulfing, double top/bottom | `core/pattern_detection.py` |
+| Analysis | Groww-style technical summary | `analysis/technical_summary.py`, `GET /api/v1/symbols/{s}/technicals` |
+| Analysis | LLM headline sentiment through OpenRouter, rate limited, 429/5xx retry with `Retry-After` | `core/llm_client.py`, `analysis/research_news.py` |
+| Decisions | Rule agent is the validated path; LLM and ML run in parallel in separate tables and never override it | `strategy/`, `signals` / `llm_signals` / `ml_signals` |
+| Decisions | Full-universe research scan, watchlist bias, contradictions, Top Opportunity by conviction and room to S/R | `analysis/research_jobs.py`, `api/routers/legacy_ui.py` |
+| Risk | ATR stop/target/sizing, portfolio exposure/risk caps, realized daily-loss and drawdown gates | `risk/`, `risk/ledger_guard.py` |
+| Risk | Kill switch (persisted, fails closed), session gates (09:15 / 15:00 cutoff / weekends), trade cap, 15:15 square-off, JSONL audit | `risk/controls.py`, scheduler `square_off_cycle` |
+| Execution | Order router: risk checks before any order, paper fills with slippage, live Kite MARKET/MIS behind double opt-in, reconciliation | `execution/router.py`, `execution/reconcile.py` |
+| Execution | Zerodha intraday cost model | `execution/costs.py` |
+| Analytics | Net-of-cost performance, Sharpe/Sortino/drawdown/profit factor/expectancy/R, attribution | `analysis/performance.py` |
+| Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
+| ML | PSI/KS drift monitor; withdraws ML (or loads `ml_model.previous.joblib`) on drift; daily 15:40 check | `strategy/model_monitoring.py` |
+| Validation | Vectorized backtest `--selftest` vs loop reference, walk-forward `--all`, lookahead and train/serve skew checks | `research/walk_forward_optimizer.py`, `strategy/session_features.py` |
+| UI | React + MUI: Dashboard, Research, Paper operations, Risk & execution, Analytics, Signal Pipeline, Transactions, News | `frontend/src/App.tsx`, `lib/router.ts` |
 
-Lesson: entry-point declarations must be exercised after packaging; a module path existing conceptually is not enough.
+## Open work
 
-## 2026-10-18: Integration layer
+| Priority | Task | Done when |
+|---|---|---|
+| P0 | Live-session certification | ticker, scheduler, square-off and drift check run through a full session with recorded heartbeats and no unexplained positions |
+| P0 | Small live-order test | one supervised live round trip; reconciliation matches broker positions; audit log complete |
+| P0 | Verify charge rates | `execution/costs.py` matches zerodha.com/charges on the test date |
+| P0 | Build the drift baseline on real data | `python -m trading_agent.strategy.model_monitoring baseline` run; `/api/v1/analytics/drift` reports `ok`/`warn`, not "no baseline" |
+| P0 | Broker order lifecycle hardening | partial fills, rejects, cancels, reconnect replay and idempotent intent IDs covered by fault-injection tests |
+| P1 | Prospective paper evidence | ≥ 20 trading days of paper results so analytics stop warning about sample size |
+| P1 | Exchange holiday calendar | session gates and scheduler skip NSE holidays and special sessions |
+| P1 | Finish MUI conversion | remaining `.btn` and legacy markup in older pages replaced by MUI components |
+| P1 | Lint/type baselines | selected Ruff rules and type checks pass and become required CI gates |
+| P1 | Backtest exit research | walk-forward search extended to exit rules (stop multiple, target, max bars) |
+| P2 | Incremental scans | full-universe scan latency fits the signal validity window |
+| P2 | Exposure controls | sector/correlation limits and stress scenarios |
+| P2 | Database roadmap | either complete PostgreSQL support or keep SQLite-only claims |
 
-Portfolio exposure, position monitoring, opportunity exclusions, and API serialization were implemented against integration tests.
+## Known limitations
 
-Lesson: keep the persisted schema and the test/runtime model contract identical. Compatibility belongs in aliases/serializers, not parallel table definitions.
+| Limitation | Workaround |
+|---|---|
+| Kite token expires daily | `trading-agent login` or `python manual_login.py` |
+| SQLite writer concurrency is limited | one API worker, one ticker, one scheduler, one downloader |
+| Session gates are weekday/time rules, not an exchange calendar | check holidays manually |
+| Ledger limits use realized gross P&L | unrealized losses are not in the daily-loss gate |
+| Paper fills are modelled (5 bps slippage) | treat paper P&L as optimistic |
+| RVOL needs ≥ 5 prior sessions of minute data | the page flags unreliable values |
+| Legacy ML artifact has no training provenance | treat ML output as exploratory; rule path is authoritative |
+| `.test-tmp*` and `.pytest_cache` in the worktree have locked ACLs | gitignored; delete with elevated permissions if needed |
 
-## 2026-10-06: SQLite lock recovery
+## Decision log
 
-The live ticker added retry/connection recreation after lock failures.
+Newest first. Each entry records what changed and why; verification counts were true on that date only.
 
-Lesson: WAL/timeouts do not make SQLite a high-concurrency database. Coordinate writers and make transactions short.
+### 2026-10-24: Documentation and repository cleanup
 
-## 2026-10-05: Edge diagnostics followed strategy changes
+Made this file the project tracker. Retired `TASKS.md`, `TASKS_INTEGRATION.md`, `INSTITUTIONAL_ROADMAP.md` and `ML_REDESIGN_SUMMARY.md` (their open items are merged above, their history below). Removed the dead root `paths.py` (duplicate of `src/trading_agent/paths.py`), the stale `QUICKSTART.py`, one-off `artifacts/` repair scripts and screenshots, and committed runtime caches. Generated output (`artifacts/`, `optimization_results/`, data caches, controls and drift state) is now gitignored. CI also runs on `unified-platform`.
 
-Edge diagnosis was updated when the underlying signal definition changed.
+### 2026-10-23: Unified platform (branch `unified-platform`)
 
-Lesson: research tools must import the same primitives as live decision paths or clearly declare intentional differences.
+User decisions: merge both UIs; OpenRouter is the only LLM provider; add risk controls, an execution layer, ML drift monitoring, performance analytics and volume-based recommendations; deliver in phased commits.
 
-## 2024-08-15: Exit research
+- **Phase 1** (`4395c0d`): restored regressed features: WAL pragmas, background candle writer, OpenRouter client with throttling (sentiment 429 fix), `validate_setup.py`, token lookup, Williams %R/CCI/DI, doji, Groww technical summary, backtest `--selftest`, walk-forward `--all`, session-feature causality checks.
+- **Phase 2** (`e2d0b46`): restored the classic React dashboard from `gemini-old-interface` alongside the research workspace, backed by `api/routers/legacy_ui.py` using the research scan as the single source of truth.
+- **MUI** (`40e132d`): Material UI theme, shared primitives, navigation bar and symbol picker.
+- **Phase 3** (`5ccc16e`, `ebf5a76`): risk controls, order router, costs, reconciliation, `orders` table (migration 003), performance analytics, volume insights, drift monitoring, and the Risk & execution and Analytics pages.
 
-Historical experiments found that a fixed take-profit capped winners in the studied sample. The associated result is point-in-time evidence, not a guarantee; rerun it before relying on it.
+Why: repeated refactors had silently dropped working features. Lesson: keep a feature map (above) and a regression test per restored feature.
 
-Lesson: exit rules can dominate entry tweaks, and backtest/live exit semantics must match.
+Behaviour changes: manual paper entries now obey the kill switch, 15:00 cutoff and daily trade cap; classic-dashboard trades go through the order router with slippage.
+
+### 2026-10-22: Image build and deployment
+
+PyPI read timeouts fixed with longer pip timeouts, retries and a BuildKit cache. API, frontend, ticker and scheduler were redeployed with existing mounts. Kite rejected the WebSocket handshake (HTTP 403) until a valid session was supplied; live-data readiness was not established.
+
+### 2026-10-21: Gemini repair and institutional roadmap
+
+Scheduler/ticker signal handling and heartbeats fixed; readiness inventory made background and cached (47 s → 0.34 s). Paper entries gained single-position, realized daily-loss and drawdown limits inside the serialized SQLite transaction; scan allocations bind to a ledger/session/risk fingerprint. Opt-in automatic research scans, operations overview and Strategy Lab profile comparisons were added. 419 tests passed. The roadmap's remaining execution, account-truth, data-truth, exposure and security gates are carried in [READINESS.md](READINESS.md#gates-before-institutional-or-unattended-live-use).
+
+### 2026-10-20: Research restoration and outcome-model lifecycle
+
+Restored the original research layout and nine-feature classifier contract (commit `5dcea32`), full-watchlist scans, cached LLM sentiment and the corrected rule-only walk-forward optimizer. Added fixed-rule trade-outcome validation and a separate BUY/SELL outcome-model lifecycle with durable test reservations and prospective paper gates. The first candidate (`9b5e7dc3…`, five stocks) **failed** its historical gate and was not promoted. A RELIANCE minute walk-forward was negative after 5 bps costs. Lesson: report abstention and failure honestly; never invent win rates.
+
+The older ML v2 redesign (walk-forward folds, 19 session/regime features, cost-aware labels, confidence thresholds) reported large backtest gains that were never independently revalidated; its summary document is retired and remains in Git history.
+
+### 2026-10-19: Paper operating-path hardening and contract audit
+
+Immutable Parquet batches, exchange-aware timestamps, persisted paper accounting, serialized entry caps and a versioned console. The audit fixed flat `.env` parsing, a `DEBUG=release` import failure, broken Docker entry points, schema disagreements between ORM/bootstrap/migration, scheduler wrapper types, backtests reading future candles, and lost stop/target values. Decisions: SQLite only until direct consumers migrate; `generate_from_data` for time-bounded research; live Docker services as opt-in profiles; mock LLM default in code; `data/.access_token` as the shared token path; one pytest configuration in `pyproject.toml`.
+
+### 2026-10-18: Installable package, Docker image, integration layer
+
+Runtime moved under `src/trading_agent` with console entry points; multi-stage Docker build. Portfolio exposure, position monitoring and opportunity exclusions implemented against integration tests. Lessons: exercise entry points after packaging; keep persisted schema and runtime model identical; compatibility belongs in aliases, not parallel tables.
+
+### 2026-10-06: SQLite lock recovery
+
+The live ticker added retries and connection recreation after lock failures. Lesson: WAL does not make SQLite a high-concurrency database; coordinate writers and keep transactions short.
+
+### 2026-10-05: Edge diagnostics followed strategy changes
+
+Lesson: research tools must import the same primitives as live decision paths or declare the difference.
+
+### 2024-08-15: Exit research
+
+A fixed take-profit capped winners in the studied sample. Point-in-time evidence only; rerun before relying on it. Lesson: exit rules can dominate entry tweaks, and backtest/live exit semantics must match.
 
 ## Operational heuristics
 
 When diagnosing a problem, check in this order:
 
-1. `trading-agent --help` and configuration loading;
-2. `GET /api/v1/health` then `/api/v1/ready`;
+1. `python -m trading_agent.scripts.validate_setup --skip-llm`;
+2. `GET /api/v1/health`, then `/api/v1/ready`, then `/api/v1/controls/status`;
 3. `trading-agent storage-stats` and the relevant Parquet symbol;
 4. `data/.access_token` freshness for Kite work;
-5. process/container logs;
+5. process/container logs and `data/controls/audit-YYYY-MM-DD.jsonl`;
 6. duplicate writers and SQLite lock state;
-7. model registry metadata for ML work.
+7. `/api/v1/analytics/drift` and model metadata for ML work.
 
-Never infer that an empty dashboard means the API is broken; a fresh install legitimately has no candles or paper positions.
+An empty dashboard on a fresh install is normal: there are no candles or positions yet. A halted kill switch or an entry after 15:00 explains most rejected entries.

@@ -1,18 +1,19 @@
 # Strategy candidates and promotion rules
 
-> Historical research note, reviewed 2026-10-19. Treat the measurements as experiment records, not promised or current returns. Current commands are in README and USER_GUIDE.
+> Historical research note, reviewed 2026-10-24. Treat the measurements as experiment records, not promised or current returns. Current commands are in README and USER_GUIDE.
 
 How experimental strategies are added, measured, and — only if they earn it —
 promoted. Read this before adding "a strategy that should make more profit":
 every strategy here is a hypothesis with a number attached, and the numbers so
 far say the hard part is costs, not idea generation.
 
-**Note:** The enhanced ML model (`strategy/train_ml_model_v2.py`) now shows a
-strong measured edge in walk-forward validation (+495% vs −135% for rule-based
-across 10 symbols). It is tracked in the `ml_signals` table for out-of-sample
-validation. **Positions can now be opened and managed using ML, Hybrid, or LLM
-signals** — each position stores its signal source and the position monitor
-checks the same source for reversals. See [ML_REDESIGN_SUMMARY.md](ML_REDESIGN_SUMMARY.md) for details.
+**Note:** An earlier ML v2 experiment (`strategy/train_ml_model_v2.py`) reported
++495% vs −135% for rules across 10 symbols in walk-forward backtests. That
+result was never independently revalidated, and later outcome-model work failed
+qualification, so treat it as unverified. The rule agent remains the validated
+path; ML and LLM signals are logged separately (`ml_signals`, `llm_signals`) and
+never override it. Each position stores its signal source and the monitor checks
+that source for reversals. Status: [MEMORY.md](MEMORY.md).
 
 ---
 

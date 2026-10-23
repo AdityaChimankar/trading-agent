@@ -1,11 +1,12 @@
 # Contributor rules
 
-Last reviewed: 2026-10-19
+Last reviewed: 2026-10-24
 
 ## Safety and scope
 
-- This repository is paper-trading and research software.
-- Do not add broker order placement under the guise of a refactor.
+- Paper mode is the default. Do not change that default or weaken the live double opt-in (`EXECUTION_MODE=live` + `EXECUTION_LIVE_CONFIRMATION`).
+- Only `execution/router.py` may call a broker order API, and only after the pre-trade risk checks. Never place an order before a risk check that could reject it.
+- Exits and square-off must never be blocked by entry controls.
 - Never log or commit API keys, passwords, TOTP seeds, request tokens, access tokens, or account data.
 - Keep `.env` and `data/.access_token` ignored.
 - Validate strategy claims out of sample and after costs before changing any promotion status.
@@ -15,7 +16,7 @@ Last reviewed: 2026-10-19
 - Runtime modules belong under `src/trading_agent`.
 - Use absolute `trading_agent.*` imports.
 - Keep orchestration in API/CLI/scripts and reusable logic in domain modules.
-- Avoid new root-level patch/helper scripts; add an installed CLI command or a package module.
+- Avoid new root-level patch/helper scripts; add an installed CLI command or a package module. One-off output (screenshots, logs, optimizer results) goes to the gitignored `artifacts/` or `optimization_results/`, never into Git.
 - Frontend code belongs under `frontend/src` and talks to the backend through `/api`.
 
 ## Configuration
@@ -81,7 +82,7 @@ Last reviewed: 2026-10-19
 Minimum functional checks:
 
 ```bash
-pytest
+PYTHONPATH=src python -m pytest -q -p no:cacheprovider --ignore=tests/docker_smoke.py --ignore=tests/dashboard_auth_smoke.py --ignore=tests/dashboard_workflow_smoke.py
 python -m compileall -q src migrations
 cd frontend && npm run build
 ```
@@ -92,6 +93,7 @@ Lint and typing are incremental quality tools. Tighten their CI gates only after
 
 ## Documentation
 
+- MEMORY.md is the project tracker: update its status, feature map, open work and decision log in the same commit as the change. Do not create separate task or roadmap files.
 - README is the canonical quick start.
 - USER_GUIDE contains detailed operation and recovery.
 - ARCHITECTURE records binding decisions.
@@ -103,7 +105,8 @@ Lint and typing are incremental quality tools. Tighten their CI gates only after
 ## Before a pull request
 
 1. Review `git diff` for secrets and unrelated edits.
-2. Run backend tests and frontend build.
+2. Run backend tests (with `PYTHONPATH=src`), the frontend build and both browser smokes.
 3. Exercise changed CLI/API entry points.
 4. Update `.env.example` and docs for any interface change.
-5. Call out migrations, data compatibility, and operational steps in the PR description.
+5. Update [MEMORY.md](MEMORY.md).
+6. Call out migrations, data compatibility, and operational steps in the PR description.

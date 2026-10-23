@@ -2,9 +2,74 @@
 
 This guide covers a first local run, Docker operation, the daily Kite workflow, research commands, and common recovery steps. For the shorter path, start with [README.md](README.md).
 
-> Safety: the application records paper positions only. It has no real-order execution path.
+> Safety: orders run in paper mode unless you set both `EXECUTION_MODE=live` and `EXECUTION_LIVE_CONFIRMATION=I-ACCEPT-REAL-MONEY-RISK`. Live orders have not been verified against a real account.
 
-Read [READINESS.md](READINESS.md) before unattended use. The current console is intentionally paper-only; production readiness, security, accounting, and live-session validation still have open gates.
+Read [READINESS.md](READINESS.md) before unattended use; live-session, accounting and security gates are still open. Project status and open work are tracked in [MEMORY.md](MEMORY.md).
+
+## Dashboard pages
+
+The top bar has a tab per page and a searchable symbol picker that sets the symbol for every page.
+
+| Tab | Use it to |
+|---|---|
+| Dashboard | Review the watchlist (bias, blocked/stale flags, contradictions with open positions), the bullish/bearish Top Opportunity, symbol detail, wallet, Position Monitor and the morning digest. Open a paper trade from a fresh, unblocked plan |
+| Research | Run the full-watchlist scan and the Find → Inspect → Validate → Paper review workflow (below) |
+| Paper operations | Record, monitor and close paper positions manually |
+| Risk & execution | Engage or release the kill switch, square off everything, check session status, inspect orders and reconciliation, preview charges, read the audit trail |
+| Analytics | Read net performance, the volume board and the ML drift monitor |
+| Signal Pipeline | See the latest rule, LLM and ML decision per symbol side by side |
+| Transactions | Review the transaction history and strategy status |
+| News | Read headlines matched to the watchlist with cached sentiment |
+
+The Dashboard digest is built in the background from the top 30 scan names and cached for 15 minutes. Run a research scan first; without one, the classic pages show empty states rather than invented rankings.
+
+## Intraday risk controls and execution
+
+All entry paths (Dashboard, Paper operations, `POST /api/v1/execution/enter`) use the same order router. Before any order is sent it checks, in order:
+
+1. kill switch: **Risk & execution → Engage kill switch** writes `data/controls/kill_switch.json`, which survives restarts. An unreadable file blocks entries; **Resume trading** clears it;
+2. session: no entries before 09:15 IST, after `PAPER_ENTRY_CUTOFF` (15:00) or at weekends. `PAPER_ENFORCE_SESSION=false` disables only these time gates;
+3. the daily trade cap (`PAPER_MAX_TRADES_PER_DAY`);
+4. the participation cap: quantity × price must not exceed `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value;
+5. the paper-ledger limits inside one SQLite `BEGIN IMMEDIATE` transaction: duplicates, positions, exposure, stop risk, single-name cap, realized daily loss and drawdown.
+
+The router reserves the position, sends the order and then rewrites the position at the fill price. If the broker rejects the order, the reservation is deleted and the API returns 502. Exits always remain available.
+
+The scheduler squares off all open positions at `PAPER_SQUARE_OFF_TIME` (15:15 IST). **Square off all positions now** does the same on demand. Every open, close, fill, rejection, halt and resume is appended to `data/controls/audit-YYYY-MM-DD.jsonl` and shown under **Audit trail**.
+
+| Mode | Fills |
+|---|---|
+| Paper (default) | Reference price moved `EXECUTION_SLIPPAGE_BPS` against you |
+| Live | Kite MARKET order, product `EXECUTION_PRODUCT` (MIS); the router polls order history for the average fill price |
+
+**Reconciliation → Run check** lists unconfirmed orders and fill mismatches, and in live mode compares the ledger's net quantity per symbol with Kite positions.
+
+The **Charges calculator** (`GET /api/v1/execution/costs`) shows entry charges, round-trip charges at the same price, and the break-even move. The rates follow Zerodha's published intraday schedule; check them against zerodha.com/charges before relying on them.
+
+Before switching to live: build evidence in paper mode, confirm the charge rates, and do one small supervised round trip. Then check reconciliation and the audit log.
+
+## Analytics, volume and drift
+
+**Performance** uses closed positions. Net P&L subtracts the charges of filled router orders, or modelled round-trip charges (marked `*`) for manual entries. It reports win rate, expectancy, profit factor, average R, max drawdown and Sharpe/Sortino, all from daily net returns annualised over 252 days. Results are attributed by strategy and symbol. Sharpe and Sortino need at least two trading days, and below 20 trading days the page warns that the ratios are not meaningful.
+
+The **volume board** takes the strongest directional scan names and compares today's cumulative volume with the same time of day over the previous 20 sessions (RVOL). It then gives a volume call:
+
+- `BUY_CONFIRMED` / `SELL_CONFIRMED`: RVOL ≥ 1.5, price on the matching side of session VWAP and the last five bars moving that way;
+- `WATCH`: heavy volume without a clear side;
+- `AVOID`: RVOL < 0.7 or average daily traded value under ₹1 crore;
+- `NEUTRAL` otherwise.
+
+The board also shows liquidity tier, the maximum quantity under the participation cap, and whether the volume call confirms or contradicts the scan. With fewer than five prior sessions, RVOL is marked unreliable. These are rules of thumb, not a backtested signal. A single symbol is available at `GET /api/v1/analytics/volume/{symbol}`.
+
+The **ML drift monitor** compares logged live model inputs with a training-period baseline, using PSI and KS per feature. A feature is `warn` above `MONITOR_PSI_WARN` and `drift` above `MONITOR_PSI_DRIFT`. When `MONITOR_DRIFT_FEATURES_TO_FALLBACK` features drift, ML is withdrawn: the research scan loads `models/ml_model.previous.joblib` if present, otherwise ML is unavailable and Rules + ML mode holds. **Restore ML** clears the fallback.
+
+```bash
+python -m trading_agent.strategy.model_monitoring baseline   # build once from stored history
+python -m trading_agent.strategy.model_monitoring report     # report and apply fallback on drift
+python -m trading_agent.strategy.model_monitoring clear      # clear an active fallback
+```
+
+The scheduler runs the drift check at 15:40 IST. Until a baseline exists, the monitor reports "no baseline".
 
 ## Research panels
 
@@ -122,16 +187,25 @@ Keep this local default unless you intentionally move the database:
 DB_URL=sqlite:///data/trading.db
 ```
 
-The optional LLM path defaults to a local mock and makes no paid call:
+News sentiment and the LLM comparison agent use OpenRouter:
 
 ```dotenv
-LLM_PROVIDER=mock
-LLM_BASE_URL=https://api.openai.com
-LLM_API_KEY=
-LLM_MODEL=gpt-4o-mini
+LLM_PROVIDER=openrouter
+LLM_BASE_URL=https://openrouter.ai/api
+OPENROUTER_API_KEY=sk-or-...        # or LLM_API_KEY
+LLM_MODEL=google/gemini-2.0-flash-001
+LLM_MIN_INTERVAL_SECONDS=4.5        # spacing between calls (avoids 429)
+LLM_MAX_RETRIES=4                   # retries on 429/5xx, honouring Retry-After
 ```
 
-To use an OpenAI-compatible provider, set `LLM_PROVIDER=openai`, its base URL, key, and model. Never commit `.env` or `data/.access_token`.
+Set `LLM_PROVIDER=mock` to make no calls; that is also the code default when `.env` does not set it. Never commit `.env` or `data/.access_token`.
+
+Check the whole configuration before the first session:
+
+```bash
+python -m trading_agent.scripts.validate_setup             # env, Kite auth/quote, DB WAL, watchlist tokens, RSS, one LLM ping
+python -m trading_agent.scripts.validate_setup --skip-llm  # same, without spending an LLM call
+```
 
 ## 4. Start the local application
 
@@ -193,6 +267,14 @@ trading-agent storage-stats
 
 The default watchlist comes from `symbols.txt`; named Nifty 500 loading uses `symbols_nifty500_plus.txt`. Explicit symbols are safest for the first run and avoid a large broker request.
 
+To rebuild the Nifty 500 watchlist and resolve instrument tokens automatically (falls back to the cached instrument list if Kite is unreachable):
+
+```bash
+python -m trading_agent.ingest.build_nifty500_symbols            # add --no-resolve to skip token lookup
+```
+
+Backfill is chunked, resumable and paced for Kite's rate limits; rerunning after an interruption continues from the stored data. The live ticker writes candles from a background thread so slow disk writes cannot stall the WebSocket (the cause of earlier 1006 disconnects).
+
 ## 7. Research and analysis
 
 Run these only after the selected symbols have local Parquet data:
@@ -207,6 +289,15 @@ trading-agent optimize strategy-lab RELIANCE --interval minute --max-bars 5000
 ```
 
 Backtests now generate candidates from the time-bounded historical slice supplied by the engine; they do not read the latest future candle while replaying history.
+
+Validation tools:
+
+```bash
+python -m trading_agent.research.walk_forward_optimizer --selftest   # vectorized backtest must match the slow loop reference
+python -m trading_agent.research.walk_forward_optimizer --all        # walk-forward over the whole watchlist (expensive)
+```
+
+`--selftest` uses stored data when available and a synthetic frame otherwise. `strategy/session_features.py` provides `verify_causal` (no feature changes when future candles are altered) and `verify_sanity`; together with the train/serve feature checks in the tests they guard against lookahead and skew.
 
 The measured rule-based edge and strategy promotion constraints are documented in [EDGE_ANALYSIS.md](EDGE_ANALYSIS.md) and [STRATEGIES.md](STRATEGIES.md).
 
@@ -304,6 +395,11 @@ docker compose down
 | `trading-agent news [SYMBOL...]` | Fetch current financial headlines |
 | `trading-agent api` | Start the API through the main CLI |
 | `trading-agent optimize ...` | Walk-forward, ML, and strategy-lab commands |
+| `python -m trading_agent.scripts.validate_setup [--skip-llm]` | Pre-flight configuration check |
+| `python -m trading_agent.ingest.build_nifty500_symbols` | Rebuild the Nifty 500 watchlist with tokens |
+| `python -m trading_agent.research.walk_forward_optimizer --selftest / --all` | Backtest self-test / whole-watchlist walk-forward |
+| `python -m trading_agent.strategy.model_monitoring baseline / report / clear` | ML drift baseline, report, clear fallback |
+| `python -m trading_agent.strategy.outcome_cli status / train / paper / promote` | BUY/SELL outcome-model lifecycle |
 
 Always use `--help` on a command before a long or quota-consuming run.
 
@@ -324,25 +420,26 @@ If an initial migration has already been applied elsewhere, create a new revisio
 
 For a migration-managed fresh database, run Alembic before the API creates tables. Existing auto-created databases need backup and schema comparison before migration adoption; do not stamp an unverified schema. For Docker use `docker compose run --rm tools alembic upgrade head` only under that lifecycle.
 
-Paper book balances now derive from persistent `open_positions` rows (open and closed), not a separate in-memory wallet. They exclude fees, slippage and unrealized P&L. Keep `PAPER_INITIAL_CAPITAL` fixed for an existing book. `PAPER_ENTRIES_ENABLED=false`, followed by an API restart, blocks new entries but allows exits. Exposure/risk limits are documented in the README. Advisory monitoring does not automatically execute stop orders.
+Router orders are stored in the `orders` table (migration 003) with side, quantity, reference and fill price, charges, status and broker order id. Kill-switch state, audit logs and drift status are files under `data/controls/` and `data/ml_monitoring/`; the drift baseline is `models/feature_baseline.json`.
+
+Paper book balances now derive from persistent `open_positions` rows (open and closed), not a separate in-memory wallet. The wallet is gross: it excludes fees and unrealized P&L. Router fills include slippage, and **Analytics** reports P&L net of charges. Keep `PAPER_INITIAL_CAPITAL` fixed for an existing book. `PAPER_ENTRIES_ENABLED=false`, followed by an API restart, blocks new entries but allows exits. Exposure/risk limits are documented in the README. Advisory monitoring does not automatically execute stop orders.
 
 Optional `API_AUTH_TOKEN` protects reads and writes. Enter it in the dashboard access-token form; it lasts for the current page session only. The default stack is localhost-only. Do not expose it publicly without TLS, proper identity management, and review.
 
 ## 12. Tests and developer checks
 
 ```bash
-# Backend
-pytest
-pytest --cov=trading_agent --cov-report=html
+# Backend (PYTHONPATH=src avoids importing another installed copy of the package)
+PYTHONPATH=src python -m pytest -q -p no:cacheprovider --ignore=tests/docker_smoke.py --ignore=tests/dashboard_auth_smoke.py --ignore=tests/dashboard_workflow_smoke.py
 ruff check src migrations
 
-# Frontend
-cd frontend
-npm run typecheck
-npm run build
+# Frontend, then the offline browser smokes against the build
+cd frontend && npm run typecheck && npm run build && cd ..
+python tests/dashboard_workflow_smoke.py
+python tests/dashboard_auth_smoke.py
 ```
 
-CI uses Python 3.11, SQLite, the backend tests, and the frontend production build.
+Tests run with `PAPER_ENFORCE_SESSION=false` and an isolated `DATA_DIR` (see `tests/conftest.py`), so they pass outside market hours and never touch the real kill switch or audit log. CI uses Python 3.11, SQLite, the backend tests and the frontend production build.
 
 ## 13. Troubleshooting
 
@@ -405,7 +502,15 @@ If an in-process API restart reports that the previous research worker is still 
 
 ### Dashboard entry point
 
-The restored `ResearchDashboard` uses `/api/v1/research` for aligned rule/ML analysis, full-watchlist scans, Plotly charts and optional cached news sentiment. Find, Inspect, Validate and Paper share the current symbol and interval. The Paper tab manages the persistent paper book through `OperatingConsole`; research actions remain in the shared workflow. Unreachable legacy dashboard files have been removed; their historical versions remain available on `rework` and in Git history.
+`frontend/src/App.tsx` hosts every tab under hash routes (`#/dashboard`, `#/research`, `#/paper`, `#/risk`, `#/analytics`, `#/pipeline`, `#/history`, `#/news`). The classic pages call `/api/...` (served by `api/routers/legacy_ui.py` from the research scan snapshot); the research workspace calls `/api/v1/research`; Risk & execution and Analytics call `/api/v1/controls`, `/api/v1/execution` and `/api/v1/analytics`. An empty classic dashboard usually means no research scan has completed yet.
+
+### Entry rejected
+
+A 409 names the blocking rule: kill switch, before 09:15, after the cutoff, weekend, daily trade cap, participation cap, duplicate symbol, exposure, stop risk, daily loss or drawdown. Check **Risk & execution → Trading controls**. A 502 means the broker rejected the order and the reservation was removed; the audit trail has the broker message.
+
+### Sentiment 429 errors
+
+OpenRouter throttles free and low-tier keys. Raise `LLM_MIN_INTERVAL_SECONDS` (for example to 8) and restart the API. The client already retries 429/5xx with `Retry-After` and exponential backoff, and its spacing is process-wide.
 
 ### Walk-Forward Optimizer
 

@@ -251,9 +251,9 @@ Ordered by measured evidence, best first.
 - These are **in-sample** measurements across ~18k candles per symbol. They are
   strong evidence the **rule-based** signal lacks an edge; they are not proof of a
   specific alternative.
-- The **enhanced ML model (v2)** shows a strong measured edge in walk-forward
-  validation (+495% vs −135% for rule-based). See
-  [ML_REDESIGN_SUMMARY.md](ML_REDESIGN_SUMMARY.md) for details.
+- An earlier **ML v2** experiment reported +495% vs −135% for rules in
+  walk-forward backtests; it was never independently revalidated (see the
+  2026-10-20 entry in [MEMORY.md](MEMORY.md#decision-log)).
 - The **exit variants have several degrees of freedom** (stop multiple, target
   ratio, intrabar tie-breaking, max bars). Removing the take-profit is the one
   change with a large margin, but it still needs walk-forward validation —

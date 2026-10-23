@@ -33,6 +33,10 @@ build/
 
 # Data files
 data/parquet/
+data/*_cache.json
+data/sentiment_cache/
+data/controls/
+data/ml_monitoring/
 data/ticker-heartbeat.json
 data/research/
 *.db
@@ -71,6 +75,10 @@ frontend/.vite/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Generated output (smoke screenshots, optimizer results)
+artifacts/
+optimization_results/
 
 # Temporary files
 .worktrees/

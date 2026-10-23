@@ -1,7 +1,0 @@
-services:
-  api:
-    image: trading-agent-app:gemini-operational
-  frontend:
-    image: trading-agent-frontend:gemini-repair
-  smoke:
-    image: trading-agent-app:gemini-operational

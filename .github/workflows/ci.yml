@@ -2,9 +2,9 @@ name: Validation and image publishing
 
 on:
   push:
-    branches: [main, develop, gemini, rework]
+    branches: [main, develop, gemini, rework, unified-platform]
   pull_request:
-    branches: [main, develop, gemini, rework]
+    branches: [main, develop, gemini, rework, unified-platform]
 
 env:
   PYTHON_VERSION: "3.11"
