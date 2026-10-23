@@ -465,6 +465,14 @@ The initial five-stock experiment failed its tuning gates, so it has no eligible
 
 ## 14. Safe shutdown
 
+### Database upgrades
+
+Fresh databases and existing installations need separate validation. `create_all` creates missing tables but does not upgrade existing columns. The `/api/v1/ready` endpoint now resolves every mapped table/column and returns 503 for an incompatible schema; `/health` remains a process liveness check.
+
+Migration `002` upgrades previously deployed revision `001` databases that used physical `metadata` columns in positions, signals, opportunities and system events. It renames those columns without replacing their contents and adds `trades.updated_at`, backfilled from each record's `created_at`. Fresh canonical schemas require no changes. Ambiguous metadata layouts are rejected for manual inspection.
+
+Before upgrading an existing database, stop API/scheduler writers and create a consistent SQLite backup with `sqlite3.Connection.backup` (copying only the `.db` file while WAL writes are active is insufficient). Verify the migration on a copy and retain the backup. With the repaired image built, run `docker compose run --rm tools alembic upgrade head`, then start the API and scheduler and verify `/ready`, `/positions/` and `/wallet/summary`. In the linked-worktree layout, add `--project-directory . -f ./.worktrees/gemini-repair/docker-compose.yml` to Compose commands from the main folder. Never stamp a populated legacy database as current without verifying its schema. Downgrading revision `002` retains canonical columns and their contents; restoring the exact earlier physical schema requires the backup.
+
 Use `Ctrl+C` for local processes. For Docker:
 
 ```bash

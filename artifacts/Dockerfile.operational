@@ -1,0 +1,10 @@
+# Source-only repair: dependency and console-entry-point manifests are unchanged.
+FROM trading-agent-app:pre-operational-20261021
+USER root
+RUN rm -rf /app/src/trading_agent
+COPY --chown=trader:trader src/ /app/src/
+COPY --chown=trader:trader pyproject.toml README.md alembic.ini /app/
+COPY --chown=trader:trader migrations/ /app/migrations/
+COPY --chown=trader:trader symbols*.txt /app/
+USER trader
+WORKDIR /app

@@ -5,7 +5,7 @@ from datetime import UTC
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import select
 
 router = APIRouter()
 
@@ -33,13 +33,17 @@ async def health_check():
 @router.get("/ready")
 async def readiness_check():
     """Readiness check endpoint."""
-    # Check database, cache, etc.
-    from trading_agent.storage.db import get_database
+    from trading_agent.storage.db import Base, get_database
 
     try:
         db = get_database()
         async with db.session() as session:
-            await session.execute(text("SELECT 1"))
+            # Resolve every mapped column without reading account data. A DB
+            # connection alone is not sufficient when an upgrade is missing.
+            for table in Base.metadata.sorted_tables:
+                await session.execute(select(table).limit(0))
         return {"status": "ready"}
     except Exception:
-        return JSONResponse(status_code=503, content={"status": "not ready", "error": "Database unavailable"})
+        return JSONResponse(status_code=503, content={
+            "status": "not ready", "error": "Database unavailable or schema upgrade required",
+        })

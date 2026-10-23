@@ -151,3 +151,20 @@ def test_alembic_upgrade_and_model_alignment(tmp_path):
         result = subprocess.run([sys.executable, "-m", "alembic", *command.split()], env=env,
                                 capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("table,column", [
+    ("open_positions", "position_metadata"), ("signals", "signal_metadata"),
+    ("opportunities", "opportunity_metadata"), ("system_events", "event_metadata"),
+    ("trades", "updated_at"),
+])
+def test_readiness_rejects_unmigrated_columns(client, table, column):
+    import sqlite3
+
+    assert client.get("/api/v1/ready").status_code == 200
+    with sqlite3.connect(db_module.DB_PATH) as connection:
+        connection.execute(f'ALTER TABLE "{table}" RENAME COLUMN "{column}" TO legacy_column')
+    response = client.get("/api/v1/ready")
+    assert response.status_code == 503
+    assert response.json()["error"] == "Database unavailable or schema upgrade required"
+    assert client.get("/api/v1/health").status_code == 200
