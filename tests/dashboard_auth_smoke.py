@@ -50,7 +50,7 @@ def main():
                         expect(page.get_by_text("BUY: historical gate failed", exact=False)).to_contain_text("wins Unavailable")
                         if not required:
                             expect(page.locator('input[type="password"]')).to_have_count(0)
-                        page.get_by_role("button", name="Paper operations", exact=True).click()
+                        page.get_by_role("tab", name="Paper operations", exact=True).click()
                         expect(page.get_by_text("API authentication", exact=True)).to_have_count(0)
                         expect(page.get_by_text("API access token (if enabled on the server)", exact=True)).to_have_count(int(required))
                         if not required:

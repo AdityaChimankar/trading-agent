@@ -1,13 +1,14 @@
-import { useMemo, useState } from 'react'
+import { AppBar, Autocomplete, Box, Button, Chip, Tab, Tabs, TextField, Toolbar, Typography } from '@mui/material'
+
 import { ROUTES, type Route } from '../lib/router'
-import { cx } from '../lib/format'
+import { tokens } from '../theme'
 
 export const ROUTE_LABELS: Record<Route, string> = {
   dashboard: 'Dashboard',
   research: 'Research',
   paper: 'Paper operations',
-  history: 'Transactions',
   pipeline: 'Signal Pipeline',
+  history: 'Transactions',
   news: 'News',
 }
 
@@ -31,126 +32,52 @@ export default function NavBar({
   showSymbolPicker: boolean
 }) {
   return (
-    <header className="topbar">
-      <div className="topbar-left">
-        <div className="brand">
-          <span className="brand-dot" />
+    <AppBar position="sticky">
+      <Toolbar variant="dense" sx={{ gap: 2, flexWrap: { xs: 'wrap', md: 'nowrap' }, py: 1 }}>
+        <Typography sx={{ fontWeight: 700, whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Box component="span" sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: tokens.accent }} />
           Intraday Trading Agent
-        </div>
+        </Typography>
 
-        <nav className="nav" aria-label="Sections">
-          {ROUTES.map((r) => (
-            <button
-              key={r}
-              type="button"
-              className={cx('nav-link', route === r && 'is-active')}
-              aria-current={route === r ? 'page' : undefined}
-              onClick={() => onNavigate(r)}
-            >
-              {ROUTE_LABELS[r]}
-            </button>
-          ))}
-        </nav>
-      </div>
+        {/* Scrollable tabs: seven sections never overflow the page on a phone. */}
+        <Tabs
+          value={route}
+          onChange={(_, next: Route) => onNavigate(next)}
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
+          aria-label="Sections"
+          sx={{ flex: { xs: '1 1 100%', md: '1 1 0' }, minWidth: 0, maxWidth: '100%', order: { xs: 3, md: 0 } }}
+        >
+          {ROUTES.map((r) => <Tab key={r} value={r} label={ROUTE_LABELS[r]} />)}
+        </Tabs>
 
-      <div className="topbar-right">
-        {showSymbolPicker && (
-          <SearchableSymbolSelect
-            symbol={symbol}
-            symbols={symbols}
-            onChange={onSymbolChange}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, ml: 'auto' }}>
+          {showSymbolPicker && (
+            <Autocomplete
+              size="small"
+              options={symbols}
+              value={symbol}
+              onChange={(_, next) => next && onSymbolChange(next)}
+              // Thousands of symbols: cap the rendered list, search narrows it.
+              filterOptions={(options, state) => {
+                const q = state.inputValue.toUpperCase()
+                return options.filter((s) => s.includes(q)).slice(0, 200)
+              }}
+              renderInput={(params) => <TextField {...params} label="Symbol" />}
+              sx={{ width: 180 }}
+            />
+          )}
+          <Chip
+            size="small"
+            variant="outlined"
+            color={inFlight > 0 ? 'primary' : 'default'}
+            label={inFlight > 0 ? '⟳ live' : '● idle'}
+            title="Auto-refreshing"
           />
-        )}
-
-        <span className={inFlight > 0 ? 'pulse is-active' : 'pulse'} title="Auto-refreshing">
-          {inFlight > 0 ? '⟳ live' : '● idle'}
-        </span>
-
-        <button type="button" className="btn" onClick={onRefresh}>
-          Refresh
-        </button>
-      </div>
-    </header>
-  )
-}
-
-function SearchableSymbolSelect({
-  symbol,
-  symbols,
-  onChange,
-}: {
-  symbol: string | null
-  symbols: string[]
-  onChange: (symbol: string) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const [search, setSearch] = useState('')
-
-  const filtered = useMemo(() => {
-    if (!search) return symbols
-    const q = search.toLowerCase()
-    return symbols.filter((s) => s.toLowerCase().includes(q))
-  }, [symbols, search])
-
-  const selectedLabel = symbol ?? 'Select symbol'
-
-  return (
-    <div className="symbol-selector">
-      <button
-        type="button"
-        className="symbol-selector-trigger"
-        onClick={() => setOpen(!open)}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-      >
-        <span>{selectedLabel}</span>
-        <span className="symbol-selector-chevron">{open ? '▴' : '▾'}</span>
-      </button>
-
-      {open && (
-        <div className="symbol-selector-dropdown">
-          <input
-            type="text"
-            className="symbol-search"
-            placeholder="Search symbols..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') setOpen(false)
-            }}
-            autoFocus
-          />
-          <ul className="symbol-list" role="listbox">
-            {filtered.length === 0 ? (
-              <li className="symbol-empty">No matching symbol</li>
-            ) : (
-              filtered.map((s) => (
-                <li key={s}>
-                  <button
-                    type="button"
-                    className={cx('symbol-item', s === symbol && 'is-active')}
-                    onClick={() => {
-                      onChange(s)
-                      setOpen(false)
-                      setSearch('')
-                    }}
-                  >
-                    {s}
-                  </button>
-                </li>
-              ))
-            )}
-          </ul>
-        </div>
-      )}
-
-      {open && (
-        <div
-          className="symbol-selector-backdrop"
-          onClick={() => setOpen(false)}
-          aria-hidden="true"
-        />
-      )}
-    </div>
+          <Button variant="outlined" onClick={onRefresh}>Refresh</Button>
+        </Box>
+      </Toolbar>
+    </AppBar>
   )
 }

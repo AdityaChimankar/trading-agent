@@ -201,7 +201,7 @@ def exercise(page, base_url, screenshots=None):
     scan.pop("allocation_warning")
     page.get_by_role("button", name="Refresh views", exact=True).click()
     expect(page.get_by_role("button", name="Select TCS", exact=True)).to_be_visible()
-    page.get_by_role("button", name="Paper operations", exact=True).click()
+    page.get_by_role("tab", name="Paper operations", exact=True).click()
     expect(page.get_by_label("Paper research symbol", exact=True)).to_have_value("TCS")
     expect(page.get_by_label("Paper candle interval", exact=True)).to_have_value("5minute")
     expect(page.get_by_label("Paper entry symbol", exact=True)).to_have_value("TCS")

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useIsFetching, useQueryClient } from '@tanstack/react-query'
+import { Alert, Box, Button, TextField, Typography } from '@mui/material'
 
 import { setApiToken } from './api/client'
 import { useWallet, useWatchlist } from './api/queries'
@@ -71,28 +72,32 @@ export default function App() {
 
       {/* Paper operations carries its own token field; never show two. */}
       {auth.data?.required && route !== 'paper' && (
-        <details className="session-auth">
-          <summary>API authentication</summary>
-          <form
-            onSubmit={(event) => {
-              event.preventDefault()
-              setApiToken(token)
-              setToken('')
-              void queryClient.invalidateQueries()
-            }}
-          >
-            <label>
-              Session API token{' '}
-              <input type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} />
-            </label>
-            <button>Apply session token</button>
-          </form>
-        </details>
+        <Box
+          component="form"
+          aria-label="API authentication"
+          onSubmit={(event) => {
+            event.preventDefault()
+            setApiToken(token)
+            setToken('')
+            void queryClient.invalidateQueries()
+          }}
+          sx={{ display: 'flex', gap: 1, alignItems: 'center', px: 2.5, py: 1, borderBottom: 1, borderColor: 'divider' }}
+        >
+          <Typography variant="body2" color="text.secondary">API authentication</Typography>
+          <TextField
+            type="password"
+            label="Session API token"
+            autoComplete="off"
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+          />
+          <Button type="submit" variant="contained">Apply session token</Button>
+        </Box>
       )}
       {auth.isError && (
-        <p className="error" role="alert">
+        <Alert severity="error" sx={{ borderRadius: 0 }}>
           Could not check API authentication settings. Check the API connection, then refresh.
-        </p>
+        </Alert>
       )}
 
       {route === 'dashboard' && (

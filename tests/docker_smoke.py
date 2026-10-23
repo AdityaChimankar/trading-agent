@@ -114,7 +114,7 @@ def main():
         expect(page.get_by_text("Walk-forward: insufficient_history", exact=False)).to_be_visible(timeout=30000)
         page.get_by_role("button", name="Validate CHART outcomes", exact=True).click()
         expect(page.get_by_text("At least 1,000 completed candles are required", exact=True)).to_be_visible(timeout=30000)
-        page.get_by_role("button", name="Paper operations", exact=True).click()
+        page.get_by_role("tab", name="Paper operations", exact=True).click()
         page.get_by_text("API access token (if enabled on the server)").click()
         page.get_by_label("Bearer token").fill("smoke-test-only")
         page.get_by_role("button", name="Use for this page session").click()
@@ -129,7 +129,7 @@ def main():
         page.get_by_role("button", name="Close paper position", exact=True).click()
         expect(page.get_by_role("status")).to_contain_text("Paper position closed.")
         page.reload(wait_until="networkidle")
-        page.get_by_role("button", name="Paper operations", exact=True).click()
+        page.get_by_role("tab", name="Paper operations", exact=True).click()
         # Tokens are deliberately not stored across reloads.
         page.get_by_text("API access token (if enabled on the server)").click()
         page.get_by_label("Bearer token").fill("smoke-test-only")
