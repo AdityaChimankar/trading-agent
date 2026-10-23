@@ -342,3 +342,19 @@ def test_controls_status_endpoint(client):
     assert status["limits"]["square_off_time"] == "15:15"
     preview = client.get("/api/v1/execution/costs?price=1000&quantity=100").json()
     assert preview["breakeven_move_pct"] == pytest.approx(0.0825, abs=1e-3)
+
+
+def test_ratios_need_two_trading_days_and_drag_needs_gross_profit():
+    from trading_agent.analysis.performance import summarize
+
+    one_day = [{"net_pnl": -10, "gross_pnl": -5, "closed_at": "2026-10-19T10:00", "r_multiple": None, "holding_minutes": 1},
+               {"net_pnl": 2, "gross_pnl": 4, "closed_at": "2026-10-19T11:00", "r_multiple": None, "holding_minutes": 1}]
+    s = summarize(one_day, 10_000)
+    assert s["sharpe"] is None and s["sortino"] is None
+    assert s["cost_drag_pct_of_gross"] is None
+
+
+def test_order_timestamps_carry_utc_offset(client):
+    client.post("/api/v1/execution/enter", json=ENTRY)
+    created = client.get("/api/v1/execution/orders").json()[0]["created_at"]
+    assert created.endswith("+00:00")

@@ -88,6 +88,9 @@ def volume_profile(frame: pd.DataFrame, symbol: str = "") -> dict | None:
     else:
         call, why = "NEUTRAL", f"Normal volume (RVOL {rvol:.2f})"
 
+    if rvol is not None and len(prior_cum) < 5:
+        why += f" (only {len(prior_cum)} prior session(s); RVOL is unreliable)"
+
     return {
         "symbol": symbol, "as_of": pd.Timestamp(df["timestamp"].iloc[-1]).isoformat(),
         "price": price, "rvol": None if rvol is None else round(rvol, 3),

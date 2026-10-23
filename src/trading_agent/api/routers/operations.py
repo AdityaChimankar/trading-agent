@@ -97,8 +97,15 @@ class EntryRequest(BaseModel):
 async def orders(limit: int = Query(200, ge=1, le=2000)):
     from trading_agent.execution.router import get_order_router
 
+    from datetime import UTC, datetime
+
+    def value(order, name):
+        raw = getattr(order, name)
+        # SQLite returns naive UTC; send explicit offsets so browsers don't read local time.
+        return raw.replace(tzinfo=UTC) if isinstance(raw, datetime) and raw.tzinfo is None else raw
+
     rows = await get_order_router().list_orders(limit)
-    return jsonable([{c.name: getattr(o, c.name) for c in o.__table__.columns} for o in rows])
+    return jsonable([{c.name: value(o, c.name) for c in o.__table__.columns} for o in rows])
 
 
 @router.post("/execution/enter")

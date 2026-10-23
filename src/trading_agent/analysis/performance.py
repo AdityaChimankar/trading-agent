@@ -64,8 +64,9 @@ def summarize(rows: list[dict], capital: float) -> dict:
         daily[r["closed_at"][:10]] += r["net_pnl"]
     day_returns = np.array(list(daily.values())) / capital
     downside = day_returns[day_returns < 0]
+    # A ratio needs a spread of daily outcomes: none below two trading days.
     std = day_returns.std(ddof=1) if len(day_returns) > 1 else 0.0
-    down_std = math.sqrt(float(np.mean(downside ** 2))) if len(downside) else 0.0
+    down_std = math.sqrt(float(np.mean(downside ** 2))) if len(downside) and len(day_returns) > 1 else 0.0
     r_values = [r["r_multiple"] for r in rows if r["r_multiple"] is not None]
     return {
         "trades": len(rows),
@@ -84,8 +85,9 @@ def summarize(rows: list[dict], capital: float) -> dict:
         "sortino": round(float(day_returns.mean() / down_std * math.sqrt(TRADING_DAYS)), 3) if down_std > 0 else None,
         "trading_days": len(daily),
         "avg_holding_minutes": round(float(np.mean([r["holding_minutes"] for r in rows])), 1),
-        "cost_drag_pct_of_gross": (round(float((gross.sum() - net.sum()) / abs(gross.sum()) * 100), 1)
-                                   if gross.sum() else None),
+        # Share of gross profit eaten by charges; undefined when there is no gross profit.
+        "cost_drag_pct_of_gross": (round(float((gross.sum() - net.sum()) / gross.sum() * 100), 1)
+                                   if gross.sum() > 0 else None),
     }
 
 

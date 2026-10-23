@@ -12,7 +12,7 @@
 // the dashboard rather than a blank screen.
 import { useEffect, useState } from 'react'
 
-export const ROUTES = ['dashboard', 'research', 'paper', 'pipeline', 'history', 'news'] as const
+export const ROUTES = ['dashboard', 'research', 'paper', 'risk', 'analytics', 'pipeline', 'history', 'news'] as const
 
 export type Route = (typeof ROUTES)[number]
 

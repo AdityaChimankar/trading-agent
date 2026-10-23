@@ -7,6 +7,8 @@ export const ROUTE_LABELS: Record<Route, string> = {
   dashboard: 'Dashboard',
   research: 'Research',
   paper: 'Paper operations',
+  risk: 'Risk & execution',
+  analytics: 'Analytics',
   pipeline: 'Signal Pipeline',
   history: 'Transactions',
   news: 'News',

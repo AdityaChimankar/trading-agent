@@ -17,6 +17,8 @@ import TransactionsPage from './components/TransactionsPage'
 import WalletPanel from './components/WalletPanel'
 import NewsPage from './components/NewsPage'
 import ResearchDashboard from './ResearchDashboard'
+import RiskExecutionPage from './components/RiskExecutionPage'
+import AnalyticsPage from './components/AnalyticsPage'
 
 export default function App() {
   const [capital, setCapital] = useState(100_000)
@@ -128,6 +130,8 @@ export default function App() {
           {route === 'history' && <TransactionsPage onSelectSymbol={openSymbol} />}
           {route === 'pipeline' && <PipelinePage capital={capital} onSelectSymbol={openSymbol} />}
           {route === 'news' && <NewsPage onSelectSymbol={openSymbol} />}
+          {route === 'risk' && <RiskExecutionPage />}
+          {route === 'analytics' && <AnalyticsPage onSelectSymbol={openSymbol} />}
         </main>
       )}
     </div>
