@@ -36,6 +36,9 @@ data/parquet/
 data/ticker-heartbeat.json
 data/research/
 *.db
+# SQLite WAL-mode sidecar files
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 

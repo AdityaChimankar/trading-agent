@@ -50,7 +50,13 @@ def exercise(page, base_url, screenshots=None):
     def route_api(route):
         nonlocal scan
         request = route.request
-        assert "/api/v1/" in request.url, "The dashboard must use the versioned API"
+        # The unified shell polls the classic watchlist/wallet; the research
+        # workspace itself must only use the versioned API.
+        if request.url.split("?", 1)[0].endswith("/api/watchlist"):
+            return route.fulfill(json={"symbols": []})
+        if request.url.split("?", 1)[0].endswith("/api/wallet"):
+            return route.fulfill(status=503, json={"detail": "Offline fixture"})
+        assert "/api/v1/" in request.url, "The research workspace must use the versioned API"
         path = request.url.split("/api/v1/", 1)[-1].split("?", 1)[0]
         if request.method == "POST":
             body = request.post_data_json
@@ -113,7 +119,7 @@ def exercise(page, base_url, screenshots=None):
 
     page.on("pageerror", lambda error: failures.append(str(error)))
     page.route("**/api/**", route_api)
-    page.goto(base_url, wait_until="networkidle")
+    page.goto(f"{base_url}/#/research", wait_until="networkidle")
     expect(page.get_by_role("heading", name="Opportunity Finder", exact=True)).to_be_visible()
     expect(page.get_by_role("heading", name="Walk-Forward Optimizer", exact=True)).not_to_be_visible()
     expect(page.get_by_role("region", name="Paper book at a glance")).to_contain_text("98,000")

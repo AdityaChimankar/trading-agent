@@ -42,7 +42,7 @@ def main():
                                             "test": {"BUY": {"trades": 0, "sessions": 0, "win_rate": None,
                                                              "win_lower_95": None, "mean_net_return_pct": None, "passed": False}}}],
                         }))
-                        page.goto(f"http://127.0.0.1:{server.server_port}", wait_until="networkidle")
+                        page.goto(f"http://127.0.0.1:{server.server_port}/#/research", wait_until="networkidle")
                         expect(page.get_by_text("API authentication", exact=True)).to_have_count(int(required))
                         page.get_by_role("button", name="3. Validate strategy", exact=False).click()
                         expect(page.get_by_role("heading", name="BUY / SELL Outcome Models", exact=True)).to_be_visible()

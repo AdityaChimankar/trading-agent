@@ -14,6 +14,7 @@ from trading_agent.api.routers import (
     digest,
     health,
     history,
+    legacy_ui,
     liveness,
     opportunities,
     pipeline,
@@ -128,6 +129,8 @@ def create_app() -> FastAPI:
     app.include_router(digest.router, prefix="/api/v1/digest", tags=["digest"])
     app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["watchlist"])
     app.include_router(liveness.router, prefix="/api/v1/liveness", tags=["liveness"])
+    # Classic dashboard pages (Opportunity, Positions, Wallet, Symbol, News, Pipeline, History).
+    app.include_router(legacy_ui.router, prefix="/api", tags=["classic-dashboard"])
 
     @app.get("/")
     async def root():

@@ -70,10 +70,18 @@ function Pick({ row, onSelect }: { row: ResearchRow; onSelect: (symbol: string) 
   </article>
 }
 
-export default function ResearchDashboard() {
+type WorkspacePage = 'research' | 'paper'
+
+// Standalone it owns its top bar and Research/Paper toggle. Embedded in the
+// unified App the hash router owns the page and the App owns nav + auth.
+export default function ResearchDashboard({ page: routedPage, onPageChange, embedded = false }: {
+  page?: WorkspacePage; onPageChange?: (page: WorkspacePage) => void; embedded?: boolean
+} = {}) {
   const cache = useQueryClient()
   const auth = useApiAuth()
-  const [page, setPage] = useState<'research' | 'paper'>('research')
+  const [localPage, setLocalPage] = useState<WorkspacePage>('research')
+  const page = routedPage ?? localPage
+  const setPage = (next: WorkspacePage) => { setLocalPage(next); onPageChange?.(next) }
   const [stage, setStage] = useState<ResearchStage>('find')
   const [dependenciesChangedAt, setDependenciesChangedAt] = useState(0)
   const [dependencyNotice, setDependencyNotice] = useState('')
@@ -125,14 +133,15 @@ export default function ResearchDashboard() {
   const sideRows = rows.filter(entry => entry.action === direction && entry.symbol.includes(search.toUpperCase()))
   const availableSymbols = (universe.data?.symbols ?? []).filter(value => value.includes(search.toUpperCase()))
   const planStatus = !matchesSettings ? 'Re-scan required' : !plan ? 'No completed plan' : plan.blocked ? 'Blocked / expired' : plan.quantity > 0 ? 'Reviewable research plan' : 'No allocation'
-  return <div className="app">
-    <header className="topbar"><div className="topbar-left"><span className="brand"><span className="brand-dot" />Intraday Trading Agent</span>
+  const symbolControls = <><label>Symbol <input aria-label="Selected research symbol" list="research-symbols" value={symbol} onChange={event => setSymbol(event.target.value.trim().toUpperCase())} /></label><datalist id="research-symbols">{universe.data?.symbols.map(value => <option key={value} value={value} />)}</datalist>
+      <button className="btn" onClick={() => { void cache.invalidateQueries() }}>Refresh views</button></>
+  return <div className={embedded ? 'workspace-embedded' : 'app'}>
+    {embedded ? <div className="subbar">{symbolControls}</div> : <header className="topbar"><div className="topbar-left"><span className="brand"><span className="brand-dot" />Intraday Trading Agent</span>
       <nav className="nav" aria-label="Workspace"><button className={`nav-link ${page === 'research' ? 'is-active' : ''}`} aria-pressed={page === 'research'} onClick={() => setPage('research')}>Research dashboard</button><button className={`nav-link ${page === 'paper' ? 'is-active' : ''}`} aria-pressed={page === 'paper'} onClick={() => setPage('paper')}>Paper operations</button></nav>
-    </div><div className="topbar-right"><label>Symbol <input aria-label="Selected research symbol" list="research-symbols" value={symbol} onChange={event => setSymbol(event.target.value.trim().toUpperCase())} /></label><datalist id="research-symbols">{universe.data?.symbols.map(value => <option key={value} value={value} />)}</datalist>
-      <button className="btn" onClick={() => { void cache.invalidateQueries() }}>Refresh views</button></div>
-    </header>
-    {auth.data?.required && page === 'research' && <details className="session-auth"><summary>API authentication</summary><form onSubmit={event => { event.preventDefault(); setApiToken(token); setToken(''); void cache.invalidateQueries() }}><label>Session API token <input type="password" autoComplete="off" value={token} onChange={event => setToken(event.target.value)} /></label><button>Apply session token</button></form></details>}
-    {auth.isError && <p className="error" role="alert">Could not check API authentication settings. Check the API connection and update both API and frontend, then refresh views.</p>}
+    </div><div className="topbar-right">{symbolControls}</div>
+    </header>}
+    {!embedded && auth.data?.required && page === 'research' && <details className="session-auth"><summary>API authentication</summary><form onSubmit={event => { event.preventDefault(); setApiToken(token); setToken(''); void cache.invalidateQueries() }}><label>Session API token <input type="password" autoComplete="off" value={token} onChange={event => setToken(event.target.value)} /></label><button>Apply session token</button></form></details>}
+    {!embedded && auth.isError && <p className="error" role="alert">Could not check API authentication settings. Check the API connection and update both API and frontend, then refresh views.</p>}
     {page === 'paper' && <OperatingConsole symbol={symbol} interval={interval} onSymbolChange={setSymbol} onIntervalChange={setInterval} onInspect={() => inspect()} onBookChanged={() => invalidatePlans('Paper book changed. Re-scan to recalculate capital, exposure and sizing.')} />}
     <div className="layout research-layout" hidden={page !== 'research'}>
       <aside className="sidebar"><div className="side-block"><h2 className="panel-title">Watchlist Bias</h2><p className="muted small">{universe.data?.count ?? '…'} configured stocks</p>
