@@ -172,6 +172,8 @@ The smoke stack then passed: migrations, Parquet replay and compaction, nginx pr
 
 **Rebuilt again from `adfa557`** (adds `data-check`, `backfill --universe`): app `dcfcebec8d50`, tagged `unified-platform` and `latest`. The previous images are kept as `unified-4494f3f`. There was no new migration (head still `003`), so the stack was recreated directly: API ready, frontend 200, scheduler trial jobs registered, and `data-check --universe nifty500` run inside the container (494 up to date, 7 not listed by Kite).
 
+**Rebuilt again from `c2d4d6d`** (adds the fetch manifest, the aligned windows, decision outcomes and LLM model tiers): app `ddd202c66e31`, tagged `unified-platform` and `latest`. The previous images are kept as `unified-adfa557`. The migration head is still `003`. Stack recreated: API ready, frontend 200; the scheduler registered `decision_outcomes_cycle` (15:55) and both trial jobs; `/api/v1/analytics/decision-outcomes` returns 200; both arms are collecting from 2026-10-26.
+
 ### 2026-10-24: Second paper-trial arm (gradient boosting)
 
 **Change.**
