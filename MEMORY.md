@@ -15,11 +15,11 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-24 (ranking lab: 60 cross-sectional variants; one-year data, closing-auction fixes, out-of-sample ML, ranker paper trial). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
+Last updated: 2026-10-25 (data-check and fetch manifest, decision outcomes, LLM model tiers, ranker paper trial). Active branch: `unified-platform`, merged with `origin/main` and pushed for a pull request into `main`.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
-**Verified** (2026-10-24, after the second trial arm): 542 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, and both offline browser smokes passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
+**Verified** (2026-10-25, on the pull-request head): 553 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, both offline browser smokes passed, and the Docker smoke stack passed on the current images. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
 
 **Not verified:**
 
