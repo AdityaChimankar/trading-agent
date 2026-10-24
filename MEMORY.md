@@ -53,6 +53,7 @@ Keep paper mode until those are evidenced.
 | Analytics | Net-of-cost performance, Sharpe/Sortino/drawdown/profit factor/expectancy/R, attribution | `analysis/performance.py` |
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
 | Analytics | U-shape remaining-volume forecast with out-of-sample check; router caps size at 5% of forecast remaining volume | `volume_insights.forecast_day_volume / evaluate_volume_forecast`, `/api/v1/analytics/volume/{s}/forecast-check` |
+| Data | `trading-agent data-check`: per-symbol coverage against the store-wide session calendar (up to date / behind / holes / empty / not listed by Kite), store staleness against the last closed weekday, Kite token, ticker heartbeat, trial arms; exit 1 on gaps. `backfill --universe all` fills them | `ingest/coverage.py`, `cli` |
 | Research | Ranking lab: 60 pre-registered cross-sectional variants (fixed-sign gap/reversal/opening-drive ranks; RF/logit/HGB walk-forward; 09:15 or 09:45 entry; 10:15/12:00/15:15 exit; k 5/10/20); validation-only selection with a Bonferroni t over 60, frozen before holdout; rolling choose-best | `research/ranking_lab.py`, `trading-agent optimize ranking-lab` |
 | Research | Ranker paper trial, two arms (`rf`, `hgb`), each with its own hashed frozen spec (config, universe, first session), pick after 09:15 bar (deadline 09:45), entry at the first bar after the pick, 15:15 exit, random book, missed sessions recorded, verdict fixed on the first 60 settled sessions | `research/ranker_trial.py`, `trading-agent optimize ranker-trial`, scheduler `ranker_trial_pick`/`ranker_trial_settle`, `/api/v1/analytics/cross-sectional/trial`, Analytics panel |
 | Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, 15:15 MIS exit, >= INR 10 crore liquidity filter, research gate, long/short list only when passed | `research/cross_sectional.py`, `trading-agent optimize cross-sectional`, `/api/v1/analytics/cross-sectional`, Analytics panel |
@@ -105,6 +106,14 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-24: Data freshness check across all stored symbols
+
+**Request.** How to check that all data is up to date, across the ~2,270 NSE stocks.
+
+**Change.** `trading-agent data-check` and `ingest/coverage.py` (see the User Guide). `HistoricalFetcher.stored_days` now uses the same code, so the check and `backfill --missing-only` agree on what is missing. `backfill` and `data-check` both take `--universe watchlist|nifty500|all`.
+
+**First full run** (2026-10-24, 2,312 stored minute symbols, last 30 days): 494 up to date (the Nifty 500 topped up earlier), **1,794 behind** (stopped around 2026-10-01), and 24 not listed by Kite (for example ICICIPRULI, MOREPENLAB, ALUFLUOR). The store's newest session, 2026-10-23, matches the last closed weekday. The token was valid and both trial arms were ready for 2026-10-26. The full run takes about 5 minutes. A 30-day fill of the behind symbols, `backfill --universe all --interval minute --days 30 --missing-only`, was started the same day.
 
 ### 2026-10-24: Docker images rebuilt
 

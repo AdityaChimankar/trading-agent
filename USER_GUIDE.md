@@ -338,7 +338,30 @@ trading-agent backfill RELIANCE TCS --years 2
 
 # Inspect local Parquet storage
 trading-agent storage-stats
+
+# Is the data up to date?
+trading-agent data-check                       # watchlist
+trading-agent data-check --universe nifty500   # the ranker trial's universe
+trading-agent data-check --universe all        # every stored symbol (~2,300; about 5 minutes)
+
+# Fill what it found
+trading-agent backfill --universe all --interval minute --days 30 --missing-only
 ```
+
+**Checking that data is current.** `data-check` (module `ingest/coverage.py`) reads the stored candles for the chosen symbols (`--interval minute`, `--days 30` by default). There is no exchange holiday calendar yet, so it builds the calendar from every date on which any checked symbol has bars. It reports:
+
+- **Store:** the newest stored session against the last weekday whose market has closed. A mismatch means the store is stale, or that weekday was a holiday.
+- **Per symbol:**
+  - **up to date:** complete through the latest session;
+  - **behind:** its last complete session is older;
+  - **holes:** sessions missing or incomplete inside the window;
+  - **empty:** no data at all.
+
+  A session is complete with the 09:15 bar and a bar at 15:14 or later (closing-auction stocks stop at 15:14). Today counts only after 15:30.
+- **Not listed by Kite:** symbols missing from Kite's instrument list (renamed, delisted, REITs). Nothing can be fetched for them, so they are shown apart and do not fail the check.
+- **Also:** the Kite token, the ticker heartbeat, and each trial arm's picks, settlements and missed sessions.
+
+It prints the `backfill` command that fills the gaps and exits with status 1 when candles are behind, the store is stale or the token has expired, so it can run as a pre-flight step. `--no-token` skips the Kite call. In Docker: `docker compose run --rm tools trading-agent data-check --universe all`.
 
 The default watchlist comes from `symbols.txt`; named Nifty 500 loading uses `symbols_nifty500_plus.txt`. Explicit symbols are safest for the first run and avoid a large broker request.
 
@@ -460,7 +483,8 @@ docker compose down
 |---|---|
 | `trading-agent login` | Refresh Kite token using the automated flow |
 | `trading-agent ingest [SYMBOL...]` | Fetch recent historical candles |
-| `trading-agent backfill [SYMBOL...] [--days N] [--missing-only]` | Fetch a longer history; `--missing-only` requests only what is not stored |
+| `trading-agent backfill [SYMBOL...] [--days N] [--missing-only] [--universe watchlist\|nifty500\|all]` | Fetch a longer history; `--missing-only` requests only sessions missing or incomplete |
+| `trading-agent data-check [SYMBOL...] [--universe watchlist\|nifty500\|all] [--days N] [--no-token]` | Are candles, token, ticker and trial current? Exit 1 if not |
 | `trading-agent heal-gaps [SYMBOL...] --interval 5minute --limit 100` | Bounded catch-up with overlap, error summary, and failure exit status |
 | `trading-agent storage-stats` | Summarize Parquet data |
 | `trading-agent compact SYMBOL` | Compact a symbol's Parquet data |

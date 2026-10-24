@@ -100,7 +100,9 @@ The token is stored at `data/.access_token`, ignored by Git and shared with Dock
 python -m trading_agent.ingest.build_nifty500_symbols          # resolves instrument tokens; --no-resolve to skip
 trading-agent ingest RELIANCE TCS INFY --days 100
 trading-agent backfill RELIANCE --years 2                       # chunked, resumable, rate limited
-trading-agent backfill --interval minute --days 365 --missing-only  # only the head/tail not yet stored
+trading-agent backfill --interval minute --days 365 --missing-only  # only sessions missing or incomplete
+trading-agent data-check --universe all                         # is every stored symbol current? exit 1 if not
+trading-agent backfill --universe all --interval minute --days 30 --missing-only  # fill what data-check found
 trading-agent storage-stats
 
 # Research

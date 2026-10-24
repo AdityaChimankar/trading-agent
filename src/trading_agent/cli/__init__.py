@@ -29,6 +29,25 @@ def _resolve_symbols(symbols: list[str] | None) -> list[str]:
     return asyncio.run(resolve_watchlist(symbols=symbols))
 
 
+UNIVERSE_HELP = "watchlist | nifty500 (the ranker trial's) | all (every stored symbol for the interval)"
+
+
+def _select_symbols(symbols: list[str] | None, universe: str, interval: str) -> list[str]:
+    """Explicit symbols, or a named universe."""
+    if symbols:
+        return [s.upper() for s in symbols]
+    if universe == "nifty500":
+        from trading_agent.research.cross_sectional import default_universe
+
+        return default_universe()
+    if universe == "all":
+        store = get_parquet_store()
+        return [s for s in store.get_symbols() if interval in store.get_intervals(s)]
+    if universe != "watchlist":
+        raise typer.BadParameter(f"Unknown universe {universe!r}; use {UNIVERSE_HELP}")
+    return _resolve_symbols(None)
+
+
 @app.callback()
 def main(
     debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug logging"),
@@ -69,11 +88,11 @@ def backfill(
     interval: str = typer.Option("5minute", help="Candle interval"),
     years: int = typer.Option(2, help="Years of history"),
     days: int = typer.Option(None, help="Days of history (overrides --years)"),
-    missing_only: bool = typer.Option(False, help="Fetch only the head/tail outside stored candles"),
+    missing_only: bool = typer.Option(False, help="Fetch only sessions missing or incomplete in the store"),
+    universe: str = typer.Option("watchlist", help=UNIVERSE_HELP),
 ):
     """Backfill historical data."""
-    if not symbols:
-        symbols = _resolve_symbols(symbols)
+    symbols = _select_symbols(symbols, universe, interval)
 
     from trading_agent.ingest.fetch_historical import HistoricalFetcher
 
@@ -227,6 +246,73 @@ def pipeline(
             f"  #{opp.rank} {opp.symbol}: {opp.rule_signal}/{opp.ml_signal or 'N/A'} "
             f"(Score: {opp.score:.3f}, R:R {opp.risk_reward:.2f}) @ {opp.price:.2f}"
         )
+
+
+@app.command("data-check")
+def data_check(
+    symbols: list[str] = typer.Argument(None, help="Symbols (default: see --universe)"),
+    universe: str = typer.Option("watchlist", help=UNIVERSE_HELP),
+    interval: str = typer.Option("minute", help="Stored candle interval to check"),
+    days: int = typer.Option(30, help="Calendar days of sessions that must be complete"),
+    token: bool = typer.Option(True, help="Also check the Kite token (one API call)"),
+    show: int = typer.Option(15, help="Problem symbols to list"),
+):
+    """Report whether stored candles, the Kite token, the ticker and the trial are up to date."""
+    from trading_agent.ingest.coverage import check
+
+    selected = _select_symbols(symbols, universe, interval)
+    report = check(selected, interval, days)
+    counts, problems = report["counts"], report["problems"]
+    # Symbols Kite no longer lists (renamed, delisted, REITs) cannot be fetched; report them apart.
+    from trading_agent.ingest.instrument_lookup import get_instrument_lookup
+
+    lookup = get_instrument_lookup()
+    unlisted = sorted(s for s in problems if lookup.get_token(s) is None)
+    for symbol in unlisted:
+        counts[problems.pop(symbol)["status"]] -= 1
+    healthy = report["store_current"] and not problems
+    typer.echo(f"Candles ({interval}, {len(selected)} symbols, sessions in the last {days} days)")
+    typer.echo(f"  newest stored session {report['latest_stored_session']}; last closed weekday "
+               f"{report['last_closed_weekday']}"
+               + ("" if report["store_current"] else "  <- STALE (or that weekday was a holiday)"))
+    typer.echo(f"  up to date {counts['up_to_date']} | behind {counts['behind']} | "
+               f"holes {counts['holes']} | empty {counts['empty']} | not listed by Kite {len(unlisted)}")
+    if unlisted:
+        typer.echo(f"    not listed (renamed or delisted; nothing to fetch): {', '.join(unlisted[:show])}"
+                   + (f" ... and {len(unlisted) - show} more" if len(unlisted) > show else ""))
+    for symbol, row in list(problems.items())[:show]:
+        detail = (f"last complete {row['last_complete']}" if row["status"] != "holes"
+                  else f"{len(row['missing'])} missing: {', '.join(row['missing'][:4])}"
+                       + (" ..." if len(row["missing"]) > 4 else ""))
+        typer.echo(f"    {symbol:<14} {row['status']:<7} {detail}")
+    if len(problems) > show:
+        typer.echo(f"    ... and {len(problems) - show} more")
+    stale = [s for s, row in problems.items() if row["status"] != "empty"]
+    if stale or not report["store_current"]:
+        target = " ".join(stale) if 0 < len(stale) <= 20 else f"--universe {universe}"
+        typer.echo(f"  fix: trading-agent backfill {target} --interval {interval} --days {days} --missing-only")
+    if token:
+        from trading_agent.ingest.kite_auth import get_kite_auth
+
+        valid = get_kite_auth().validate_token()
+        healthy &= valid
+        typer.echo(f"Kite token: {'valid' if valid else 'EXPIRED - run: trading-agent login'}")
+    from trading_agent.core.freshness import in_market_hours, ingest_heartbeat
+
+    beat = ingest_heartbeat() or {}
+    typer.echo(f"Ticker: {'connected' if beat.get('connected') else 'not connected'}, last tick "
+               f"{beat.get('last_tick') or 'never'}" + ("" if in_market_hours() else " (market closed)"))
+    from trading_agent.research import ranker_trial
+
+    for arm in ranker_trial.ARMS:
+        state = ranker_trial.status(arm)
+        if state["status"] == "not_started":
+            typer.echo(f"Trial {arm}: not started")
+            continue
+        typer.echo(f"Trial {arm}: {state['status']} from {state['start_session']} | picks {state['picks']} | "
+                   f"settled {state['settled']} | missed {len(state['missed'])} | pending {len(state['pending'])}")
+    if not healthy:
+        raise typer.Exit(1)
 
 
 @app.command()

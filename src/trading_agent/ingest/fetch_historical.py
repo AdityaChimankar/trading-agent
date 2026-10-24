@@ -31,6 +31,7 @@ from trading_agent.core.exceptions import (
     KiteAPIError,
     RateLimitError,
 )
+from trading_agent.ingest.coverage import INTERVAL_MINUTES
 from trading_agent.core.circuit_breaker import CircuitBreakerConfig, get_circuit_breaker
 from trading_agent.ingest.kite_auth import get_kite_auth
 from trading_agent.ingest.instrument_lookup import get_instrument_lookup
@@ -49,11 +50,7 @@ MAX_DAYS_PER_REQUEST = {
     "day": 2000,
 }
 
-INTERVAL_MINUTES = {"minute": 1, "1minute": 1, "3minute": 3, "5minute": 5,
-                    "10minute": 10, "15minute": 15, "30minute": 30, "60minute": 60}
 IST_ZONE = ZoneInfo("Asia/Kolkata")
-IST = "Asia/Kolkata"
-SESSION_OPEN_MINUTE, SESSION_EXIT_MINUTE = 9 * 60 + 15, 15 * 60 + 15
 
 INTERVAL_MAP = {
     "1minute": "minute",
@@ -318,24 +315,10 @@ class HistoricalFetcher:
         return results
 
     def stored_days(self, symbol: str, interval: str) -> tuple[set[date], set[date]]:
-        """IST session dates stored for a symbol: (complete, any).
+        """IST session dates stored for a symbol: (complete, any). See ``ingest.coverage``."""
+        from trading_agent.ingest.coverage import stored_days
 
-        A session is complete when it has the 09:15 bar and a bar starting within
-        one bar of 15:15. Since NSE's closing auction (August 2026) many stocks
-        have no continuous-trading bars after 15:14, so a later bar is not required.
-        """
-        try:
-            frame = self.parquet.read_candles(symbol, interval, columns=["timestamp"])
-        except Exception:  # an unreadable store is refetched in full
-            return set(), set()
-        if frame.empty:
-            return set(), set()
-        stamp = pd.to_datetime(frame["timestamp"], utc=True).dt.tz_convert(IST)
-        span = pd.DataFrame({"day": stamp.dt.date, "minute": stamp.dt.hour * 60 + stamp.dt.minute}
-                            ).groupby("day")["minute"].agg(["min", "max"])
-        bar = INTERVAL_MINUTES.get(interval, 1)
-        complete = span[(span["min"] <= SESSION_OPEN_MINUTE) & (span["max"] >= SESSION_EXIT_MINUTE - bar)]
-        return set(complete.index), set(span.index)
+        return stored_days(self.parquet, symbol, interval)
 
     @staticmethod
     def missing_ranges(
