@@ -19,7 +19,7 @@ Last updated: 2026-10-24 (ranking lab: 60 cross-sectional variants; one-year dat
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
-**Verified** (2026-10-24, after the ranker-trial work): 534 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, and both offline browser smokes passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
+**Verified** (2026-10-24, after the second trial arm): 542 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, and both offline browser smokes passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
 
 **Not verified:**
 
@@ -54,7 +54,7 @@ Keep paper mode until those are evidenced.
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
 | Analytics | U-shape remaining-volume forecast with out-of-sample check; router caps size at 5% of forecast remaining volume | `volume_insights.forecast_day_volume / evaluate_volume_forecast`, `/api/v1/analytics/volume/{s}/forecast-check` |
 | Research | Ranking lab: 60 pre-registered cross-sectional variants (fixed-sign gap/reversal/opening-drive ranks; RF/logit/HGB walk-forward; 09:15 or 09:45 entry; 10:15/12:00/15:15 exit; k 5/10/20); validation-only selection with a Bonferroni t over 60, frozen before holdout; rolling choose-best | `research/ranking_lab.py`, `trading-agent optimize ranking-lab` |
-| Research | Ranker paper trial: hashed frozen spec (config, universe, first session), pick after 09:15 bar (deadline 09:45), entry at the first bar after the pick, 15:15 exit, random book, missed sessions recorded, verdict fixed on the first 60 settled sessions | `research/ranker_trial.py`, `trading-agent optimize ranker-trial`, scheduler `ranker_trial_pick`/`ranker_trial_settle`, `/api/v1/analytics/cross-sectional/trial`, Analytics panel |
+| Research | Ranker paper trial, two arms (`rf`, `hgb`), each with its own hashed frozen spec (config, universe, first session), pick after 09:15 bar (deadline 09:45), entry at the first bar after the pick, 15:15 exit, random book, missed sessions recorded, verdict fixed on the first 60 settled sessions | `research/ranker_trial.py`, `trading-agent optimize ranker-trial`, scheduler `ranker_trial_pick`/`ranker_trial_settle`, `/api/v1/analytics/cross-sectional/trial`, Analytics panel |
 | Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, 15:15 MIS exit, >= INR 10 crore liquidity filter, research gate, long/short list only when passed | `research/cross_sectional.py`, `trading-agent optimize cross-sectional`, `/api/v1/analytics/cross-sectional`, Analytics panel |
 | Research | Strategy search: 2,508 entry x bar-size x exit candidates; selection on development/validation only (Bonferroni clustered t, session bootstrap, symbol stability, always-long/short/random baselines, 10+2x2 bps) frozen to a hashed run file before holdout; ML predicted walk-forward (expanding, refit every 20 sessions after 60), never on its own training sessions; rolling walk-forward over exit policies and all candidates including ML; immutable runs with git revision, versions and data fingerprints | `research/strategy_search.py`, `trading-agent optimize strategy-search` |
 | Research | Strategy Lab moving-average profiles (`rule_ma` EMA9/21 filter on the rule, `ema_cross` EMA9/21 crossover + VWAP); EMA9, EMA21 and session VWAP on the chart | `core/signals.ma_trend / apply_ma_filter`, `research/strategy_lab.py`, `PriceChart.tsx` |
@@ -76,7 +76,7 @@ Keep paper mode until those are evidenced.
 | P0 | Re-run research on corrected timestamps | earlier walk-forward, outcome-validation and outcome-model results were computed on history whose legacy sessions were shifted 5h30m; rerun before relying on any of them |
 | P1 | Ingest Nifty 50 candles and run `orb` / `orb_gap` in Strategy Lab | NIFTY50 minute candles stored; profiles compared with baselines after costs on several symbols |
 | P0 | Run the ranker paper trial | started 2026-10-24: first session 2026-10-26, spec `da100b7c01949a78...` in `data/research/ranker_trial/spec.json`, frozen at `449418e`. Needs the scheduler from this branch (the main checkout is on `rework`, which lacks the trial) running each session with a valid Kite token, then the verdict on the first 60 settled sessions (mean net > 0, t >= 2, above random) recorded here. Every historical window has been inspected, so only these sessions are clean evidence |
-| P1 | Second trial arm for `hgb_lags` k10 | ranking lab validation best (+16.8 bps/day, t 2.73; holdout +13.3, t 2.51, 66% day win) run prospectively beside the frozen RF arm; both verdicts judged against a family-wise bar for two arms |
+| P0 | Run the `hgb` trial arm | started 2026-10-24 beside `rf`, first session 2026-10-26, in `data/research/ranker_trial_hgb/`. Verdict on its first 60 settled sessions; t >= 2.0 keeps the family-wise error across both arms below 5% |
 | P1 | Cross-sectional ranking on longer history | daily or intraday history long enough for `--max-lag 240`; point-in-time Nifty 500 membership to remove survivorship bias |
 | P1 | Exchange holiday calendar | session gates and scheduler skip NSE holidays and special sessions |
 | P1 | Finish MUI conversion | remaining `.btn` and legacy markup in older pages replaced by MUI components |
@@ -103,6 +103,19 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-24: Second paper-trial arm (gradient boosting)
+
+**Change.**
+
+- `RankConfig.model`: `rf` (the default, unchanged) or `hgb`. `hgb` is gradient boosting on per-session percentile ranks of the lag features, with the ranking lab's settings.
+- The trial gained arms, each with its own directory, spec and records. `pick_all` builds the morning table once for arms that need the same data and fetches from Kite once; `settle_all` fetches once.
+- The `rf` spec frozen earlier today predates the `model` field and loads unchanged (default `rf`, same hash). A test covers this.
+- The API takes `?arm=`; the Analytics page shows one panel per arm; the CLI takes `--arm`.
+
+**Family-wise bar.** The existing t ≥ 2.0 already covers two arms: the Bonferroni one-sided bar at 5% across two arms is 1.96. So the frozen `rf` spec did not need to change.
+
+**Dry run** (2026-10-23, stored data, scratch folder): `pick_all` took 154 s for both arms, and the `rf` book was identical to the single-arm dry run. Settlement: `rf` +25.4 bps, `hgb` +45.9 bps; random books −15.4 bps. One day of plumbing, not evidence.
 
 ### 2026-10-24: Ranking lab (60 cross-sectional variants)
 

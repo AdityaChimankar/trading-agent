@@ -65,6 +65,7 @@ class RankConfig:
     top_k: int = 10
     cost_bps: float = 15.0  # round trip per position, incl. slippage
     min_avg_value_cr: float = 10.0  # rank only stocks trading >= this many INR crore a day (20-day mean)
+    model: str = "rf"  # rf: the paper's random forest on raw features; hgb: gradient boosting on per-session ranks
     n_estimators: int = 300
     max_depth: int = 10
     min_test_days: int = 60
@@ -76,6 +77,8 @@ class RankConfig:
             raise ValueError("Invalid ranking configuration")
         if not 0 <= self.cost_bps <= 200:
             raise ValueError("cost_bps must be 0-200")
+        if self.model not in ("rf", "hgb"):
+            raise ValueError("model must be rf or hgb")
 
     @property
     def lags(self) -> tuple[int, ...]:
@@ -171,10 +174,22 @@ def feature_columns(table: pd.DataFrame) -> list[str]:
 # --- walk-forward ------------------------------------------------------------------------
 
 def _model(config: RankConfig):
+    if config.model == "hgb":  # the ranking lab's validation-best ranker (2026-10-24)
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        return HistGradientBoostingClassifier(max_iter=200, learning_rate=0.05, max_leaf_nodes=15,
+                                              min_samples_leaf=100, l2_regularization=1.0, random_state=config.seed)
     from sklearn.ensemble import RandomForestClassifier
 
     return RandomForestClassifier(n_estimators=config.n_estimators, max_depth=config.max_depth,
                                   min_samples_leaf=5, random_state=config.seed, n_jobs=-1)
+
+
+def _matrix(rows: pd.DataFrame, features: list[str], config: RankConfig) -> np.ndarray:
+    """Model inputs: raw features for the forest, per-session percentile ranks for gradient boosting."""
+    if config.model == "rf":
+        return rows[features].to_numpy()
+    return (rows.groupby(level="session")[features].rank(pct=True) - 0.5).to_numpy()
 
 
 def _book(day: pd.DataFrame, scores: np.ndarray, k: int) -> tuple[float, list[str], list[str]]:
@@ -218,14 +233,14 @@ def walk_forward(table: pd.DataFrame, config: RankConfig) -> dict:
         if train["label"].nunique() < 2:
             start += config.retrain_days
             continue
-        model = _model(config).fit(train[features].to_numpy(), train["label"].to_numpy())
+        model = _model(config).fit(_matrix(train, features, config), train["label"].to_numpy())
         blocks.append({"train_start": str(train_sessions[0]), "train_end": str(train_sessions[-1]),
                        "test_start": str(test_sessions[0]), "test_end": str(test_sessions[-1])})
         for session in test_sessions:
             day = labelled.xs(session, level="session", drop_level=False)
             if len(day) < 2 * config.top_k:
                 continue
-            scores = model.predict_proba(day[features].to_numpy())[:, 1]
+            scores = model.predict_proba(_matrix(day, features, config))[:, 1]
             accuracy.append(float(((scores > 0.5) == day["label"].to_numpy().astype(bool)).mean()))
             gross, _, _ = _book(day, scores, config.top_k)
             model_days.append((session, gross - cost))
@@ -249,8 +264,8 @@ def latest_ranking(table: pd.DataFrame, config: RankConfig, session=None) -> dic
     day = table.xs(target, level="session", drop_level=False)
     if len(history) < config.train_days or train["label"].nunique() < 2 or len(day) < 2 * config.top_k:
         return None
-    model = _model(config).fit(train[features].to_numpy(), train["label"].to_numpy())
-    scores = model.predict_proba(day[features].to_numpy())[:, 1]
+    model = _model(config).fit(_matrix(train, features, config), train["label"].to_numpy())
+    scores = model.predict_proba(_matrix(day, features, config))[:, 1]
     order = np.argsort(scores)
     symbols = day.index.get_level_values("symbol")
 

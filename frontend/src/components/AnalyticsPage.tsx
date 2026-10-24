@@ -73,7 +73,8 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
     refetchInterval: (q) => (q.state.data?.job.running ? 5_000 : 300_000) })
   const runRanking = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/cross-sectional/run'),
     onSuccess: () => cache.invalidateQueries({ queryKey: ['ranking'] }) })
-  const trial = useQuery({ queryKey: ['ranker-trial'], queryFn: () => apiGet<Trial>('/api/v1/analytics/cross-sectional/trial'), refetchInterval: 300_000 })
+  const trialRf = useQuery({ queryKey: ['ranker-trial', 'rf'], queryFn: () => apiGet<Trial>('/api/v1/analytics/cross-sectional/trial?arm=rf'), refetchInterval: 300_000 })
+  const trialHgb = useQuery({ queryKey: ['ranker-trial', 'hgb'], queryFn: () => apiGet<Trial>('/api/v1/analytics/cross-sectional/trial?arm=hgb'), refetchInterval: 300_000 })
   const clear = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/drift/clear'), onSuccess: () => cache.invalidateQueries({ queryKey: ['drift'] }) })
   const o = perf.data?.overall
 
@@ -135,7 +136,8 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
       <RankingPanel data={ranking.data} loading={ranking.isLoading} error={ranking.error}
         onRun={() => runRanking.mutate()} starting={runRanking.isPending} startError={runRanking.error} />
 
-      <TrialPanel data={trial.data} loading={trial.isLoading} error={trial.error} />
+      <TrialPanel arm="rf" label="random forest" data={trialRf.data} loading={trialRf.isLoading} error={trialRf.error} />
+      <TrialPanel arm="hgb" label="gradient boosting" data={trialHgb.data} loading={trialHgb.isLoading} error={trialHgb.error} />
 
       <Panel title="ML drift monitor" subtitle="PSI and KS of live model inputs against the training-period baseline. Significant drift withdraws ML so hybrid decisions hold."
         actions={<Stack direction="row" spacing={1}>
@@ -162,15 +164,15 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
   )
 }
 
-function TrialPanel({ data, loading, error }: { data?: Trial; loading: boolean; error: unknown }) {
+function TrialPanel({ arm, label, data, loading, error }: { arm: string; label: string; data?: Trial; loading: boolean; error: unknown }) {
   const stat = (s?: RankStats) => s && s.days > 0
     ? `${num(s.mean_daily_net_bps, 1)} bps/day · hit ${num(s.hit_rate_pct, 1)}% · t ${num(s.t_stat, 2)}`
     : '—'
   const target = data?.done_when?.sessions ?? 60
   return (
-    <Panel title="Ranker paper trial (prospective)"
+    <Panel title={`Ranker paper trial: ${label} arm (prospective)`}
       subtitle="The frozen ranker's book recorded each session after the 09:15 bar and priced at 15:15: entry at the first bar after the pick, net of costs. Only these sessions count as clean evidence. Never places orders.">
-      <StateMessage loading={loading} error={error} empty="No trial started. Start one with: trading-agent optimize ranker-trial start"
+      <StateMessage loading={loading} error={error} empty={`Arm not started. Start it with: trading-agent optimize ranker-trial start --arm ${arm}`}
         isEmpty={data?.status === 'not_started'} />
       {data && data.status !== 'not_started' && <>
         <Alert severity={data.status === 'passed' ? 'success' : data.status === 'failed' ? 'error' : 'info'} sx={{ mb: 2 }}>

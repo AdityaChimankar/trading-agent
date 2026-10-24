@@ -156,7 +156,48 @@ def test_trial_endpoint_reports_state(store, monkeypatch, tmp_path):
     monkeypatch.setenv("API_AUTH_TOKEN", "")
     get_settings.cache_clear()
     with TestClient(create_app()) as client:
-        assert client.get("/api/v1/analytics/cross-sectional/trial").json() == {"status": "not_started"}
+        assert client.get("/api/v1/analytics/cross-sectional/trial").json() == {"status": "not_started", "arm": "rf"}
         _start()
         body = client.get("/api/v1/analytics/cross-sectional/trial").json()
         assert body["status"] == "collecting" and body["settled"] == 0 and body["universe_size"] == len(SYMBOLS)
+        assert client.get("/api/v1/analytics/cross-sectional/trial?arm=hgb").json()["status"] == "not_started"
+        assert client.get("/api/v1/analytics/cross-sectional/trial?arm=xx").status_code == 400
+
+
+def test_spec_frozen_before_arms_existed_still_loads_as_the_rf_arm(store):
+    spec = _start()
+    old = json.loads(rt.spec_path().read_text())
+    old["config"].pop("model")              # the 2026-10-24 rf spec predates the model field
+    old.pop("spec_sha256")
+    old["spec_sha256"] = rt._digest(old)
+    rt.spec_path().write_text(json.dumps(old))
+    loaded, config = rt._require_spec("rf")
+    assert loaded["spec_sha256"] == old["spec_sha256"] and config.model == "rf" and spec["config"]["model"] == "rf"
+
+
+def test_arms_share_one_morning_fetch_and_settle_separately(store, monkeypatch):
+    calls = []
+    monkeypatch.setattr(rt, "_refresh", lambda symbols, session, until: calls.append(len(symbols)) or [])
+    _start()
+    hgb = rt.start(universe=SYMBOLS, config=RankConfig(**{**CONFIG.__dict__, "model": "hgb"}),
+                   now=at(30, "08:00"), arm="hgb")
+    assert hgb["arm"] == "hgb" and "family_wise" in hgb["done_when"] and rt.started_arms() == ["rf", "hgb"]
+    picks = rt.pick_all(at(30, "09:20"), store)
+    assert set(picks) == {"rf", "hgb"} and all(isinstance(p, dict) for p in picks.values())
+    assert len(calls) == 1                                   # one Kite refresh for both arms
+    assert rt.record_path(DAYS[30].date(), "pick", "hgb").exists()
+    assert "starts on" not in str(rt.pick_all(at(30, "09:21"), store))  # already recorded: refused, not redone
+    settled = rt.settle_all(at(30, "15:40"), store)
+    assert [r["status"] for r in settled["rf"]] == [r["status"] for r in settled["hgb"]] == ["settled"]
+    assert len(calls) == 2                                   # one settlement refresh, by the first arm
+    assert rt.status("hgb")["settled"] == 1 and rt.status("rf")["settled"] == 1
+
+
+def test_gradient_boosting_ranks_features_within_each_session():
+    from trading_agent.research.cross_sectional import _matrix
+
+    index = pd.MultiIndex.from_product([["d1", "d2"], ["A", "B", "C"]], names=["session", "symbol"])
+    rows = pd.DataFrame({"f": [1.0, 2.0, 3.0, 100.0, 300.0, 200.0]}, index=index)
+    assert _matrix(rows, ["f"], CONFIG).ravel().tolist() == rows["f"].tolist()
+    ranked = _matrix(rows, ["f"], RankConfig(**{**CONFIG.__dict__, "model": "hgb"})).ravel()
+    assert ranked.tolist() == pytest.approx([-1 / 6, 1 / 6, 0.5, -1 / 6, 0.5, 1 / 6])

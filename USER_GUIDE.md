@@ -88,7 +88,9 @@ Every variant is a long/short book at 15 bps per position, on the same test days
 1. **Pick** (scheduler, 09:16:30 IST, deadline 09:45). It fetches today's minute candles for the liquid names, trains on the preceding 60 labelled sessions and records the top and bottom 10 with the pick time. Only today's open is used; later bars are blanked.
 2. **Settle** (scheduler, 15:50 IST). Each position enters at the open of the first minute bar after the pick and exits at the 15:15 price, net of 15 bps. The at-open return (the backtest's assumption) and a random-pick book from the same eligible names are recorded beside it. A trading session without a pick is recorded as **missed** and never filled in.
 
-The verdict is computed once, on the first 60 settled sessions: mean net > 0, t ≥ 2 and above the random book. Later sessions are shown but cannot change it. See **Analytics → Ranker paper trial**, `trading-agent optimize ranker-trial status`, or `GET /api/v1/analytics/cross-sectional/trial`. The trial needs a valid Kite token each morning and places no orders.
+There are two arms, each with its own frozen spec and records: `rf` (the random forest; `data/research/ranker_trial/`) and `hgb` (gradient boosting on per-session ranked lag features, the ranking lab's validation-best; `data/research/ranker_trial_hgb/`). Start each with `--arm`. The scheduler's pick fetches and loads the morning's data once for both arms, and settlement fetches once.
+
+The verdict is computed once per arm, on its first 60 settled sessions: mean net > 0, t ≥ 2 and above the random book. A t of 2.0 keeps the one-sided family-wise error across the two arms below 5%. Later sessions are shown but cannot change it. See **Analytics → Ranker paper trial**, `trading-agent optimize ranker-trial status`, or `GET /api/v1/analytics/cross-sectional/trial`. The trial needs a valid Kite token each morning and places no orders.
 
 **Moving averages.** The chart shows MA20 and MA50, plus EMA9, EMA21 and session VWAP (VWAP restarts at each 09:15). Click EMA9 or EMA21 in the legend to show them. Strategy Lab has two moving-average profiles:
 
@@ -475,7 +477,7 @@ docker compose down
 | `python -m trading_agent.strategy.outcome_cli status / train / paper / promote` | BUY/SELL outcome-model lifecycle |
 | `trading-agent optimize strategy-search [SYMBOL...] [--no-ml]` | Frozen-selection strategy search with baselines and walk-forward |
 | `trading-agent optimize cross-sectional [SYMBOL...]` | Cross-sectional ranking walk-forward vs random picks |
-| `trading-agent optimize ranker-trial start / pick / settle / status` | Prospective paper trial of the frozen ranker |
+| `trading-agent optimize ranker-trial start / pick / settle / status [--arm rf\|hgb\|all]` | Prospective paper trial of the frozen rankers (start needs one arm) |
 | `trading-agent optimize ranking-lab [SYMBOL...] [--snapshots FILE]` | 60 pre-registered cross-sectional variants, selection frozen on validation |
 
 Always use `--help` on a command before a long or quota-consuming run.

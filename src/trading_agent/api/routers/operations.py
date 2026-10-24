@@ -243,10 +243,14 @@ def cross_sectional_status():
 
 
 @router.get("/analytics/cross-sectional/trial")
-def cross_sectional_trial():
-    from trading_agent.research.ranker_trial import status
+def cross_sectional_trial(arm: str = "rf"):
+    from fastapi import HTTPException
 
-    return jsonable(status())
+    from trading_agent.research.ranker_trial import ARMS, status
+
+    if arm not in ARMS:
+        raise HTTPException(400, f"arm must be one of {', '.join(ARMS)}")
+    return jsonable(status(arm))
 
 
 @router.post("/analytics/cross-sectional/run", status_code=202)

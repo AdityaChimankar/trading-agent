@@ -267,13 +267,13 @@ def drift_check_cycle():
 
 
 def ranker_trial_pick_cycle():
-    """Record the cross-sectional ranker's paper book after the 09:15 bar (no-op until a trial is started)."""
+    """Record each started ranker arm's paper book after the 09:15 bar (no-op until an arm is started)."""
     from trading_agent.research import ranker_trial
 
     try:
-        if ranker_trial.load_spec() is not None:
-            record = ranker_trial.pick()
-            logger.info("ranker_trial_pick_recorded", session=record["session"])
+        for arm, result in ranker_trial.pick_all().items():
+            logger.info("ranker_trial_pick", arm=arm,
+                        result=result["session"] if isinstance(result, dict) else result)
     except Exception as e:  # the session is recorded as missed at settlement
         logger.error("ranker_trial_pick_failed", error=str(e))
 
@@ -283,8 +283,7 @@ def ranker_trial_settle_cycle():
     from trading_agent.research import ranker_trial
 
     try:
-        if ranker_trial.load_spec() is not None:
-            ranker_trial.settle_pending()
+        ranker_trial.settle_all()
     except Exception as e:
         logger.error("ranker_trial_settle_failed", error=str(e))
 

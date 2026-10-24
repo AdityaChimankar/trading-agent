@@ -14,6 +14,12 @@ records, each written once and never overwritten:
           with the backtest, which assumed an entry exactly at the open.
 
 A trading session without a pick is recorded as missed, never filled in later.
+
+There are two arms, each with its own frozen spec and records: ``rf`` (the
+paper's random forest; the original trial) and ``hgb`` (gradient boosting on
+per-session ranked features, the ranking lab's validation-best). They share the
+morning's data load. ``DONE_T_STAT = 2.0`` keeps the one-sided family-wise
+error across both arms below 5% (Bonferroni bar for two arms: 1.96).
 The verdict is computed once, on the first ``DONE_SESSIONS`` settled sessions,
 so watching the running t-stat cannot stop the trial on a lucky streak.
 
@@ -56,6 +62,8 @@ SETTLE_AFTER = EXIT_MINUTE + 5
 HISTORY_DAYS = 160  # calendar days read for features: covers lags, training and the 20-day liquidity mean
 DONE_SESSIONS = 60
 DONE_T_STAT = 2.0
+ARMS = {"rf": "ranker_trial", "hgb": "ranker_trial_hgb"}  # arm -> directory under data/research
+ARM_CONFIGS = {"rf": RankConfig(), "hgb": RankConfig(model="hgb")}
 
 
 class TrialError(RuntimeError):
@@ -64,16 +72,18 @@ class TrialError(RuntimeError):
 
 # --- files ---------------------------------------------------------------------------------
 
-def trial_dir() -> Path:
-    return get_settings().data_dir / "research" / "ranker_trial"
+def trial_dir(arm: str = "rf") -> Path:
+    if arm not in ARMS:
+        raise TrialError(f"Unknown arm {arm!r}; choose from {', '.join(ARMS)}")
+    return get_settings().data_dir / "research" / ARMS[arm]
 
 
-def spec_path() -> Path:
-    return trial_dir() / "spec.json"
+def spec_path(arm: str = "rf") -> Path:
+    return trial_dir(arm) / "spec.json"
 
 
-def record_path(session: date, kind: str) -> Path:
-    return trial_dir() / "sessions" / f"{session}.{kind}.json"
+def record_path(session: date, kind: str, arm: str = "rf") -> Path:
+    return trial_dir(arm) / "sessions" / f"{session}.{kind}.json"
 
 
 def _digest(payload: dict) -> str:
@@ -110,10 +120,11 @@ def first_session(now: datetime | None = None) -> date:
 
 
 def start(start_session: date | None = None, universe: list[str] | None = None,
-          config: RankConfig = RankConfig(), now: datetime | None = None) -> dict:
-    """Freeze the trial. Refuses to start in the past or to replace an existing spec."""
-    if spec_path().exists():
-        raise FileExistsError(f"{spec_path()} exists; the trial is already frozen")
+          config: RankConfig | None = None, now: datetime | None = None, arm: str = "rf") -> dict:
+    """Freeze one arm. Refuses to start in the past or to replace an existing spec."""
+    config = config or ARM_CONFIGS[arm]
+    if spec_path(arm).exists():
+        raise FileExistsError(f"{spec_path(arm)} exists; the {arm} arm is already frozen")
     earliest = first_session(now)
     start_session = start_session or earliest
     if start_session < earliest:
@@ -132,14 +143,18 @@ def start(start_session: date | None = None, universe: list[str] | None = None,
                       "beats_random_baseline": True,
                       "evaluated_on": f"the first {DONE_SESSIONS} settled sessions only"},
     }
+    if arm != "rf":  # the rf spec was frozen before arms existed; its content must not change
+        spec["arm"] = arm
+        spec["done_when"]["family_wise"] = (f"{len(ARMS)} arms; t >= {DONE_T_STAT} keeps the one-sided "
+                                            "family-wise error below 5%")
     spec["spec_sha256"] = _digest(spec)
-    _write_atomic(spec_path(), spec, exclusive=True)
-    logger.info("ranker_trial_started", start_session=str(start_session), symbols=len(symbols))
+    _write_atomic(spec_path(arm), spec, exclusive=True)
+    logger.info("ranker_trial_started", arm=arm, start_session=str(start_session), symbols=len(symbols))
     return spec
 
 
-def load_spec() -> dict | None:
-    spec = _read(spec_path())
+def load_spec(arm: str = "rf") -> dict | None:
+    spec = _read(spec_path(arm))
     if spec is None:
         return None
     body = {k: v for k, v in spec.items() if k != "spec_sha256"}
@@ -148,11 +163,15 @@ def load_spec() -> dict | None:
     return spec
 
 
-def _require_spec() -> tuple[dict, RankConfig]:
-    spec = load_spec()
+def _require_spec(arm: str = "rf") -> tuple[dict, RankConfig]:
+    spec = load_spec(arm)
     if spec is None:
-        raise TrialError("No trial has been started")
+        raise TrialError(f"The {arm} arm has not been started")
     return spec, RankConfig(**spec["config"])
+
+
+def started_arms() -> list[str]:
+    return [arm for arm in ARMS if spec_path(arm).exists()]
 
 
 # --- data ----------------------------------------------------------------------------------
@@ -219,21 +238,22 @@ def _finite(value: float) -> float | None:
 
 # --- daily steps ---------------------------------------------------------------------------
 
-def pick(now: datetime | None = None, store=None, refresh: bool = True) -> dict:
-    """Rank today's session after the 09:15 bar and record the book once."""
-    spec, config = _require_spec()
-    stamp = _ist(now)
+def _check_pick(arm: str, spec: dict, stamp: pd.Timestamp) -> None:
     session = stamp.date()
     if session < date.fromisoformat(spec["start_session"]):
-        raise TrialError(f"The trial starts on {spec['start_session']}")
-    path = record_path(session, "pick")
+        raise TrialError(f"The {arm} arm starts on {spec['start_session']}")
+    path = record_path(session, "pick", arm)
     if path.exists():
         raise FileExistsError(f"{path} exists; picks are recorded once")
     if _minute(stamp) <= SESSION_OPEN:
         raise TrialError("The 09:15 bar is not complete yet")
     if _minute(stamp) > PICK_DEADLINE:
         raise TrialError(f"Past the {spec['pick_deadline_ist']} deadline; this session will be recorded as missed")
-    store = _store(store)
+
+
+def _morning_table(spec: dict, config: RankConfig, stamp: pd.Timestamp, store, refresh: bool):
+    """Feature table for today's pick from the liquid universe, with everything after the open blanked."""
+    session = stamp.date()
     since = stamp.normalize() - pd.Timedelta(days=HISTORY_DAYS)
     candidates = _liquid(spec["universe"], config, store, since)
     failed = _refresh(candidates, session, stamp) if refresh else []
@@ -244,16 +264,55 @@ def pick(now: datetime | None = None, store=None, refresh: bool = True) -> dict:
     for frame in (closes, exits, values):
         if session in frame.index:
             frame.loc[session] = np.nan
-    table = build_features(opens, closes, config.lags, exits, values, config.min_avg_value_cr * CRORE)
+    return build_features(opens, closes, config.lags, exits, values, config.min_avg_value_cr * CRORE), failed
+
+
+def _record_pick(arm: str, spec: dict, config: RankConfig, table: pd.DataFrame, failed: list[str],
+                 now: datetime | None, stamp: pd.Timestamp) -> dict:
+    session = stamp.date()
     ranking = latest_ranking(table, config, session=session)
     if ranking is None:
         raise TrialError(f"Not enough labelled history before {session} to train")
     picked_at = stamp if now is not None else _ist(None)
     record = {"session": str(session), "status": "picked", "picked_at": picked_at.tz_convert(UTC).isoformat(),
               "spec_sha256": spec["spec_sha256"], "refresh_failed": failed, **ranking}
-    _write_atomic(path, record, exclusive=True)
-    logger.info("ranker_trial_picked", session=str(session), eligible=len(ranking["eligible"]))
+    _write_atomic(record_path(session, "pick", arm), record, exclusive=True)
+    logger.info("ranker_trial_picked", arm=arm, session=str(session), eligible=len(ranking["eligible"]))
     return record
+
+
+def pick(now: datetime | None = None, store=None, refresh: bool = True, arm: str = "rf") -> dict:
+    """Rank today's session after the 09:15 bar and record one arm's book once."""
+    spec, config = _require_spec(arm)
+    stamp = _ist(now)
+    _check_pick(arm, spec, stamp)
+    table, failed = _morning_table(spec, config, stamp, _store(store), refresh)
+    return _record_pick(arm, spec, config, table, failed, now, stamp)
+
+
+def _data_key(spec: dict, config: RankConfig) -> tuple:
+    """What the morning table depends on; arms that share it share one data load."""
+    return spec["universe_sha256"], config.max_lag, config.min_avg_value_cr, config.top_k
+
+
+def pick_all(now: datetime | None = None, store=None, refresh: bool = True) -> dict:
+    """Record every started arm's book, loading (and fetching) the morning's data once per distinct need."""
+    stamp = _ist(now)
+    store = _store(store)
+    results: dict = {}
+    tables: dict = {}
+    for arm in started_arms():
+        try:
+            spec, config = _require_spec(arm)
+            _check_pick(arm, spec, stamp)
+            key = _data_key(spec, config)
+            if key not in tables:
+                tables[key] = _morning_table(spec, config, stamp, store, refresh and not tables)
+            results[arm] = _record_pick(arm, spec, config, *tables[key], now, stamp)
+        except (TrialError, FileExistsError) as error:
+            logger.warning("ranker_trial_pick_skipped", arm=arm, error=str(error))
+            results[arm] = str(error)
+    return results
 
 
 def _is_session(session: date, symbols: list[str], store) -> bool:
@@ -270,17 +329,18 @@ def _is_session(session: date, symbols: list[str], store) -> bool:
     return False
 
 
-def settle(session: date, now: datetime | None = None, store=None, refresh: bool = True) -> dict:
+def settle(session: date, now: datetime | None = None, store=None, refresh: bool = True,
+           arm: str = "rf") -> dict:
     """Price a recorded book after 15:20, or record the session as missed if it has no pick."""
-    spec, config = _require_spec()
+    spec, config = _require_spec(arm)
     stamp = _ist(now)
     if session > stamp.date() or (session == stamp.date() and _minute(stamp) < SETTLE_AFTER):
         raise TrialError(f"{session} cannot be settled before 15:20 IST")
-    path = record_path(session, "settle")
+    path = record_path(session, "settle", arm)
     if path.exists():
         raise FileExistsError(f"{path} exists; settlements are recorded once")
     store = _store(store)
-    picked = _read(record_path(session, "pick"))
+    picked = _read(record_path(session, "pick", arm))
     if picked is None:
         if refresh:
             _refresh(spec["universe"][:3], session, stamp)
@@ -339,47 +399,57 @@ def settle(session: date, now: datetime | None = None, store=None, refresh: bool
               "net_at_open": float(gross_open) - cost if gross_open is not None else None,
               "random_net": random_net, "long": longs, "short": shorts, "unpriced": unpriced}
     _write_atomic(path, record, exclusive=True)
-    logger.info("ranker_trial_settled", session=str(session), net_bps=round(record["net"] * 1e4, 2))
+    logger.info("ranker_trial_settled", arm=arm, session=str(session), net_bps=round(record["net"] * 1e4, 2))
     return record
 
 
-def settle_pending(now: datetime | None = None, store=None, refresh: bool = True) -> list[dict]:
+def settle_pending(now: datetime | None = None, store=None, refresh: bool = True,
+                   arm: str = "rf") -> list[dict]:
     """Settle every unsettled pick that is due, then record today as missed if it traded without a pick."""
-    spec, _ = _require_spec()
+    spec, _ = _require_spec(arm)
     stamp = _ist(now)
     today = stamp.date()
     done = []
-    for path in sorted((trial_dir() / "sessions").glob("*.pick.json")):
+    for path in sorted((trial_dir(arm) / "sessions").glob("*.pick.json")):
         session = date.fromisoformat(path.name.split(".")[0])
-        if record_path(session, "settle").exists():
+        if record_path(session, "settle", arm).exists():
             continue
         try:
-            done.append(settle(session, now, store, refresh))
+            done.append(settle(session, now, store, refresh, arm))
         except TrialError as error:
-            logger.warning("ranker_trial_settle_deferred", session=str(session), error=str(error))
+            logger.warning("ranker_trial_settle_deferred", arm=arm, session=str(session), error=str(error))
     due = today >= date.fromisoformat(spec["start_session"]) and _minute(stamp) >= SETTLE_AFTER
-    if due and not record_path(today, "pick").exists() and not record_path(today, "settle").exists():
+    if due and not record_path(today, "pick", arm).exists() and not record_path(today, "settle", arm).exists():
         try:
-            done.append(settle(today, now, store, refresh=False))
+            done.append(settle(today, now, store, refresh=False, arm=arm))
         except TrialError:
             pass  # not a trading day
     return done
 
 
+def settle_all(now: datetime | None = None, store=None, refresh: bool = True) -> dict:
+    """Settle every started arm. Only the first fetches: the arms rank the same eligible names."""
+    out = {}
+    for arm in started_arms():
+        out[arm] = settle_pending(now, store, refresh, arm)
+        refresh = refresh and not any(r.get("status") == "settled" for r in out[arm])
+    return out
+
+
 # --- report --------------------------------------------------------------------------------
 
-def status() -> dict:
-    spec = load_spec()
+def status(arm: str = "rf") -> dict:
+    spec = load_spec(arm)
     if spec is None:
-        return {"status": "not_started"}
-    sessions = trial_dir() / "sessions"
+        return {"status": "not_started", "arm": arm}
+    sessions = trial_dir(arm) / "sessions"
     settles = [_read(p) for p in sorted(sessions.glob("*.settle.json"))]
     picks = sorted(p.name.split(".")[0] for p in sessions.glob("*.pick.json"))
     settled = [r for r in settles if r and r["status"] == "settled"]
     missed = [r["session"] for r in settles if r and r["status"] == "missed"]
     net = np.array([r["net"] for r in settled])
     report = {
-        "status": "collecting", "version": spec["version"], "start_session": spec["start_session"],
+        "status": "collecting", "arm": arm, "version": spec["version"], "start_session": spec["start_session"],
         "spec_sha256": spec["spec_sha256"], "config": spec["config"], "universe_size": len(spec["universe"]),
         "done_when": spec["done_when"], "picks": len(picks), "settled": len(settled), "missed": missed,
         "pending": sorted(set(picks) - {r["session"] for r in settles if r}),
@@ -410,21 +480,28 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = argparse.ArgumentParser(description="Prospective paper trial of the frozen cross-sectional ranker")
     parser.add_argument("action", choices=["start", "pick", "settle", "status"])
+    parser.add_argument("--arm", choices=[*ARMS, "all"], default="all",
+                        help="start needs one arm; the other actions default to every started arm")
     parser.add_argument("--start-session", type=date.fromisoformat, help="First session (default: next one)")
     parser.add_argument("--session", type=date.fromisoformat, help="settle: one session instead of all due")
     parser.add_argument("--no-refresh", action="store_true", help="Use stored candles; do not fetch from Kite")
     args = parser.parse_args(argv)
     refresh = not args.no_refresh
+    arms = started_arms() if args.arm == "all" else [args.arm]
     try:
         if args.action == "start":
-            result = start(args.start_session)
+            if args.arm == "all":
+                raise TrialError("start needs --arm rf or --arm hgb")
+            result = start(args.start_session, arm=args.arm)
             result = {k: v for k, v in result.items() if k != "universe"}
         elif args.action == "pick":
-            result = pick(refresh=refresh)
+            result = pick_all(refresh=refresh) if args.arm == "all" else pick(refresh=refresh, arm=args.arm)
+        elif args.action == "settle" and args.session:
+            result = {arm: settle(args.session, refresh=refresh and i == 0, arm=arm) for i, arm in enumerate(arms)}
         elif args.action == "settle":
-            result = settle(args.session, refresh=refresh) if args.session else settle_pending(refresh=refresh)
+            result = settle_all(refresh=refresh) if args.arm == "all" else settle_pending(refresh=refresh, arm=args.arm)
         else:
-            result = status()
+            result = {arm: status(arm) for arm in (arms or ["rf"])}
     except (TrialError, FileExistsError) as error:
         raise SystemExit(str(error)) from error
     print(json.dumps(result, indent=2, default=str))

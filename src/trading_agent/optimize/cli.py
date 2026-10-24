@@ -144,11 +144,12 @@ def ranker_trial(
     start_session: str = typer.Option(None, help="start: first session, YYYY-MM-DD (default: next one)"),
     session: str = typer.Option(None, help="settle: one session instead of every due one"),
     no_refresh: bool = typer.Option(False, help="Use stored candles; do not fetch from Kite"),
+    arm: str = typer.Option("all", help="rf | hgb | all (start needs one arm)"),
 ):
     """Prospective paper trial of the frozen cross-sectional ranker; research only."""
     from trading_agent.research.ranker_trial import main
 
-    main([action, *(["--start-session", start_session] if start_session else []),
+    main([action, "--arm", arm, *(["--start-session", start_session] if start_session else []),
           *(["--session", session] if session else []), *(["--no-refresh"] if no_refresh else [])])
 
 if __name__ == "__main__":
