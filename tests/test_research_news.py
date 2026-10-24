@@ -26,7 +26,7 @@ def providers(monkeypatch, tmp_path):
     llm = AsyncMock()
     llm.complete.return_value = SimpleNamespace(
         content=json.dumps({"score": .4, "confidence": .8, "rationale": "Fixture only"}), model="test-only")
-    monkeypatch.setattr(news, "create_llm_client", lambda: llm)
+    monkeypatch.setattr(news, "create_llm_client", lambda tier="deep": llm)
     return settings, http, llm, entries
 
 

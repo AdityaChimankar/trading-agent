@@ -187,6 +187,9 @@ trading-agent optimize cross-sectional --interval minute             # --max-lag
 # Ranking lab: 60 pre-registered cross-sectional variants, selection frozen on validation
 trading-agent optimize ranking-lab --snapshots data/research/ranking_lab/snapshots.parquet
 
+# Score stored rule/ML/LLM signals on realised returns (scheduler runs it at 15:55)
+trading-agent optimize decision-outcomes --days 30 --horizon 60
+
 # Prospective paper trial of the frozen ranker (scheduler runs pick 09:16 and settle 15:50)
 trading-agent optimize ranker-trial start --arm rf                 # freezes config, universe, first session
 trading-agent optimize ranker-trial start --arm hgb                # second arm: gradient boosting
@@ -265,6 +268,7 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `EXECUTION_MAX_REMAINING_VOLUME_PCT` | `0.05` | Share of the volume still forecast to trade today |
 | `LLM_PROVIDER` | `mock` in code, `openrouter` in `.env.example` | `mock` makes no calls |
 | `LLM_API_KEY` / `OPENROUTER_API_KEY` / `LLM_MODEL` | empty / empty / `gpt-4o-mini` in code (`.env.example`: `google/gemini-2.0-flash-001`) | OpenRouter credentials and model id |
+| `LLM_QUICK_MODEL` / `LLM_DEEP_MODEL` | empty (use `LLM_MODEL`) | Cheap model for headline sentiment and setup checks; stronger model for LLM decisions |
 | `LLM_MIN_INTERVAL_SECONDS` / `LLM_MAX_RETRIES` | `4.5` / `4` | Throttling and 429 retries |
 | `MONITOR_PSI_WARN` / `MONITOR_PSI_DRIFT` | `0.1` / `0.25` | Drift thresholds per feature |
 | `MONITOR_DRIFT_FEATURES_TO_FALLBACK` | `3` | Drifted features that withdraw ML |

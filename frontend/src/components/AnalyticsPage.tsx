@@ -25,6 +25,16 @@ interface VolumeRow {
   recommendation: string; reason: string; scan_action: string; scan_score: number; agreement: string
   forecast_remaining_volume: number | null; max_quantity_remaining: number | null
 }
+interface OutcomeStats {
+  signals: number; scored: number; hold: number; pending: number; unpriced: number; after_cutoff: number
+  mean_net_bps?: number; win_rate_pct?: number; sessions?: number; session_t?: number | null; mean_alpha_bps?: number | null
+}
+interface DecisionOutcomes {
+  report: null | {
+    generated_at: string; config: { days: number; horizon_minutes: number; cost_bps: number }; notes: string
+    by_strategy: Record<string, OutcomeStats>; by_action: Record<string, OutcomeStats>; by_confidence: Record<string, OutcomeStats>
+  }
+}
 interface TrialSession {
   session: string; net_bps: number; net_at_open_bps: number | null; random_bps: number | null
   long: string[]; short: string[]; unpriced: string[]
@@ -73,6 +83,9 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
     refetchInterval: (q) => (q.state.data?.job.running ? 5_000 : 300_000) })
   const runRanking = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/cross-sectional/run'),
     onSuccess: () => cache.invalidateQueries({ queryKey: ['ranking'] }) })
+  const outcomes = useQuery({ queryKey: ['decision-outcomes'], queryFn: () => apiGet<DecisionOutcomes>('/api/v1/analytics/decision-outcomes'), refetchInterval: 300_000 })
+  const scoreOutcomes = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/decision-outcomes/run'),
+    onSuccess: () => cache.invalidateQueries({ queryKey: ['decision-outcomes'] }) })
   const trialRf = useQuery({ queryKey: ['ranker-trial', 'rf'], queryFn: () => apiGet<Trial>('/api/v1/analytics/cross-sectional/trial?arm=rf'), refetchInterval: 300_000 })
   const trialHgb = useQuery({ queryKey: ['ranker-trial', 'hgb'], queryFn: () => apiGet<Trial>('/api/v1/analytics/cross-sectional/trial?arm=hgb'), refetchInterval: 300_000 })
   const clear = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/drift/clear'), onSuccess: () => cache.invalidateQueries({ queryKey: ['drift'] }) })
@@ -136,6 +149,9 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
       <RankingPanel data={ranking.data} loading={ranking.isLoading} error={ranking.error}
         onRun={() => runRanking.mutate()} starting={runRanking.isPending} startError={runRanking.error} />
 
+      <OutcomesPanel data={outcomes.data} loading={outcomes.isLoading} error={outcomes.error ?? scoreOutcomes.error}
+        onRun={() => scoreOutcomes.mutate()} running={scoreOutcomes.isPending} />
+
       <TrialPanel arm="rf" label="random forest" data={trialRf.data} loading={trialRf.isLoading} error={trialRf.error} />
       <TrialPanel arm="hgb" label="gradient boosting" data={trialHgb.data} loading={trialHgb.isLoading} error={trialHgb.error} />
 
@@ -161,6 +177,42 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
         </>}
       </Panel>
     </Stack>
+  )
+}
+
+function OutcomesPanel({ data, loading, error, onRun, running }: {
+  data?: DecisionOutcomes; loading: boolean; error: unknown; onRun: () => void; running: boolean
+}) {
+  const r = data?.report
+  const rows = (group?: Record<string, OutcomeStats>) => Object.entries(group ?? {}).map(([name, s]) => ({ name, ...s }))
+  const columns = [
+    { header: 'Group', cell: (x: OutcomeStats & { name: string }) => x.name },
+    { header: 'Scored', cell: (x: OutcomeStats) => `${x.scored} / ${x.signals}`, align: 'right' as const },
+    { header: 'Net bps', cell: (x: OutcomeStats) => num(x.mean_net_bps, 1), align: 'right' as const },
+    { header: 'Win %', cell: (x: OutcomeStats) => num(x.win_rate_pct, 1), align: 'right' as const },
+    { header: 'Session t', cell: (x: OutcomeStats) => num(x.session_t, 2), align: 'right' as const },
+    { header: 'Alpha bps', cell: (x: OutcomeStats) => num(x.mean_alpha_bps, 1), align: 'right' as const },
+    { header: 'Hold / pending', cell: (x: OutcomeStats) => `${x.hold} / ${x.pending + x.unpriced}`, align: 'right' as const },
+  ]
+  return (
+    <Panel title="Decision outcomes (rule vs ML vs LLM)"
+      subtitle="Every stored BUY/SELL signal priced on what happened next: entry at the next bar, exit after the horizon or at 15:15, net of costs; alpha against the Nifty 50 when its candles are stored. Research only."
+      actions={<Button variant="outlined" onClick={onRun} disabled={running}>{running ? 'Scoring…' : 'Score now'}</Button>}>
+      <StateMessage loading={loading} error={error} empty="Not scored yet. The scheduler scores after the close at 15:55, or press Score now."
+        isEmpty={!r} />
+      {r && <>
+        {rows(r.by_strategy).length === 0
+          ? <Alert severity="info" sx={{ mb: 2 }}>No signals stored in the last {r.config.days} days.</Alert>
+          : <DataTable rows={rows(r.by_strategy)} columns={columns} />}
+        {rows(r.by_confidence).length > 0 && <>
+          <Typography variant="overline" color="text.secondary">By confidence</Typography>
+          <DataTable rows={rows(r.by_confidence)} columns={columns} />
+        </>}
+        <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
+          Last {r.config.days} days · held {r.config.horizon_minutes} min · {r.config.cost_bps} bps · scored {new Date(r.generated_at).toLocaleString('en-IN', { hour12: false })}. {r.notes}
+        </Typography>
+      </>}
+    </Panel>
   )
 }
 

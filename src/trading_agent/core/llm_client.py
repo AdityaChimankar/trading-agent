@@ -284,9 +284,10 @@ class MockLLMClient(LLMClient):
         pass
 
 
-def create_llm_client(provider: str | None = None) -> LLMClient:
-    """Create LLM client based on configuration."""
+def create_llm_client(provider: str | None = None, tier: str = "deep") -> LLMClient:
+    """Create an LLM client; ``tier`` picks ``LLM_QUICK_MODEL`` or ``LLM_DEEP_MODEL`` (default ``LLM_MODEL``)."""
     settings = get_settings()
+    model = settings.llm.model_for(tier)
 
     if provider is None:
         provider = settings.llm.provider
@@ -309,7 +310,7 @@ def create_llm_client(provider: str | None = None) -> LLMClient:
         return OpenAICompatibleClient(
             base_url,
             api_key,
-            settings.llm.model,
+            model,
             max_retries=settings.llm.max_retries,
             min_interval_seconds=settings.llm.min_interval_seconds,
             extra_headers={"X-Title": "trading-agent"},
@@ -318,9 +319,9 @@ def create_llm_client(provider: str | None = None) -> LLMClient:
         return OpenAICompatibleClient(
             settings.llm.base_url,
             settings.llm.api_key,
-            settings.llm.model,
+            model,
         )
     elif provider == "anthropic":
-        return AnthropicClient(settings.llm.api_key, settings.llm.model)
+        return AnthropicClient(settings.llm.api_key, model)
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

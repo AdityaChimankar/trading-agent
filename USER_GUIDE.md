@@ -73,6 +73,17 @@ The research gate needs at least 60 test days, a positive net mean, a t-stat of 
 
 Run it from **Analytics → Run evaluation** or `trading-agent optimize cross-sectional`. Daily bars come from stored intraday candles, and sessions without a 09:15 bar or a 15:15 price are skipped. All features use the 15:15 price as the day's close: since NSE's closing auction (3 August 2026) about 40% of stocks have no minute bars after 15:14. The paper's longest lag is 240 days; `--max-lag 10` is the default because most stored history is shorter. Survivorship bias (today's watchlist omits delisted stocks) makes results look better than reality.
 
+**Decision outcomes (research).** `trading-agent optimize decision-outcomes` (module `research/decision_outcomes.py`, adapted from TradingAgents' settlement step) scores every BUY/SELL row in the `signals` table: rule, ML, LLM, hybrid and shadow strategies alike. It answers whether the decisions made money, which the older `scripts/llm_eval.py` agreement check never measured. That script also reads an `llm_signals` table that no longer exists.
+
+- **Pricing:** each signal enters at the open of the first bar at or after it, and exits after `--horizon` minutes (default 60) or at 15:15, net of `--cost-bps` (default 14).
+- **Alpha:** when NIFTY50 candles are stored, the index return over the same bars is subtracted.
+- **Grouping:** results are grouped by strategy, by strategy and action, and by confidence band (<0.60, 0.60–0.75, ≥0.75), with win rates and a t-stat on per-session sums.
+- **Not losses:** HOLD, pending (the window has not finished), unpriced (no bars) and after-cutoff signals are counted but never scored as losses.
+
+The scheduler scores the last 30 days at 15:55 on weekdays. See **Analytics → Decision outcomes**, or `GET /api/v1/analytics/decision-outcomes` (`POST …/run` re-scores). With `LLM_PROVIDER=mock` (the code default), stored `llm` signals come from the mock client, and the report says so.
+
+**LLM model tiers.** `LLM_QUICK_MODEL` serves the high-volume, low-stakes calls (headline sentiment and the setup check), and `LLM_DEEP_MODEL` serves LLM trading decisions. Both fall back to `LLM_MODEL`. This mirrors TradingAgents' quick/deep split, which keeps cost down without weakening the decision model.
+
 **Ranking lab (research).** `trading-agent optimize ranking-lab` (module `research/ranking_lab.py`) tries 60 variants of the cross-sectional idea, fixed before the run:
 
 - **Rule ranks with a sign fixed in advance** (nothing is fitted): overnight-gap reversal and momentum, previous-day and 5-day reversal, opening-drive (09:15–09:45) momentum and reversal, and drive times opening volume shock.
@@ -502,6 +513,7 @@ docker compose down
 | `trading-agent optimize strategy-search [SYMBOL...] [--no-ml]` | Frozen-selection strategy search with baselines and walk-forward |
 | `trading-agent optimize cross-sectional [SYMBOL...]` | Cross-sectional ranking walk-forward vs random picks |
 | `trading-agent optimize ranker-trial start / pick / settle / status [--arm rf\|hgb\|all]` | Prospective paper trial of the frozen rankers (start needs one arm) |
+| `trading-agent optimize decision-outcomes [--days N] [--horizon MIN] [--cost-bps X]` | Score stored rule/ML/LLM signals on realised returns after costs |
 | `trading-agent optimize ranking-lab [SYMBOL...] [--snapshots FILE]` | 60 pre-registered cross-sectional variants, selection frozen on validation |
 
 Always use `--help` on a command before a long or quota-consuming run.

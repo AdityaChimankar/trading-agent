@@ -54,6 +54,7 @@ Keep paper mode until those are evidenced.
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
 | Analytics | U-shape remaining-volume forecast with out-of-sample check; router caps size at 5% of forecast remaining volume | `volume_insights.forecast_day_volume / evaluate_volume_forecast`, `/api/v1/analytics/volume/{s}/forecast-check` |
 | Data | `trading-agent data-check`: per-symbol coverage against the store-wide session calendar (up to date / behind / holes / empty / not listed by Kite), store staleness against the last closed weekday, Kite token, ticker heartbeat, trial arms; exit 1 on gaps. `backfill --universe all` fills them | `ingest/coverage.py`, `cli` |
+| Research | Decision outcomes (from TradingAgents' settlement): every stored BUY/SELL signal priced at the next bar, exit at horizon or 15:15, net of 14 bps, alpha vs NIFTY50 when stored; grouped by strategy, action and confidence; HOLD/pending/unpriced never losses; scheduler 15:55 | `research/decision_outcomes.py`, `trading-agent optimize decision-outcomes`, `/api/v1/analytics/decision-outcomes`, Analytics panel |
 | Research | Ranking lab: 60 pre-registered cross-sectional variants (fixed-sign gap/reversal/opening-drive ranks; RF/logit/HGB walk-forward; 09:15 or 09:45 entry; 10:15/12:00/15:15 exit; k 5/10/20); validation-only selection with a Bonferroni t over 60, frozen before holdout; rolling choose-best | `research/ranking_lab.py`, `trading-agent optimize ranking-lab` |
 | Research | Ranker paper trial, two arms (`rf`, `hgb`), each with its own hashed frozen spec (config, universe, first session), pick after 09:15 bar (deadline 09:45), entry at the first bar after the pick, 15:15 exit, random book, missed sessions recorded, verdict fixed on the first 60 settled sessions | `research/ranker_trial.py`, `trading-agent optimize ranker-trial`, scheduler `ranker_trial_pick`/`ranker_trial_settle`, `/api/v1/analytics/cross-sectional/trial`, Analytics panel |
 | Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, 15:15 MIS exit, >= INR 10 crore liquidity filter, research gate, long/short list only when passed | `research/cross_sectional.py`, `trading-agent optimize cross-sectional`, `/api/v1/analytics/cross-sectional`, Analytics panel |
@@ -79,6 +80,8 @@ Keep paper mode until those are evidenced.
 | P0 | Run the ranker paper trial | started 2026-10-24: first session 2026-10-26, spec `da100b7c01949a78...` in `data/research/ranker_trial/spec.json`, frozen at `449418e`. Needs the scheduler from this branch (the main checkout is on `rework`, which lacks the trial) running each session with a valid Kite token, then the verdict on the first 60 settled sessions (mean net > 0, t >= 2, above random) recorded here. Every historical window has been inspected, so only these sessions are clean evidence |
 | P0 | Run the `hgb` trial arm | started 2026-10-24 beside `rf`, first session 2026-10-26, spec `0111c28619f97074...` in `data/research/ranker_trial_hgb/`, frozen at `68aaee0`. Verdict on its first 60 settled sessions; t >= 2.0 keeps the family-wise error across both arms below 5% |
 | P1 | Cross-sectional ranking on longer history | daily or intraday history long enough for `--max-lag 240`; point-in-time Nifty 500 membership to remove survivorship bias |
+| P1 | Real LLM decisions to score | set `LLM_PROVIDER=openrouter` (and optionally `LLM_QUICK_MODEL` / `LLM_DEEP_MODEL`) in `.env`; after >= 20 sessions, `decision-outcomes` shows whether `llm` beats `rule` after costs |
+| P1 | Point-in-time news for research | `research_news` takes a decision-time cutoff, so backtests cannot see later headlines |
 | P1 | Align legacy database indexes | `alembic check` on the live `data/trading.db` reports no drift (index names, nullability on `ml_models`, `opportunities`, `candles` and others) |
 | P1 | Exchange holiday calendar | session gates and scheduler skip NSE holidays and special sessions |
 | P1 | Finish MUI conversion | remaining `.btn` and legacy markup in older pages replaced by MUI components |
@@ -106,6 +109,37 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-24: TradingAgents adaptations (decision outcomes, LLM model tiers)
+
+**Review.** TauricResearch/TradingAgents is a LangGraph multi-agent LLM framework for US stocks over multi-day holds, which its README calls a research scaffold:
+
+- four analysts write reports;
+- bull and bear researchers debate them (`max_debate_rounds`);
+- a trader proposes a trade, and a risk team debates it (`max_risk_rounds`);
+- a portfolio manager approves or rejects;
+- a memory log settles past decisions against benchmark alpha and feeds lessons back;
+- quick and deep LLM tiers.
+
+**Adopted:**
+
+- Settlement, as `research/decision_outcomes.py` (see the User Guide). It scores the `rule`, `ml`, `ml_v2`, `llm`, `hybrid` and `shadow_hybrid` signals on realised returns. The old `llm_eval.py` only measured agreement with rules and reads a non-existent `llm_signals` table.
+- Quick/deep tiers, as `LLM_QUICK_MODEL` (headline sentiment, `validate_setup`) and `LLM_DEEP_MODEL` (the LLM decision agent), both falling back to `LLM_MODEL`.
+
+**Not adopted:**
+
+- The full per-symbol debate: about 10 calls per decision, non-deterministic, and aimed at single-stock intraday timing, which showed no edge after costs.
+- SEC EDGAR fundamentals: US only.
+- StockTwits and Reddit sentiment: little NSE coverage.
+- Report, checkpoint, portfolio-context and point-in-time features: already covered.
+
+**Deferred:** a shadow bull/bear review of the trial's picks, recorded before entry and scored at settlement, until trial sessions exist.
+
+**Findings:**
+
+- The live `data/trading.db` has 0 signals.
+- `.env` sets no `LLM_PROVIDER`, so the code default `mock` is in effect: any stored `llm` signals would come from the mock client.
+- Audit item from TradingAgents' point-in-time emphasis: `analysis/research_news.py` takes headlines from the last 48 hours of *now*. That is correct live, but a backtest using it would see later headlines.
 
 ### 2026-10-24: Data freshness check across all stored symbols
 

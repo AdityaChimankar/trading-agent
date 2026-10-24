@@ -242,6 +242,24 @@ def cross_sectional_status():
     return jsonable({"job": get_job().state, "report": read_report()})
 
 
+@router.get("/analytics/decision-outcomes")
+def decision_outcomes_report():
+    from trading_agent.research.decision_outcomes import read_report
+
+    return jsonable({"report": read_report()})
+
+
+@router.post("/analytics/decision-outcomes/run")
+def decision_outcomes_run(days: int = 30, horizon: int = 60):
+    from fastapi import HTTPException
+
+    from trading_agent.research.decision_outcomes import ScoreConfig, run
+
+    if not 1 <= days <= 365 or not 5 <= horizon <= 375:
+        raise HTTPException(400, "days must be 1-365 and horizon 5-375 minutes")
+    return jsonable({"report": run(ScoreConfig(days=days, horizon_minutes=horizon))})
+
+
 @router.get("/analytics/cross-sectional/trial")
 def cross_sectional_trial(arm: str = "rf"):
     from fastapi import HTTPException

@@ -83,7 +83,7 @@ class LLMDecisionAgent:
         if use_mock:
             self.client = MockLLMClient()
         elif client is None:
-            self.client = create_llm_client()
+            self.client = create_llm_client(tier="deep")
         else:
             self.client = client
         self.system_prompt = system_prompt

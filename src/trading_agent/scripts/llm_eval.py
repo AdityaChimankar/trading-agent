@@ -137,7 +137,7 @@ def estimate_llm_cost_per_decision() -> dict:
     """Estimate the cost of running LLM decisions."""
     from trading_agent.core.config import get_settings
     settings = get_settings()
-    model = settings.llm.model
+    model = settings.llm.model_for("deep")
 
     # Rough cost estimates (OpenRouter pricing varies)
     cost_estimates = {

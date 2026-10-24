@@ -288,6 +288,17 @@ def ranker_trial_settle_cycle():
         logger.error("ranker_trial_settle_failed", error=str(e))
 
 
+def decision_outcomes_cycle():
+    """Score the last 30 days of rule/ML/LLM signals on realised returns (research report only)."""
+    from trading_agent.research.decision_outcomes import run
+
+    try:
+        report = run()
+        logger.info("decision_outcomes_scored", strategies=list(report["by_strategy"]))
+    except Exception as e:
+        logger.error("decision_outcomes_failed", error=str(e))
+
+
 # Create scheduler AFTER all functions are defined
 scheduler = BlockingScheduler(timezone="Asia/Kolkata")
 
@@ -393,6 +404,12 @@ scheduler.add_job(
     ranker_trial_settle_cycle,
     CronTrigger(day_of_week="mon-fri", hour=15, minute=50),
     id="ranker_trial_settle",
+)
+# Decision scoring after the post-close repair, so the last hour's signals are priced.
+scheduler.add_job(
+    decision_outcomes_cycle,
+    CronTrigger(day_of_week="mon-fri", hour=15, minute=55),
+    id="decision_outcomes",
 )
 # Daily news flush - 8:00 AM on weekdays (before market open)
 scheduler.add_job(

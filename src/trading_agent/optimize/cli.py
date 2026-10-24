@@ -128,6 +128,18 @@ def cross_sectional(
 
 
 
+@app.command("decision-outcomes")
+def decision_outcomes(
+    days: int = typer.Option(30, help="Signals stored in the last N days"),
+    horizon: int = typer.Option(60, help="Minutes each signal is held"),
+    cost_bps: float = typer.Option(14.0, help="Round-trip cost per signal, incl. slippage"),
+):
+    """Score stored rule/ML/LLM signals on realised returns after costs; research only."""
+    from trading_agent.research.decision_outcomes import main
+
+    main(["--days", str(days), "--horizon", str(horizon), "--cost-bps", str(cost_bps)])
+
+
 @app.command("ranking-lab")
 def ranking_lab(
     symbols: list[str] = typer.Argument(None, help="Symbols (default: symbols_nifty500_plus.txt)"),

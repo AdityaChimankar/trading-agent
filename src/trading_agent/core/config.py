@@ -187,10 +187,20 @@ class LLMSettings(BaseSettings):
     base_url: str = "https://api.openai.com"
     api_key: str = ""
     model: str = "gpt-4o-mini"
+    # Two tiers, as in TradingAgents: a cheap model for high-volume work (headline
+    # sentiment, setup checks) and a stronger one for decisions. Empty uses ``model``.
+    quick_model: str = ""
+    deep_model: str = ""
     # Free/low tiers 429 on bursts; 4.5s between calls keeps a full watchlist
     # sentiment sweep under typical per-minute limits.
     min_interval_seconds: float = 4.5
     max_retries: int = 4
+
+    def model_for(self, tier: str) -> str:
+        """``quick`` or ``deep`` model, falling back to ``model``."""
+        if tier not in ("quick", "deep"):
+            raise ValueError("tier must be quick or deep")
+        return (self.quick_model if tier == "quick" else self.deep_model) or self.model
 
 
 class Settings(BaseSettings):

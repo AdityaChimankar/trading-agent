@@ -139,7 +139,7 @@ def check_llm() -> bool:
     from trading_agent.core.llm_client import LLMRequest, MockLLMClient, create_llm_client
 
     settings = get_settings().llm
-    client = create_llm_client()
+    client = create_llm_client(tier="quick")
     if isinstance(client, MockLLMClient):
         print(f"  {WARN_MARK} LLM provider is mock - no sentiment or LLM agent output")
         return True
