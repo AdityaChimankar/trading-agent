@@ -114,7 +114,10 @@ trading-agent ingest NIFTY50 --interval minute --days 60
 trading-agent optimize strategy-lab RELIANCE --interval minute   # includes opening-range breakout profiles
 
 # Cross-sectional ranking research (walk-forward, after costs, vs random picks)
-python -m trading_agent.research.cross_sectional --interval minute   # --max-lag 240 for the paper's lags
+trading-agent optimize cross-sectional --interval minute             # --max-lag 240 for the paper's lags
+
+# Strategy search: frozen selection on development/validation, baselines, walk-forward, then holdout
+trading-agent optimize strategy-search                              # --no-ml to skip ML; ~20-30 min
 
 # ML drift monitoring
 python -m trading_agent.strategy.model_monitoring baseline      # once, before drift reports mean anything

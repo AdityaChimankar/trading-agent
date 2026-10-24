@@ -100,5 +100,32 @@ def strategy_lab(
     typer.echo(result["limitations"])
 
 
+@app.command()
+def strategy_search(
+    symbols: list[str] = typer.Argument(None, help="Symbols (default: 30 liquid NSE large caps)"),
+    no_ml: bool = typer.Option(False, "--no-ml", help="Skip the gradient-boosting candidates"),
+):
+    """Frozen-selection strategy search with baselines and walk-forward; research only."""
+    from trading_agent.research.strategy_search import main
+
+    main([*(symbols or []), *(["--no-ml"] if no_ml else [])])
+
+
+@app.command()
+def cross_sectional(
+    symbols: list[str] = typer.Argument(None, help="Symbols (default: symbols_nifty500_plus.txt)"),
+    interval: str = typer.Option("5minute", help="Stored candle interval used to build daily bars"),
+    max_lag: int = typer.Option(10, help="Longest lag in sessions (paper: 240)"),
+    top_k: int = typer.Option(10, help="Stocks bought and shorted each session"),
+    cost_bps: float = typer.Option(15.0, help="Round-trip cost per position, incl. slippage"),
+    min_value_cr: float = typer.Option(10.0, help="Minimum 20-day mean traded value, INR crore"),
+):
+    """Cross-sectional ranking walk-forward against random picks; research only."""
+    from trading_agent.research.cross_sectional import main
+
+    main([*(symbols or []), "--interval", interval, "--max-lag", str(max_lag), "--top-k", str(top_k),
+          "--cost-bps", str(cost_bps), "--min-value-cr", str(min_value_cr)])
+
+
 if __name__ == "__main__":
     app()

@@ -15,11 +15,11 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-24 (volume forecast, ORB/gap regime, cross-sectional ranking, legacy timestamp fix). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
+Last updated: 2026-10-24 (strategy search with frozen selection; realistic cross-sectional re-test). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
-**Verified** (2026-10-24, after the volume/ORB/ranking work): 507 Python tests passed, repo-wide Ruff passed, frontend type-check and build passed, (`PYTHONPATH=src`), both offline browser smokes passed, and the frontend production build passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
+**Verified** (2026-10-24, after the strategy-search work): 523 Python tests passed three runs in a row (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, and both offline browser smokes passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
 
 **Not verified:**
 
@@ -53,7 +53,8 @@ Keep paper mode until those are evidenced.
 | Analytics | Net-of-cost performance, Sharpe/Sortino/drawdown/profit factor/expectancy/R, attribution | `analysis/performance.py` |
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
 | Analytics | U-shape remaining-volume forecast with out-of-sample check; router caps size at 5% of forecast remaining volume | `volume_insights.forecast_day_volume / evaluate_volume_forecast`, `/api/v1/analytics/volume/{s}/forecast-check` |
-| Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, research gate, long/short list only when passed | `research/cross_sectional.py`, `/api/v1/analytics/cross-sectional`, Analytics panel |
+| Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, 15:15 MIS exit, >= INR 10 crore liquidity filter, research gate, long/short list only when passed | `research/cross_sectional.py`, `trading-agent optimize cross-sectional`, `/api/v1/analytics/cross-sectional`, Analytics panel |
+| Research | Strategy search: 2,508 entry x bar-size x exit candidates; selection on development/validation only (Bonferroni clustered t, session bootstrap, symbol stability, always-long/short/random baselines, 10+2x2 bps) frozen to a hashed run file before holdout; rolling walk-forward over exit policies and all candidates; immutable runs with git revision, versions and data fingerprints | `research/strategy_search.py`, `trading-agent optimize strategy-search` |
 | Research | Strategy Lab moving-average profiles (`rule_ma` EMA9/21 filter on the rule, `ema_cross` EMA9/21 crossover + VWAP); EMA9, EMA21 and session VWAP on the chart | `core/signals.ma_trend / apply_ma_filter`, `research/strategy_lab.py`, `PriceChart.tsx` |
 | Research | Strategy Lab opening-range breakout and Nifty-gap-regime profiles; NIFTY50/BANKNIFTY index candles | `research/strategy_lab.py`, `ingest/instrument_lookup.INDEX_TOKENS` |
 | ML | PSI/KS drift monitor; withdraws ML (or loads `ml_model.previous.joblib`) on drift; daily 15:40 check | `strategy/model_monitoring.py` |
@@ -72,11 +73,11 @@ Keep paper mode until those are evidenced.
 | P1 | Prospective paper evidence | ≥ 20 trading days of paper results so analytics stop warning about sample size |
 | P0 | Re-run research on corrected timestamps | earlier walk-forward, outcome-validation and outcome-model results were computed on history whose legacy sessions were shifted 5h30m; rerun before relying on any of them |
 | P1 | Ingest Nifty 50 candles and run `orb` / `orb_gap` in Strategy Lab | NIFTY50 minute candles stored; profiles compared with baselines after costs on several symbols |
-| P1 | Cross-sectional ranking on longer history | daily or intraday history long enough for `--max-lag 240`; point-in-time Nifty 500 membership to remove survivorship bias; prospective paper results |
+| P0 | Prospective paper trial of the cross-sectional ranker | the frozen defaults (lags 10, train 60, top/bottom 10, 15:15 exit, >= INR 10 crore) recorded daily from a fixed start date, with no parameter changes; >= 60 sessions; net mean > 0 with session-clustered t >= 2 after real fills. Every historical window has now been inspected, so only prospective sessions are clean evidence |
+| P1 | Cross-sectional ranking on longer history | daily or intraday history long enough for `--max-lag 240`; point-in-time Nifty 500 membership to remove survivorship bias |
 | P1 | Exchange holiday calendar | session gates and scheduler skip NSE holidays and special sessions |
 | P1 | Finish MUI conversion | remaining `.btn` and legacy markup in older pages replaced by MUI components |
 | P1 | Lint/type baselines | selected Ruff rules and type checks pass and become required CI gates |
-| P1 | Backtest exit research | walk-forward search extended to exit rules (stop multiple, target, max bars) |
 | P2 | Incremental scans | full-universe scan latency fits the signal validity window |
 | P2 | Exposure controls | sector/correlation limits and stress scenarios |
 | P2 | Database roadmap | either complete PostgreSQL support or keep SQLite-only claims |
@@ -97,6 +98,56 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-24: Strategy search (frozen selection) and realistic cross-sectional re-test
+
+**Request.** Validate all strategies, tune the ML and other approaches, and find a more profitable, higher-win approach.
+
+**Review fixes.** A first three-way sweep was reviewed and had six real defects:
+
+- one fixed split instead of walk-forward;
+- holdout computed for every candidate, which turned it into another tuning window;
+- the rule as the only baseline;
+- a trade-level t-stat on correlated trades;
+- selection at optimistic costs (6+2×2 bps);
+- an unused `min_val_trades` and no run provenance.
+
+`research/strategy_search.py` was rewritten to fix them:
+
+- Selection uses development and validation only, at 10+2×2 bps. Its gates are a Bonferroni bar over every candidate, a session-clustered t-stat, a session bootstrap, symbol stability, ≥ 100 validation trades, and beating the always-long, always-short and random-entry baselines.
+- The shortlist is frozen to `runs/<id>/selection.json` (SHA-256) before any holdout replay.
+- Rolling walk-forward runs inside development and validation, over exit policies and over all non-ML candidates.
+- Runs are immutable and record git revision, versions, data fingerprints and skipped symbols.
+- Tests cover holdout isolation (rules and ML), freezing order, gates, prefix causality, session ownership, cost shifts, walk-forward choice and provenance.
+
+**Result.** Run `20261024T053143Z-d9b334d3`: 30 symbols; 151/51/51 sessions; holdout from 2026-07-27.
+
+- 2,508 candidates; Bonferroni t ≥ 4.11. **0 shortlisted and 0 nominally positive.** The holdout was therefore not scored.
+- **Exit research (closes the P1 task):** walk-forward over the rule's exit policies was −13.5 bps/trade out of sample (7,449 trades, 95% CI −15.0 to −11.9). At size-aware costs (9.9 bps at ₹2 lakh) that is about −9.4 bps. The chosen exits drifted between folds.
+- Walk-forward over all non-ML candidates was −15.1 bps.
+- ML scored a 68% win rate on development but 38% on validation, worse than the baselines.
+- Before costs, every family was within a few bps of the unconditional baselines.
+
+**Conclusion.** Single-stock intraday timing on these bars has no edge after costs. A higher win rate is available (tight targets, wide stops) only at negative expectancy.
+
+**Cross-sectional ranking**, realistic re-test (15:15 MIS exit, ≥ ₹10 crore 20-day mean traded value, 15 bps, 9 configurations fixed in advance, 60-day training). The walk-forward test days were split into a validation half (2026-01 to 05) and a holdout half (2026-05 to 10).
+
+- The holdout was positive in 9/9 configurations; random picks lost −14 to −16 bps/day.
+- The validation pick (lags 10, top 10) made +12.5 bps/day on validation (t 2.24). On the holdout it made **+11.2 bps/day**, with a 59.5% hit rate (t 1.82). These became the module defaults.
+- **Correction:** an earlier summary of this tuning reported a "validation-selected" +7.7 bps result. A key bug in the selection script had made it pick the first configuration, not the validation best.
+
+**Caveats.**
+
+- Every historical window, including both holdouts, has now been inspected in this session, so no further historical number is clean.
+- Survivorship bias remains (today's Nifty 500).
+- Fills at exactly the open (NSE pre-open auction) and at 15:15 are assumptions.
+
+**Decision.** Nothing is wired into live trading. The next evidence must be a prospective paper trial of the frozen ranker (see Open work).
+
+**Also fixed:**
+
+- Temp file names were made short. A long `DATA_DIR` had pushed the selection file past Windows' 260-character path limit and crashed a run before the freeze.
+- Two pre-existing timing-flaky tests now pin file modification times.
 
 ### 2026-10-24: Moving averages in the rule path (tested, not adopted)
 

@@ -227,11 +227,12 @@ async def volume_forecast_check(symbol: str, interval: Literal["minute", "5minut
 class RankingRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     interval: Literal["minute", "5minute", "15minute"] = "5minute"
-    max_lag: int = Field(default=20, ge=1, le=240)
-    train_days: int = Field(default=120, ge=20, le=1000)
+    max_lag: int = Field(default=10, ge=1, le=240)
+    train_days: int = Field(default=60, ge=20, le=1000)
     retrain_days: int = Field(default=20, ge=1, le=250)
     top_k: int = Field(default=10, ge=1, le=50)
     cost_bps: float = Field(default=15.0, ge=0, le=200, allow_inf_nan=False)
+    min_value_cr: float = Field(default=10.0, ge=0, le=10000, allow_inf_nan=False)
 
 
 @router.get("/analytics/cross-sectional")
@@ -249,7 +250,8 @@ def cross_sectional_run(payload: RankingRequest | None = None):
 
     payload = payload or RankingRequest()
     config = RankConfig(max_lag=payload.max_lag, train_days=payload.train_days,
-                        retrain_days=payload.retrain_days, top_k=payload.top_k, cost_bps=payload.cost_bps)
+                        retrain_days=payload.retrain_days, top_k=payload.top_k, cost_bps=payload.cost_bps,
+                        min_avg_value_cr=payload.min_value_cr)
     if not get_job().start(interval=payload.interval, config=config):
         raise HTTPException(409, "A cross-sectional evaluation is already running")
     return {"started": True}

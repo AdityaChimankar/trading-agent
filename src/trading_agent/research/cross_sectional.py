@@ -40,6 +40,10 @@ logger = get_logger(__name__)
 IST = "Asia/Kolkata"
 PAPER_LAGS = tuple(range(1, 21)) + tuple(range(40, 241, 20))
 SESSION_OPEN, LAST_BAR = 9 * 60 + 15, 15 * 60 + 25
+# MIS positions are squared off around 15:15-15:20, so the strategy exits at the
+# close of the last bar that starts before 15:15, not at the 15:30 close.
+EXIT_MINUTE = 15 * 60 + 15
+CRORE = 1e7
 LIMITATIONS = (
     "Research only; no orders, sizing or promotion. Today's watchlist omits delisted names "
     "(survivorship bias), which flatters backtests. Entry exactly at the open and exit at the "
@@ -52,11 +56,14 @@ LIMITATIONS = (
 
 @dataclass(frozen=True)
 class RankConfig:
-    max_lag: int = 20
-    train_days: int = 120
+    # Defaults chosen on the validation half of a 9-configuration walk-forward
+    # (2026-10-24, 15:15 exit, >= INR 10 crore liquidity, 15 bps): see MEMORY.md.
+    max_lag: int = 10
+    train_days: int = 60
     retrain_days: int = 20
     top_k: int = 10
     cost_bps: float = 15.0  # round trip per position, incl. slippage
+    min_avg_value_cr: float = 10.0  # rank only stocks trading >= this many INR crore a day (20-day mean)
     n_estimators: int = 300
     max_depth: int = 10
     min_test_days: int = 60
@@ -77,9 +84,9 @@ class RankConfig:
 # --- data -----------------------------------------------------------------------------
 
 def daily_bars(intraday: pd.DataFrame) -> pd.DataFrame:
-    """IST sessions -> open (needs the 09:15 bar) and close (needs a bar from 15:25 on)."""
+    """IST sessions -> open (09:15 bar), close (bar from 15:25 on), 15:15 exit price and traded value."""
     if intraday is None or intraday.empty:
-        return pd.DataFrame(columns=["open", "close"])
+        return pd.DataFrame(columns=["open", "close", "exit", "value"])
     stamp = pd.to_datetime(intraday["timestamp"], utc=True).dt.tz_convert(IST)
     frame = intraday.assign(session=stamp.dt.date, minute=stamp.dt.hour * 60 + stamp.dt.minute)
     frame = frame.sort_values("timestamp")
@@ -88,15 +95,19 @@ def daily_bars(intraday: pd.DataFrame) -> pd.DataFrame:
                          "first": grouped["minute"].min(), "last": grouped["minute"].max()})
     bars["open"] = bars["open"].where(bars["first"] == SESSION_OPEN)
     bars["close"] = bars["close"].where(bars["last"] >= LAST_BAR)
-    return bars[["open", "close"]].dropna(how="all")
+    before_exit = frame[frame["minute"] < EXIT_MINUTE].groupby("session")
+    bars["exit"] = before_exit["close"].last().where(before_exit["minute"].max() >= EXIT_MINUTE - 5)
+    value = (frame["close"] * frame["volume"]).groupby(frame["session"]).sum()
+    bars["value"] = value.where(value > 0)
+    return bars[["open", "close", "exit", "value"]].dropna(how="all", subset=["open", "close"])
 
 
-def load_panel(symbols: list[str], interval: str = "5minute", store=None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Wide open/close frames (session x symbol) built from stored candles."""
+def load_panel(symbols: list[str], interval: str = "5minute", store=None) -> tuple[pd.DataFrame, ...]:
+    """Wide open, close, 15:15 exit and traded-value frames (session x symbol) from stored candles."""
     from trading_agent.storage.parquet_store import get_parquet_store
 
     store = store or get_parquet_store()
-    opens, closes = {}, {}
+    opens, closes, exits, values = {}, {}, {}, {}
     for symbol in symbols:
         try:
             bars = daily_bars(store.read_candles(symbol, interval))
@@ -105,13 +116,23 @@ def load_panel(symbols: list[str], interval: str = "5minute", store=None) -> tup
             continue
         if len(bars):
             opens[symbol], closes[symbol] = bars["open"], bars["close"]
-    return pd.DataFrame(opens).sort_index(), pd.DataFrame(closes).sort_index()
+            exits[symbol], values[symbol] = bars["exit"], bars["value"]
+    return tuple(pd.DataFrame(d).sort_index() for d in (opens, closes, exits, values))
 
 
-def build_features(opens: pd.DataFrame, closes: pd.DataFrame, lags: tuple[int, ...]) -> pd.DataFrame:
-    """Long table: one row per (session, symbol) with features, intraday return and label."""
+def build_features(opens: pd.DataFrame, closes: pd.DataFrame, lags: tuple[int, ...],
+                   exits: pd.DataFrame | None = None, values: pd.DataFrame | None = None,
+                   min_avg_value: float = 0.0) -> pd.DataFrame:
+    """Long table: one row per (session, symbol) with features, traded return and label.
+
+    Features use the full-session open-to-close return. The traded return (``ret``)
+    runs from the open to the 15:15 exit when ``exits`` is given. With ``values``,
+    a stock is eligible on a session only if its trailing 20-session mean traded
+    value, known before that open, reaches ``min_avg_value``.
+    """
     opens, closes = opens.align(closes, join="outer")
     intraday = closes / opens - 1
+    traded = (exits.reindex_like(opens) / opens - 1) if exits is not None else intraday
     parts = {}
     for k in lags:
         parts[f"IntraR{k}"] = intraday.shift(k)
@@ -119,10 +140,15 @@ def build_features(opens: pd.DataFrame, closes: pd.DataFrame, lags: tuple[int, .
         parts[f"OverNR{k}"] = opens / closes.shift(k) - 1
     long = pd.concat({name: frame.stack(future_stack=True) for name, frame in parts.items()}, axis=1)
     long["open"] = opens.stack(future_stack=True)
-    long["ret"] = intraday.stack(future_stack=True)
+    long["ret"] = traded.stack(future_stack=True)
+    if values is not None and min_avg_value > 0:
+        liquid = values.reindex_like(opens).rolling(20, min_periods=10).mean().shift(1) >= min_avg_value
+        long["liquid"] = liquid.stack(future_stack=True)
     long.index.names = ["session", "symbol"]
     features = [c for c in long.columns if c[:6] in ("IntraR", "CloseR", "OverNR")]
     long = long.dropna(subset=features + ["open"])
+    if "liquid" in long:
+        long = long[long.pop("liquid").fillna(False).astype(bool)]
     # Label: beats the session's cross-sectional median (only where the outcome is known).
     median = long.groupby(level="session")["ret"].transform("median")
     long["label"] = (long["ret"] > median).astype(float).where(long["ret"].notna())
@@ -226,7 +252,8 @@ def latest_ranking(table: pd.DataFrame, config: RankConfig) -> dict | None:
 
 
 def evaluate(opens: pd.DataFrame, closes: pd.DataFrame, config: RankConfig = RankConfig(),
-             symbols_requested: int | None = None, interval: str = "5minute") -> dict:
+             symbols_requested: int | None = None, interval: str = "5minute",
+             exits: pd.DataFrame | None = None, values: pd.DataFrame | None = None) -> dict:
     """Full research report: walk-forward metrics, random baseline, gate, and (if passed) today's ranks."""
     report = {
         "version": "cross-sectional-v1", "scope": "research_only", "promotion_eligible": False,
@@ -240,7 +267,9 @@ def evaluate(opens: pd.DataFrame, closes: pd.DataFrame, config: RankConfig = Ran
     if opens.shape[1] < 2 * config.top_k:
         report["reason"] = f"Need at least {2 * config.top_k} symbols with daily bars"
         return report
-    table = build_features(opens, closes, config.lags)
+    table = build_features(opens, closes, config.lags, exits, values, config.min_avg_value_cr * CRORE)
+    report["exit"] = "15:15 IST" if exits is not None else "session close"
+    report["liquidity_filter_cr"] = config.min_avg_value_cr if values is not None else None
     labelled_sessions = table.dropna(subset=["label"]).index.get_level_values("session").nunique()
     report["labelled_sessions"] = int(labelled_sessions)
     if labelled_sessions < config.train_days + config.min_test_days:
@@ -306,8 +335,9 @@ def default_universe() -> list[str]:
 
 def run(symbols: list[str] | None = None, interval: str = "5minute", config: RankConfig = RankConfig()) -> dict:
     symbols = symbols or default_universe()
-    opens, closes = load_panel(symbols, interval)
-    report = evaluate(opens, closes, config, symbols_requested=len(symbols), interval=interval)
+    opens, closes, exits, values = load_panel(symbols, interval)
+    report = evaluate(opens, closes, config, symbols_requested=len(symbols), interval=interval,
+                      exits=exits, values=values)
     write_report(report)
     return report
 
@@ -356,9 +386,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--retrain-days", type=int, default=RankConfig.retrain_days)
     parser.add_argument("--top-k", type=int, default=RankConfig.top_k)
     parser.add_argument("--cost-bps", type=float, default=RankConfig.cost_bps)
+    parser.add_argument("--min-value-cr", type=float, default=RankConfig.min_avg_value_cr,
+                        help="Minimum 20-day mean traded value in INR crore")
     args = parser.parse_args(argv)
     config = RankConfig(max_lag=args.max_lag, train_days=args.train_days, retrain_days=args.retrain_days,
-                        top_k=args.top_k, cost_bps=args.cost_bps)
+                        top_k=args.top_k, cost_bps=args.cost_bps, min_avg_value_cr=args.min_value_cr)
     report = run([s.upper() for s in args.symbols] or None, args.interval, config)
     print(json.dumps({k: v for k, v in report.items() if k not in ("daily", "limitations")}, indent=2, default=str))
     print(report["limitations"])

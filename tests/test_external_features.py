@@ -183,7 +183,10 @@ def test_daily_bars_need_open_and_closing_bars():
     partial = _minutes("2026-10-20", [100.0] * 30)          # ends 09:44: open only
     late = _minutes("2026-10-21", [100.0] * 30, start="15:00")  # no 09:15 bar: close only
     bars = daily_bars(pd.concat([full, partial, late], ignore_index=True))
-    assert bars.loc[date(2026, 10, 19)].tolist() == pytest.approx([100.0, 101.0])
+    assert bars.loc[date(2026, 10, 19), ["open", "close"]].tolist() == pytest.approx([100.0, 101.0])
+    # MIS exit: close of the 15:14 bar (index 359 of 375), not the 15:29 close.
+    assert bars.loc[date(2026, 10, 19), "exit"] == pytest.approx(full.close.iloc[359])
+    assert np.isnan(bars.loc[date(2026, 10, 20), "exit"])
     assert np.isnan(bars.loc[date(2026, 10, 20), "close"]) and bars.loc[date(2026, 10, 20), "open"] == 100.0
     assert np.isnan(bars.loc[date(2026, 10, 21), "open"])
 
@@ -253,3 +256,15 @@ def test_cross_sectional_endpoints(tmp_path, monkeypatch):
             time.sleep(0.05)
         assert calls and calls[0].top_k == 3
     get_settings.cache_clear()
+
+
+def test_liquidity_filter_and_exit_return():
+    from trading_agent.research.cross_sectional import build_features
+
+    opens, closes = _panel(n_symbols=4, n_days=40)
+    exits = opens * 1.01
+    values = pd.DataFrame(5e8, index=opens.index, columns=opens.columns)
+    values["S00"] = 1e7  # INR 1 crore a day: below a 10 crore threshold
+    table = build_features(opens, closes, (1, 2), exits=exits, values=values, min_avg_value=1e8)
+    assert "S00" not in table.index.get_level_values("symbol")
+    assert table["ret"].to_numpy() == pytest.approx(0.01)

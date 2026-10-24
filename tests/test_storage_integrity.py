@@ -1,4 +1,5 @@
 """Candle persistence invariants across live ingestion and historical repairs."""
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
@@ -92,6 +93,8 @@ def test_naive_legacy_strings_are_read_as_ist_wall_clock(tmp_path):
     legacy = candles()
     legacy["timestamp"] = ["2026-10-19T09:15:00", "2026-10-19T09:16:00"]
     pq.write_table(pa.Table.from_pandas(legacy), path / "data.parquet")
+    # Legacy files predate current writes; an equal mtime would make file order a coin toss.
+    os.utime(path / "data.parquet", (1_700_000_000, 1_700_000_000))
     # The same 09:16 IST candle re-written by the current pipeline must not duplicate.
     store.write_candles(candles("2026-10-19T03:46:00Z", n=1, close=105), "TEST", "minute")
     result = store.read_candles("TEST", "minute")

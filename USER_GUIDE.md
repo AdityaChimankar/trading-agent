@@ -67,11 +67,11 @@ The board also shows liquidity tier, the maximum quantity under the participatio
 
 On 15 large NSE symbols (about 3,000 sessions, checked on 2026-10-24), the median errors were 27% / 19% / 12% against 37% / 20% / 17% for the better baseline. The weighting was chosen on that same data, so treat it as in-sample.
 
-**Cross-sectional ranking (research).** This is adapted from Ghosh, Neufeld & Sahoo (2021). Every session, a random forest ranks the universe (default `symbols_nifty500_plus.txt`) by the probability that a stock's open-to-close return beats the day's median. The strategy buys the top `k` at the open, shorts the bottom `k`, and closes everything at the close. Features are lagged open-to-close, close-to-close and overnight returns, all known at the open. The walk-forward retrains every 20 sessions on the previous 120 and is compared after `cost_bps` (15 bps per round trip, including slippage) with random picks.
+**Cross-sectional ranking (research).** This is adapted from Ghosh, Neufeld & Sahoo (2021). Every session, a random forest ranks the universe (default `symbols_nifty500_plus.txt`) by the probability that a stock's open-to-close return beats the day's median. The strategy buys the top `k` (default 10) at the open, shorts the bottom `k`, and exits at 15:15, the MIS square-off time, not the 15:30 close. Only stocks averaging at least ₹10 crore a day in traded value over the previous 20 sessions are ranked (`--min-value-cr`). Features are lagged open-to-close, close-to-close and overnight returns (lags 1–10), all known at the open. The walk-forward retrains every 20 sessions on the previous 60, and results are compared after `cost_bps` (15 bps per round trip, including slippage) with random picks. These defaults were chosen on the validation half of a walk-forward; see MEMORY.md.
 
 The research gate needs at least 60 test days, a positive net mean, a t-stat of at least 2, and a result better than random picks. Only when it passes does the report publish a long/short list for the latest session. The list is not an order and does not feed the scanner.
 
-Run it from **Analytics → Run evaluation** or `python -m trading_agent.research.cross_sectional`. Daily bars come from stored intraday candles, and sessions without a 09:15 bar or a closing bar are skipped. The paper's longest lag is 240 days; `--max-lag 20` is the default because most stored history is shorter. Survivorship bias (today's watchlist omits delisted stocks) makes results look better than reality.
+Run it from **Analytics → Run evaluation** or `trading-agent optimize cross-sectional`. Daily bars come from stored intraday candles, and sessions without a 09:15 bar or a closing bar are skipped. The paper's longest lag is 240 days; `--max-lag 10` is the default because most stored history is shorter. Survivorship bias (today's watchlist omits delisted stocks) makes results look better than reality.
 
 **Moving averages.** The chart shows MA20 and MA50, plus EMA9, EMA21 and session VWAP (VWAP restarts at each 09:15). Click EMA9 or EMA21 in the legend to show them. Strategy Lab has two moving-average profiles:
 
@@ -85,6 +85,28 @@ The live rule signal is unchanged. A test on 20 large NSE symbols (2026-10-24, n
 - The filters cut trades by 70–90% and changed the per-trade result by about 1 bp.
 
 Requiring price above both EMAs removed every rule signal, because the rule buys pullbacks (RSI < 45). That is why `rule_ma` uses EMA alignment only.
+
+**Strategy search (research).** `trading-agent optimize strategy-search` (module `research/strategy_search.py`) scores every combination of the following, on 30 liquid stocks, with the shared bracket replay:
+
+- **Entry type:** the rule, the rule with an EMA filter, trend pullback, breakout, EMA crossover, opening range, VWAP and RSI mean reversion, VWAP trend, and a gradient-boosting ML filter.
+- **Bar size:** 5, 15 or 30 minutes.
+- **Exit policy:** stop multiple, reward/risk and maximum bars.
+
+Sessions are split by date into development (60%), validation (20%) and holdout (20%). A run has two phases:
+
+1. **Selection** sees development and validation only, at conservative costs (10 bps plus 2 bps slippage per fill). A candidate is shortlisted only if it passes every check:
+   - at least 300 development and 100 validation trades;
+   - a session-clustered t-stat above the Bonferroni bar for the number of candidates tried;
+   - a session-bootstrap 95% lower bound above zero;
+   - positive results in at least 60% of symbols;
+   - a validation mean above the always-long, always-short and random-entry baselines with the same exit policy.
+
+   The shortlist is written to `data/research/strategy_search/runs/<run_id>/selection.json` before any holdout trade is replayed.
+2. **Holdout** scoring runs only for that frozen shortlist and its baselines.
+
+Rolling walk-forward (60-session train, 20-session test, inside development and validation only) picks the best candidate on each window and chains the following window's result. It runs over exit policies for the rule and over every non-ML candidate, so it measures the selection procedure itself.
+
+Each run records its git revision, dependency versions, a SHA-256 fingerprint of every symbol's data, skipped symbols and the selection file's hash. Run files are never overwritten; `latest.json` points to the newest run. A size-aware cost line (₹2 lakh positions, from `execution/costs.py`) is reported for sensitivity only. Results are research and are not wired into the live rule.
 
 **Opening-range breakout and Nifty gap regime.** Strategy Lab (`trading-agent optimize strategy-lab SYMBOL` or `POST /api/v1/strategy-lab/compare`) adds two profiles:
 
@@ -432,6 +454,8 @@ docker compose down
 | `python -m trading_agent.research.walk_forward_optimizer --selftest / --all` | Backtest self-test / whole-watchlist walk-forward |
 | `python -m trading_agent.strategy.model_monitoring baseline / report / clear` | ML drift baseline, report, clear fallback |
 | `python -m trading_agent.strategy.outcome_cli status / train / paper / promote` | BUY/SELL outcome-model lifecycle |
+| `trading-agent optimize strategy-search [SYMBOL...] [--no-ml]` | Frozen-selection strategy search with baselines and walk-forward |
+| `trading-agent optimize cross-sectional [SYMBOL...]` | Cross-sectional ranking walk-forward vs random picks |
 
 Always use `--help` on a command before a long or quota-consuming run.
 

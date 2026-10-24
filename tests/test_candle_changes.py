@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -113,7 +114,10 @@ def test_corrections_compaction_and_stale_history(storage):
     assert first["fresh_symbols"] == 0
     frame = pd.read_parquet(path)
     frame["close"] = 123.456
+    before = path.stat().st_mtime_ns
     frame.to_parquet(path, index=False)
+    # Same size, and on a fast disk possibly the same mtime tick: make the rewrite observable.
+    os.utime(path, ns=(before + 1_000_000_000, before + 1_000_000_000))
     second = changes.observe_candles(["A"], "minute", now)
     assert second["fingerprint"] != first["fingerprint"]
     assert second["fresh_symbols"] == 0
