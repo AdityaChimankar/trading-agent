@@ -100,6 +100,7 @@ The token is stored at `data/.access_token`, ignored by Git and shared with Dock
 python -m trading_agent.ingest.build_nifty500_symbols          # resolves instrument tokens; --no-resolve to skip
 trading-agent ingest RELIANCE TCS INFY --days 100
 trading-agent backfill RELIANCE --years 2                       # chunked, resumable, rate limited
+trading-agent backfill --interval minute --days 365 --missing-only  # only the head/tail not yet stored
 trading-agent storage-stats
 
 # Research
@@ -115,6 +116,10 @@ trading-agent optimize strategy-lab RELIANCE --interval minute   # includes open
 
 # Cross-sectional ranking research (walk-forward, after costs, vs random picks)
 trading-agent optimize cross-sectional --interval minute             # --max-lag 240 for the paper's lags
+
+# Prospective paper trial of the frozen ranker (scheduler runs pick 09:16 and settle 15:50)
+trading-agent optimize ranker-trial start                           # freezes config, universe, first session
+trading-agent optimize ranker-trial status
 
 # Strategy search: frozen selection on development/validation, baselines, walk-forward, then holdout
 trading-agent optimize strategy-search                              # --no-ml to skip ML; ~20-30 min

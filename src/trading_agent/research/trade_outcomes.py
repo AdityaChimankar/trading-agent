@@ -30,7 +30,9 @@ class TradePolicy:
 def trade_outcome(frame, signal_index, side, policy=TradePolicy(), interval_seconds=60):
     """Returns None for unobservable outcomes; never label an unknown future a loss.
 
-    Bars are start-stamped. Entries before 15:20 IST; forced exit by 15:25.
+    Bars are start-stamped. Entries before 15:20 IST; forced exit by 15:25, or
+    on the session's last bar when it ends at or after 15:15: since NSE's closing
+    auction (2026-08-03) many stocks have no continuous-trading bars after 15:14.
     Same-bar stop/target ambiguity assumes stop first. Gap stops fill at the
     worse opening price, gap targets at the target (no optimistic improvement).
     Weekday/time checks are not an official holiday calendar.
@@ -84,7 +86,10 @@ def trade_outcome(frame, signal_index, side, policy=TradePolicy(), interval_seco
             exit_price, reason = stop, "ambiguous_stop_first" if target_hit else "stop"
         elif target_hit:
             exit_price, reason = target, "target"
-        elif (bar_end + pd.Timedelta(seconds=interval_seconds)).time() > time(15, 25):
+        elif ((bar_end + pd.Timedelta(seconds=interval_seconds)).time() > time(15, 25)
+              or (bar_end.time() >= time(15, 15) and (
+                  j + 1 >= len(frame)
+                  or pd.Timestamp(frame.timestamp.iloc[j + 1]).tz_convert("Asia/Kolkata").date() != bar_local.date()))):
             exit_price, reason = close, "session_exit"
         elif j == final_index:
             exit_price, reason = close, "timeout"
@@ -159,7 +164,9 @@ def outcome_arrays(frame, side, policy=TradePolicy(), interval_seconds=60):
         gap_target = o[j] >= target if sign == 1 else o[j] <= target
         stop_hit = low[j] <= stop if sign == 1 else high[j] >= stop
         target_hit = high[j] >= target if sign == 1 else low[j] <= target
-        forced = (end_minute+interval_seconds/60 > 925) | (offset == policy.entry_delay_bars+policy.horizon-1)
+        last_of_day = (indices+offset+1 >= n) | (day[np.minimum(j+1, n-1)] != day[j])
+        forced = ((end_minute+interval_seconds/60 > 925) | (last_of_day & (end_minute >= 915)) |
+                  (offset == policy.entry_delay_bars+policy.horizon-1))
         done = active & (gap_stop | gap_target | stop_hit | target_hit | forced)
         price = np.where(gap_stop, o[j], np.where(gap_target, target,
                          np.where(stop_hit, stop, np.where(target_hit, target, close[j]))))

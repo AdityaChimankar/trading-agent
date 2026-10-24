@@ -117,13 +117,38 @@ def test_selection_scoring_never_replays_holdout(small):
     assert any(ledger.by_session[:, 1].sum() > 0 for ledger in ledgers.values())
 
 
-def test_ml_holdout_is_deferred(small):
-    universe = ss.load_universe(["AAA", "BBB"], small)
+@pytest.fixture
+def ml_small(small, monkeypatch):
+    monkeypatch.setattr(ss, "ML_MIN_TRAIN_SESSIONS", 8)
+    monkeypatch.setattr(ss, "ML_RETRAIN_SESSIONS", 4)
+    monkeypatch.setattr(ss, "ML_MIN_TRAIN_ROWS", 100)
+    return small
+
+
+def test_ml_holdout_is_deferred(ml_small):
+    universe = ss.load_universe(["AAA", "BBB"], ml_small)
     ledgers, deferred = ss.score_ml(universe, ss.CONSERVATIVE)
     holdout = universe.period_sessions("holdout")
+    assert any(ledger.by_session[:, 1].sum() > 0 for ledger in ledgers.values())  # models were fitted
     for key, ledger in ledgers.items():
         assert ledger.by_session[holdout].sum() == 0
         assert deferred[key]().by_session[np.setdiff1d(np.arange(len(universe.sessions)), holdout)].sum() == 0
+
+
+def test_ml_scores_every_session_with_a_model_fitted_only_on_earlier_sessions(ml_small):
+    # Scoring the training period with its own model reported 68% development wins against 38% on validation.
+    universe = ss.load_universe(["AAA", "BBB"], ml_small)
+    blocks = ss.ml_blocks(universe)
+    periods = {p: set(universe.period_sessions(p)) for p in ("development", "validation", "holdout")}
+    scored = np.concatenate([b for _, b in blocks])
+    assert scored.min() == ss.ML_MIN_TRAIN_SESSIONS and len(scored) == len(set(scored))
+    assert all(set(b) <= periods[p] and len(b) <= ss.ML_RETRAIN_SESSIONS for p, b in blocks)
+    session = np.repeat(np.arange(len(universe.sessions)), 3)
+    for train, rows in ss.ml_folds(session, blocks):
+        assert train.any() and session[train].max() < session[rows].min()
+    # The ML development ledger has no trades in the training-only sessions.
+    ledgers, _ = ss.score_ml(universe, ss.CONSERVATIVE)
+    assert all(ledger.by_session[:ss.ML_MIN_TRAIN_SESSIONS].sum() == 0 for ledger in ledgers.values())
 
 
 def _ledger(universe, daily_returns, trades_per_day=10, symbols=2):
@@ -207,6 +232,7 @@ def test_run_freezes_selection_before_holdout_and_records_provenance(small, monk
     with pytest.raises(FileExistsError):
         ss._write_atomic(run_dir / "report.json", {}, exclusive=True)
     assert report["walk_forward"]["rule_exit_policies"]["candidates_per_fold"] > 0
+    assert "all_candidates" in report["walk_forward"]
 
 
 original_select = ss.select

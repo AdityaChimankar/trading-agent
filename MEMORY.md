@@ -15,11 +15,11 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-24 (strategy search with frozen selection; realistic cross-sectional re-test). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
+Last updated: 2026-10-24 (one-year data top-up, closing-auction fixes, out-of-sample ML scoring, ranker paper trial). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
-**Verified** (2026-10-24, after the strategy-search work): 523 Python tests passed three runs in a row (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, and both offline browser smokes passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
+**Verified** (2026-10-24, after the ranker-trial work): 534 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, and both offline browser smokes passed. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
 
 **Not verified:**
 
@@ -53,8 +53,9 @@ Keep paper mode until those are evidenced.
 | Analytics | Net-of-cost performance, Sharpe/Sortino/drawdown/profit factor/expectancy/R, attribution | `analysis/performance.py` |
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
 | Analytics | U-shape remaining-volume forecast with out-of-sample check; router caps size at 5% of forecast remaining volume | `volume_insights.forecast_day_volume / evaluate_volume_forecast`, `/api/v1/analytics/volume/{s}/forecast-check` |
+| Research | Ranker paper trial: hashed frozen spec (config, universe, first session), pick after 09:15 bar (deadline 09:45), entry at the first bar after the pick, 15:15 exit, random book, missed sessions recorded, verdict fixed on the first 60 settled sessions | `research/ranker_trial.py`, `trading-agent optimize ranker-trial`, scheduler `ranker_trial_pick`/`ranker_trial_settle`, `/api/v1/analytics/cross-sectional/trial`, Analytics panel |
 | Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, 15:15 MIS exit, >= INR 10 crore liquidity filter, research gate, long/short list only when passed | `research/cross_sectional.py`, `trading-agent optimize cross-sectional`, `/api/v1/analytics/cross-sectional`, Analytics panel |
-| Research | Strategy search: 2,508 entry x bar-size x exit candidates; selection on development/validation only (Bonferroni clustered t, session bootstrap, symbol stability, always-long/short/random baselines, 10+2x2 bps) frozen to a hashed run file before holdout; rolling walk-forward over exit policies and all candidates; immutable runs with git revision, versions and data fingerprints | `research/strategy_search.py`, `trading-agent optimize strategy-search` |
+| Research | Strategy search: 2,508 entry x bar-size x exit candidates; selection on development/validation only (Bonferroni clustered t, session bootstrap, symbol stability, always-long/short/random baselines, 10+2x2 bps) frozen to a hashed run file before holdout; ML predicted walk-forward (expanding, refit every 20 sessions after 60), never on its own training sessions; rolling walk-forward over exit policies and all candidates including ML; immutable runs with git revision, versions and data fingerprints | `research/strategy_search.py`, `trading-agent optimize strategy-search` |
 | Research | Strategy Lab moving-average profiles (`rule_ma` EMA9/21 filter on the rule, `ema_cross` EMA9/21 crossover + VWAP); EMA9, EMA21 and session VWAP on the chart | `core/signals.ma_trend / apply_ma_filter`, `research/strategy_lab.py`, `PriceChart.tsx` |
 | Research | Strategy Lab opening-range breakout and Nifty-gap-regime profiles; NIFTY50/BANKNIFTY index candles | `research/strategy_lab.py`, `ingest/instrument_lookup.INDEX_TOKENS` |
 | ML | PSI/KS drift monitor; withdraws ML (or loads `ml_model.previous.joblib`) on drift; daily 15:40 check | `strategy/model_monitoring.py` |
@@ -73,7 +74,7 @@ Keep paper mode until those are evidenced.
 | P1 | Prospective paper evidence | ≥ 20 trading days of paper results so analytics stop warning about sample size |
 | P0 | Re-run research on corrected timestamps | earlier walk-forward, outcome-validation and outcome-model results were computed on history whose legacy sessions were shifted 5h30m; rerun before relying on any of them |
 | P1 | Ingest Nifty 50 candles and run `orb` / `orb_gap` in Strategy Lab | NIFTY50 minute candles stored; profiles compared with baselines after costs on several symbols |
-| P0 | Prospective paper trial of the cross-sectional ranker | the frozen defaults (lags 10, train 60, top/bottom 10, 15:15 exit, >= INR 10 crore) recorded daily from a fixed start date, with no parameter changes; >= 60 sessions; net mean > 0 with session-clustered t >= 2 after real fills. Every historical window has now been inspected, so only prospective sessions are clean evidence |
+| P0 | Run the ranker paper trial | tooling built (2026-10-24). `trading-agent optimize ranker-trial start` run once, scheduler running each session with a valid Kite token, then the verdict on the first 60 settled sessions (mean net > 0, t >= 2, above random) recorded here. Every historical window has been inspected, so only these sessions are clean evidence |
 | P1 | Cross-sectional ranking on longer history | daily or intraday history long enough for `--max-lag 240`; point-in-time Nifty 500 membership to remove survivorship bias |
 | P1 | Exchange holiday calendar | session gates and scheduler skip NSE holidays and special sessions |
 | P1 | Finish MUI conversion | remaining `.btn` and legacy markup in older pages replaced by MUI components |
@@ -93,11 +94,42 @@ Keep paper mode until those are evidenced.
 | Paper fills are modelled (5 bps slippage) | treat paper P&L as optimistic |
 | RVOL needs ≥ 5 prior sessions of minute data | the page flags unreliable values |
 | Legacy ML artifact has no training provenance | treat ML output as exploratory; rule path is authoritative |
+| NSE closing auction (from 2026-08-03): ~40% of the universe has no continuous-trading minute bars after 15:14 | ranker features use the 15:15 price; the bracket replay force-exits on the session's last bar when it ends at or after 15:15. Any other code that needs a 15:25+ bar must be checked |
+| `STORAGE_PARQUET_ROOT=data/parquet` in `.env` is relative to the working directory | run data jobs from the main checkout, or set an absolute path; a worktree otherwise writes its own empty store |
 | `.test-tmp*` and `.pytest_cache` in the worktree have locked ACLs | gitignored; delete with elevated permissions if needed |
 
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-24: One year of data, closing-auction fixes, out-of-sample ML, ranker paper trial
+
+**Data.** The minute store for `symbols_nifty500_plus.txt` was topped up to 2026-10-23. 495 symbols are stored, most from 2025-09-29, and 90% have at least 255 sessions. Seven symbols are not in the instrument list: BAGMANE, BIRET, DUMMYHEG, EMBASSY, HFCL, ICICIPRULI and STLTECH. `trading-agent backfill --days N --missing-only` now requests only sessions that are missing or incomplete. It compares each symbol with the calendar seen across the store; the first version looked only at the stored first and last bar and skipped interior holes left behind partial live-ticker days.
+
+**Closing auction.** From 2026-08-03 about 40% of the universe (largely F&O names) has no continuous-trading minute bars after 15:14. Two consequences:
+
+- The ranker treated those stocks as having no close and silently dropped them, so after August it ranked a skewed universe. Features now use the 15:15 price for every stock.
+- The bracket replay dropped any trade still open at 15:14 instead of exiting it. It now force-exits on the session's last bar when that bar ends at or after 15:15, in the scalar and vector paths (parity-tested).
+
+**ML win rate (68% to 38%).** Diagnosed as in-sample scoring, not a regime change. `score_ml` fitted on development and then traded development.
+
+- Real data (15-minute bars, 120-minute horizon, reward/risk 1.5): the base win rate after costs is about 30% in both periods. The model scored 63% in-sample on development, 45% when development was predicted walk-forward, and 39% on validation. AUC was 0.61 in-sample and 0.56–0.57 on validation.
+- Repair: every ML session is now predicted by models fitted only on earlier sessions (expanding window, refit every 20 sessions, after 60 training-only sessions; blocks never straddle a period; holdout models are fitted only after freezing). ML joins the all-candidates walk-forward.
+- Rerun `20261024T070312Z-550d476d` (264 sessions, holdout from 2026-08-07): ML scored 43.2% wins and −10.0 bps on development (out of sample), 42.7% and −12.7 bps on validation, so the gap is gone. 0 of 2,508 candidates were shortlisted and 0 were nominally positive. Walk-forward over all candidates was −6.8 bps on 350 trades (CI −18.6 to +4.6); over the rule's exit policies, −13.6 bps. Conclusion unchanged: no single-stock intraday edge after costs.
+
+**Ranker, corrected features, full year** (frozen defaults, 181 test days; every window has been seen before, so this is not evidence): +4.6 bps/day, t 1.1, hit rate 52.5%, against −14.8 for random picks. The research gate fails on t. Split at the auction change: +1.8 bps/day (t 0.35) over 135 days before 2026-08-03 and +13.0 (t 1.74) over 46 days after. The earlier +11.2 holdout figure came mostly from the recent weeks.
+
+**Paper trial built** (`research/ranker_trial.py`):
+
+- **Spec:** frozen and hashed (config, universe, first session); a start in the past is refused.
+- **Pick:** after the 09:15 bar, deadline 09:45. It fetches today's bars for the liquid names, blanks everything after the open, trains on the preceding 60 labelled sessions, and records the top and bottom 10 once.
+- **Settle:** at 15:50. Entry is the open of the first bar after the pick, exit the 15:15 price, net of 15 bps. The at-open return and a random book from the same eligible names are recorded beside it.
+- **Missed sessions** are recorded, never filled in.
+- **Verdict:** fixed on the first 60 settled sessions (mean > 0, t ≥ 2, above random).
+- **Wiring:** scheduler jobs `ranker_trial_pick` (09:16:30) and `ranker_trial_settle` (15:50); `GET /api/v1/analytics/cross-sectional/trial`; Analytics panel; `trading-agent optimize ranker-trial`.
+- **Dry run** on 2026-10-23 from stored data, in a scratch folder: pick 186 s with 481 eligible names; settle 71 s, +25.4 bps. Plumbing only.
+
+**Also:** removed the f-string lint errors in `manual_login.py`; recorded the relative `STORAGE_PARQUET_ROOT` pitfall under Known limitations.
 
 ### 2026-10-24: Strategy search (frozen selection) and realistic cross-sectional re-test
 

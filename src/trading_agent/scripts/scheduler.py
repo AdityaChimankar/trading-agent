@@ -266,6 +266,29 @@ def drift_check_cycle():
         logger.error("ml_drift_check_failed", error=str(e))
 
 
+def ranker_trial_pick_cycle():
+    """Record the cross-sectional ranker's paper book after the 09:15 bar (no-op until a trial is started)."""
+    from trading_agent.research import ranker_trial
+
+    try:
+        if ranker_trial.load_spec() is not None:
+            record = ranker_trial.pick()
+            logger.info("ranker_trial_pick_recorded", session=record["session"])
+    except Exception as e:  # the session is recorded as missed at settlement
+        logger.error("ranker_trial_pick_failed", error=str(e))
+
+
+def ranker_trial_settle_cycle():
+    """Price due paper books at their 15:15 exit and record unpicked sessions as missed."""
+    from trading_agent.research import ranker_trial
+
+    try:
+        if ranker_trial.load_spec() is not None:
+            ranker_trial.settle_pending()
+    except Exception as e:
+        logger.error("ranker_trial_settle_failed", error=str(e))
+
+
 # Create scheduler AFTER all functions are defined
 scheduler = BlockingScheduler(timezone="Asia/Kolkata")
 
@@ -359,6 +382,18 @@ scheduler.add_job(
     generate_digest,
     CronTrigger(day_of_week="mon-fri", hour=15, minute=35),
     id="daily_digest",
+)
+# Ranker paper trial: picks need the completed 09:15 bar; settlement needs the
+# 15:14 bar, so it runs after the post-close repair. Both are research records only.
+scheduler.add_job(
+    ranker_trial_pick_cycle,
+    CronTrigger(day_of_week="mon-fri", hour=9, minute=16, second=30),
+    id="ranker_trial_pick",
+)
+scheduler.add_job(
+    ranker_trial_settle_cycle,
+    CronTrigger(day_of_week="mon-fri", hour=15, minute=50),
+    id="ranker_trial_settle",
 )
 # Daily news flush - 8:00 AM on weekdays (before market open)
 scheduler.add_job(

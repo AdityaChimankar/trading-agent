@@ -71,7 +71,14 @@ On 15 large NSE symbols (about 3,000 sessions, checked on 2026-10-24), the media
 
 The research gate needs at least 60 test days, a positive net mean, a t-stat of at least 2, and a result better than random picks. Only when it passes does the report publish a long/short list for the latest session. The list is not an order and does not feed the scanner.
 
-Run it from **Analytics → Run evaluation** or `trading-agent optimize cross-sectional`. Daily bars come from stored intraday candles, and sessions without a 09:15 bar or a closing bar are skipped. The paper's longest lag is 240 days; `--max-lag 10` is the default because most stored history is shorter. Survivorship bias (today's watchlist omits delisted stocks) makes results look better than reality.
+Run it from **Analytics → Run evaluation** or `trading-agent optimize cross-sectional`. Daily bars come from stored intraday candles, and sessions without a 09:15 bar or a 15:15 price are skipped. All features use the 15:15 price as the day's close: since NSE's closing auction (3 August 2026) about 40% of stocks have no minute bars after 15:14. The paper's longest lag is 240 days; `--max-lag 10` is the default because most stored history is shorter. Survivorship bias (today's watchlist omits delisted stocks) makes results look better than reality.
+
+**Ranker paper trial (prospective).** Every historical window has been inspected, so the only clean evidence for the ranker is sessions that have not happened yet. `trading-agent optimize ranker-trial start` freezes the defaults, the universe and the first session (the next one; a start in the past is refused) in `data/research/ranker_trial/spec.json`, with a hash that is checked on every read. Each session then gets two records under `sessions/`, each written once:
+
+1. **Pick** (scheduler, 09:16:30 IST, deadline 09:45). It fetches today's minute candles for the liquid names, trains on the preceding 60 labelled sessions and records the top and bottom 10 with the pick time. Only today's open is used; later bars are blanked.
+2. **Settle** (scheduler, 15:50 IST). Each position enters at the open of the first minute bar after the pick and exits at the 15:15 price, net of 15 bps. The at-open return (the backtest's assumption) and a random-pick book from the same eligible names are recorded beside it. A trading session without a pick is recorded as **missed** and never filled in.
+
+The verdict is computed once, on the first 60 settled sessions: mean net > 0, t ≥ 2 and above the random book. Later sessions are shown but cannot change it. See **Analytics → Ranker paper trial**, `trading-agent optimize ranker-trial status`, or `GET /api/v1/analytics/cross-sectional/trial`. The trial needs a valid Kite token each morning and places no orders.
 
 **Moving averages.** The chart shows MA20 and MA50, plus EMA9, EMA21 and session VWAP (VWAP restarts at each 09:15). Click EMA9 or EMA21 in the legend to show them. Strategy Lab has two moving-average profiles:
 
@@ -104,7 +111,9 @@ Sessions are split by date into development (60%), validation (20%) and holdout 
    The shortlist is written to `data/research/strategy_search/runs/<run_id>/selection.json` before any holdout trade is replayed.
 2. **Holdout** scoring runs only for that frozen shortlist and its baselines.
 
-Rolling walk-forward (60-session train, 20-session test, inside development and validation only) picks the best candidate on each window and chains the following window's result. It runs over exit policies for the rule and over every non-ML candidate, so it measures the selection procedure itself.
+Rolling walk-forward (60-session train, 20-session test, inside development and validation only) picks the best candidate on each window and chains the following window's result. It runs over exit policies for the rule and over every candidate, ML included, so it measures the selection procedure itself.
+
+The ML filter is scored walk-forward too: after 60 training sessions, each block of 20 sessions is predicted by models fitted only on earlier sessions, so its development, validation and holdout results are all out of sample. (Scoring the training period with its own model had reported a 68% development win rate against 38% on validation, from a base rate near 30%.)
 
 Each run records its git revision, dependency versions, a SHA-256 fingerprint of every symbol's data, skipped symbols and the selection file's hash. Run files are never overwritten; `latest.json` points to the newest run. A size-aware cost line (₹2 lakh positions, from `execution/costs.py`) is reported for sensitivity only. Results are research and are not wired into the live rule.
 
@@ -439,7 +448,7 @@ docker compose down
 |---|---|
 | `trading-agent login` | Refresh Kite token using the automated flow |
 | `trading-agent ingest [SYMBOL...]` | Fetch recent historical candles |
-| `trading-agent backfill [SYMBOL...]` | Fetch a longer history |
+| `trading-agent backfill [SYMBOL...] [--days N] [--missing-only]` | Fetch a longer history; `--missing-only` requests only what is not stored |
 | `trading-agent heal-gaps [SYMBOL...] --interval 5minute --limit 100` | Bounded catch-up with overlap, error summary, and failure exit status |
 | `trading-agent storage-stats` | Summarize Parquet data |
 | `trading-agent compact SYMBOL` | Compact a symbol's Parquet data |
@@ -456,6 +465,7 @@ docker compose down
 | `python -m trading_agent.strategy.outcome_cli status / train / paper / promote` | BUY/SELL outcome-model lifecycle |
 | `trading-agent optimize strategy-search [SYMBOL...] [--no-ml]` | Frozen-selection strategy search with baselines and walk-forward |
 | `trading-agent optimize cross-sectional [SYMBOL...]` | Cross-sectional ranking walk-forward vs random picks |
+| `trading-agent optimize ranker-trial start / pick / settle / status` | Prospective paper trial of the frozen ranker |
 
 Always use `--help` on a command before a long or quota-consuming run.
 

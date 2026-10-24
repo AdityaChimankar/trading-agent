@@ -5,7 +5,8 @@ stock's open-to-close return beats that day's cross-sectional median. The
 strategy buys the top ``k`` at the open, shorts the bottom ``k``, and closes all
 of them at the close, so it is market-neutral by construction.
 
-Features use only information known at the open of day t:
+Features use only information known at the open of day t ("close" is the
+15:15 price when exits are used; see ``build_features``):
   IntraR_k  open-to-close return of day t-k
   CloseR_k  close-to-close return from t-1-k to t-1
   OverNR_k  return from the close of t-k to the open of t
@@ -48,7 +49,7 @@ LIMITATIONS = (
     "Research only; no orders, sizing or promotion. Today's watchlist omits delisted names "
     "(survivorship bias), which flatters backtests. Entry exactly at the open and exit at the "
     "close are assumptions; cost_bps must cover charges and slippage on both legs. "
-    "Daily bars come from stored candles; sessions without a 09:15 bar or a closing bar are "
+    "Daily bars come from stored candles; sessions without a 09:15 bar or a 15:15 price are "
     "excluded. Passing the research gate is necessary, not sufficient: prospective paper "
     "results are still required."
 )
@@ -102,15 +103,17 @@ def daily_bars(intraday: pd.DataFrame) -> pd.DataFrame:
     return bars[["open", "close", "exit", "value"]].dropna(how="all", subset=["open", "close"])
 
 
-def load_panel(symbols: list[str], interval: str = "5minute", store=None) -> tuple[pd.DataFrame, ...]:
+def load_panel(symbols: list[str], interval: str = "5minute", store=None,
+               start: datetime | None = None) -> tuple[pd.DataFrame, ...]:
     """Wide open, close, 15:15 exit and traded-value frames (session x symbol) from stored candles."""
     from trading_agent.storage.parquet_store import get_parquet_store
 
     store = store or get_parquet_store()
+    window = {"start": start} if start is not None else {}
     opens, closes, exits, values = {}, {}, {}, {}
     for symbol in symbols:
         try:
-            bars = daily_bars(store.read_candles(symbol, interval))
+            bars = daily_bars(store.read_candles(symbol, interval, **window))
         except Exception as error:  # one unreadable symbol must not stop the panel
             logger.warning("cross_sectional_symbol_skipped", symbol=symbol, error=str(error))
             continue
@@ -125,14 +128,20 @@ def build_features(opens: pd.DataFrame, closes: pd.DataFrame, lags: tuple[int, .
                    min_avg_value: float = 0.0) -> pd.DataFrame:
     """Long table: one row per (session, symbol) with features, traded return and label.
 
-    Features use the full-session open-to-close return. The traded return (``ret``)
-    runs from the open to the 15:15 exit when ``exits`` is given. With ``values``,
+    With ``exits``, every price in the features and the traded return (``ret``) is
+    the 15:15 exit price, not the session close: since NSE's closing auction
+    (2026-08-03) about 40% of the universe has no continuous-trading bars after
+    15:14, so their session close is missing from the candles, and one price
+    definition keeps stocks comparable before and after the change. Without
+    ``exits`` the session close is used, as in the paper. With ``values``,
     a stock is eligible on a session only if its trailing 20-session mean traded
     value, known before that open, reaches ``min_avg_value``.
     """
     opens, closes = opens.align(closes, join="outer")
+    if exits is not None:
+        closes = exits.reindex_like(opens)
     intraday = closes / opens - 1
-    traded = (exits.reindex_like(opens) / opens - 1) if exits is not None else intraday
+    traded = intraday
     parts = {}
     for k in lags:
         parts[f"IntraR{k}"] = intraday.shift(k)
@@ -226,13 +235,13 @@ def walk_forward(table: pd.DataFrame, config: RankConfig) -> dict:
     return {"model": model_days, "random": np.array(random_days), "accuracy": accuracy, "blocks": blocks}
 
 
-def latest_ranking(table: pd.DataFrame, config: RankConfig) -> dict | None:
-    """Rank the most recent session that has an open, using the last ``train_days`` labelled sessions."""
+def latest_ranking(table: pd.DataFrame, config: RankConfig, session=None) -> dict | None:
+    """Rank ``session`` (default: the most recent with an open) on the preceding ``train_days`` labelled sessions."""
     features = feature_columns(table)
     sessions = sorted(table.index.get_level_values("session").unique())
-    if not sessions:
+    if not sessions or (session is not None and session not in sessions):
         return None
-    target = sessions[-1]
+    target = session if session is not None else sessions[-1]
     labelled = table.dropna(subset=["label"])
     history = sorted(s for s in labelled.index.get_level_values("session").unique() if s < target)
     history = history[-config.train_days:]
@@ -248,7 +257,8 @@ def latest_ranking(table: pd.DataFrame, config: RankConfig) -> dict | None:
     def pick(indices):
         return [{"symbol": symbols[i], "probability": round(float(scores[i]), 4)} for i in indices]
 
-    return {"session": str(target), "long": pick(order[-config.top_k:][::-1]), "short": pick(order[:config.top_k])}
+    return {"session": str(target), "long": pick(order[-config.top_k:][::-1]), "short": pick(order[:config.top_k]),
+            "train_start": str(history[0]), "train_end": str(history[-1]), "eligible": sorted(symbols)}
 
 
 def evaluate(opens: pd.DataFrame, closes: pd.DataFrame, config: RankConfig = RankConfig(),

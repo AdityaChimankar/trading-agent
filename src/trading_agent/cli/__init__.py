@@ -68,6 +68,8 @@ def backfill(
     symbols: list[str] = typer.Argument(None, help="Symbols to backfill (default: watchlist)"),
     interval: str = typer.Option("5minute", help="Candle interval"),
     years: int = typer.Option(2, help="Years of history"),
+    days: int = typer.Option(None, help="Days of history (overrides --years)"),
+    missing_only: bool = typer.Option(False, help="Fetch only the head/tail outside stored candles"),
 ):
     """Backfill historical data."""
     if not symbols:
@@ -77,8 +79,9 @@ def backfill(
 
     fetcher = HistoricalFetcher()
 
-    typer.echo(f"Backfilling {years} years of {interval} data for {len(symbols)} symbols...")
-    results = fetcher.backfill(symbols, interval, years)
+    span = f"{days} days" if days is not None else f"{years} years"
+    typer.echo(f"Backfilling {span} of {interval} data for {len(symbols)} symbols...")
+    results = fetcher.backfill(symbols, interval, years, days=days, missing_only=missing_only)
 
     for symbol, count in results.items():
         typer.echo(f"  {symbol}: {count} candles")

@@ -268,3 +268,19 @@ def test_liquidity_filter_and_exit_return():
     table = build_features(opens, closes, (1, 2), exits=exits, values=values, min_avg_value=1e8)
     assert "S00" not in table.index.get_level_values("symbol")
     assert table["ret"].to_numpy() == pytest.approx(0.01)
+
+
+def test_features_use_the_1515_price_so_closing_auction_stocks_stay_ranked():
+    from trading_agent.research.cross_sectional import build_features, daily_bars
+
+    # Since NSE's closing auction, many stocks have no bars after 15:14: no session close.
+    stamps = [pd.Timestamp(f"2026-08-03 {t}", tz="Asia/Kolkata") for t in ("09:15", "12:00", "15:14")]
+    bars = daily_bars(pd.DataFrame({"timestamp": stamps, "open": [100.0, 101, 102], "close": [100.5, 101, 103],
+                                    "volume": 10.0}))
+    assert np.isnan(bars["close"].iloc[0]) and bars["exit"].iloc[0] == 103
+    opens, closes = _panel(n_symbols=4, n_days=30)
+    exits = opens * 1.01
+    closes.loc[:, "S00"] = np.nan
+    table = build_features(opens, closes, (1, 2), exits=exits)
+    assert "S00" in table.index.get_level_values("symbol")
+    assert table["IntraR1"].to_numpy() == pytest.approx(0.01)

@@ -66,3 +66,21 @@ def test_fetch_symbol_converts_pandas_timestamps_to_native_datetimes():
     assert type(from_date) is datetime
     assert type(to_date) is datetime
     assert from_date.tzinfo is timezone.utc
+
+
+def test_missing_ranges_cover_interior_holes_and_partial_days_but_skip_holidays():
+    from datetime import date
+
+    def ist(day, clock):
+        return pd.Timestamp(f"{day} {clock}", tz="Asia/Kolkata").to_pydatetime()
+
+    # Stored calendar: Oct 1-16 and 19 (Oct 2 a holiday); the symbol has Oct 1-5 complete,
+    # nothing for Oct 6-16 and only a partial live-ticker morning on Oct 19.
+    sessions = {date(2026, 10, d) for d in (1, 5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 19)}
+    complete = {date(2026, 10, 1), date(2026, 10, 5)}
+    ranges = HistoricalFetcher.missing_ranges(complete, sessions, ist("2026-10-01", "00:00"),
+                                              ist("2026-10-21", "12:00"))
+    assert ranges == [(ist("2026-10-06", "09:15"), ist("2026-10-21", "12:00"))]  # Oct 19 partial, 20-21 unseen
+    # Weekdays before anything was stored are fetched too.
+    head = HistoricalFetcher.missing_ranges(complete, sessions, ist("2026-09-28", "00:00"), ist("2026-10-05", "16:00"))
+    assert head == [(ist("2026-09-28", "09:15"), ist("2026-09-30", "15:30"))]

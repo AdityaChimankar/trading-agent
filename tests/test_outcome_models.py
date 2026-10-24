@@ -42,6 +42,28 @@ def test_vector_labels_match_scalar_execution_oracle(side, delay):
             assert exits[i] == outcome["exit_index"]
 
 
+
+@pytest.mark.parametrize("side", contract.SIDES)
+def test_closing_auction_sessions_exit_on_the_1514_bar_in_both_paths(side):
+    # Since 2026-08-03 many stocks have no continuous-trading bars after 15:14.
+    rng = np.random.default_rng(3)
+    stamps = pd.DatetimeIndex([s for day in ("2026-08-03", "2026-08-04") for s in pd.date_range(
+        f"{day} 09:15", f"{day} 15:14", freq="min", tz="Asia/Kolkata").tz_convert("UTC")])
+    close = 100 + np.cumsum(rng.normal(0, .02, len(stamps)))
+    df = contract.frame_features(pd.DataFrame({"timestamp": stamps, "open": close, "high": close + .05,
+                                               "low": close - .05, "close": close, "volume": 1000}))
+    policy = TradePolicy(horizon=60, stop_atr=10.0, reward_risk=5.0)  # wide bracket: time exits dominate
+    net, exits = outcome_arrays(df, side, policy)
+    last = int(np.flatnonzero(df.timestamp.dt.tz_convert("Asia/Kolkata").dt.date.astype(str) == "2026-08-03")[-1])
+    late = last - 20  # a 14:54 signal whose 60-bar horizon would run past the 15:14 last bar
+    outcome = trade_outcome(df, late, side, policy)
+    assert outcome is not None and outcome["exit_reason"] == "session_exit" and outcome["exit_index"] == last
+    assert exits[late] == last and net[late] == pytest.approx(outcome["net_return"])
+    for i in range(len(df)):
+        scalar = trade_outcome(df, i, side, policy)
+        assert (scalar is None and np.isnan(net[i])) or net[i] == pytest.approx(scalar["net_return"])
+
+
 def winning_trades(side="BUY", sessions=30, count=10, win_count=8):
     return [{"side": side, "session": f"session-{day}", "net_return": .02 if i < win_count else -.01}
             for day in range(sessions) for i in range(count)]

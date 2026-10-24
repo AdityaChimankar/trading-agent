@@ -25,6 +25,18 @@ interface VolumeRow {
   recommendation: string; reason: string; scan_action: string; scan_score: number; agreement: string
   forecast_remaining_volume: number | null; max_quantity_remaining: number | null
 }
+interface TrialSession {
+  session: string; net_bps: number; net_at_open_bps: number | null; random_bps: number | null
+  long: string[]; short: string[]; unpriced: string[]
+}
+interface Trial {
+  status: 'not_started' | 'collecting' | 'passed' | 'failed'; start_session?: string; spec_sha256?: string
+  config?: { top_k: number; cost_bps: number; train_days: number; max_lag: number; min_avg_value_cr: number }
+  universe_size?: number; picks?: number; settled?: number; missed?: string[]; pending?: string[]
+  done_when?: { sessions: number; t_stat_at_least: number }
+  model?: RankStats; at_open?: RankStats; random_baseline?: RankStats; sessions?: TrialSession[]
+  verdict?: { sessions: [string, string]; checks: Record<string, boolean> }
+}
 interface RankStats {
   days: number; mean_daily_net_bps?: number; hit_rate_pct?: number; t_stat?: number | null
   annualised_sharpe?: number | null; total_net_pct_points?: number; max_drawdown_pct_points?: number
@@ -61,6 +73,7 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
     refetchInterval: (q) => (q.state.data?.job.running ? 5_000 : 300_000) })
   const runRanking = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/cross-sectional/run'),
     onSuccess: () => cache.invalidateQueries({ queryKey: ['ranking'] }) })
+  const trial = useQuery({ queryKey: ['ranker-trial'], queryFn: () => apiGet<Trial>('/api/v1/analytics/cross-sectional/trial'), refetchInterval: 300_000 })
   const clear = useMutation({ mutationFn: () => apiPost('/api/v1/analytics/drift/clear'), onSuccess: () => cache.invalidateQueries({ queryKey: ['drift'] }) })
   const o = perf.data?.overall
 
@@ -122,6 +135,8 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
       <RankingPanel data={ranking.data} loading={ranking.isLoading} error={ranking.error}
         onRun={() => runRanking.mutate()} starting={runRanking.isPending} startError={runRanking.error} />
 
+      <TrialPanel data={trial.data} loading={trial.isLoading} error={trial.error} />
+
       <Panel title="ML drift monitor" subtitle="PSI and KS of live model inputs against the training-period baseline. Significant drift withdraws ML so hybrid decisions hold."
         actions={<Stack direction="row" spacing={1}>
           <Button variant="outlined" onClick={() => evaluate.mutate()} disabled={evaluate.isPending}>Evaluate now</Button>
@@ -144,6 +159,43 @@ export default function AnalyticsPage({ onSelectSymbol }: { onSelectSymbol: (sym
         </>}
       </Panel>
     </Stack>
+  )
+}
+
+function TrialPanel({ data, loading, error }: { data?: Trial; loading: boolean; error: unknown }) {
+  const stat = (s?: RankStats) => s && s.days > 0
+    ? `${num(s.mean_daily_net_bps, 1)} bps/day · hit ${num(s.hit_rate_pct, 1)}% · t ${num(s.t_stat, 2)}`
+    : '—'
+  const target = data?.done_when?.sessions ?? 60
+  return (
+    <Panel title="Ranker paper trial (prospective)"
+      subtitle="The frozen ranker's book recorded each session after the 09:15 bar and priced at 15:15: entry at the first bar after the pick, net of costs. Only these sessions count as clean evidence. Never places orders.">
+      <StateMessage loading={loading} error={error} empty="No trial started. Start one with: trading-agent optimize ranker-trial start"
+        isEmpty={data?.status === 'not_started'} />
+      {data && data.status !== 'not_started' && <>
+        <Alert severity={data.status === 'passed' ? 'success' : data.status === 'failed' ? 'error' : 'info'} sx={{ mb: 2 }}>
+          {data.status === 'collecting'
+            ? `Collecting: ${data.settled} of ${target} sessions settled since ${data.start_session}${data.missed?.length ? ` · ${data.missed.length} missed` : ''}${data.pending?.length ? ` · ${data.pending.length} awaiting settlement` : ''}`
+            : `Trial ${data.status} on its first ${target} sessions (${data.verdict?.sessions.join(' to ')}): ${Object.entries(data.verdict?.checks ?? {}).filter(([, ok]) => !ok).map(([k]) => k.replaceAll('_', ' ')).join(', ') || 'all checks met'}`}
+        </Alert>
+        <Grid container spacing={2} sx={{ mb: 2 }}>
+          <Grid size={{ xs: 12, md: 4 }}><Metric label="Book (entry after pick)" value={stat(data.model)} hint={`${data.model?.days ?? 0} sessions · total ${num(data.model?.total_net_pct_points, 2)} pts`} /></Grid>
+          <Grid size={{ xs: 12, md: 4 }}><Metric label="Same book at the open" value={stat(data.at_open)} hint="Backtest assumption, for comparison only" /></Grid>
+          <Grid size={{ xs: 12, md: 4 }}><Metric label="Random picks" value={stat(data.random_baseline)} hint="Same eligible set, entry and exit" /></Grid>
+        </Grid>
+        {(data.sessions ?? []).length > 0 && <DataTable rows={[...data.sessions!].reverse()} maxRows={10} columns={[
+          { header: 'Session', cell: r => r.session },
+          { header: 'Net bps', cell: r => num(r.net_bps, 1), align: 'right' },
+          { header: 'At open', cell: r => num(r.net_at_open_bps, 1), align: 'right' },
+          { header: 'Random', cell: r => num(r.random_bps, 1), align: 'right' },
+          { header: 'Long', cell: r => r.long.join(', ') },
+          { header: 'Short', cell: r => r.short.join(', ') },
+        ]} />}
+        {data.config && <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
+          Frozen: lags 1–{data.config.max_lag} · train {data.config.train_days} · top/bottom {data.config.top_k} · ≥ ₹{data.config.min_avg_value_cr} Cr/day · {data.config.cost_bps} bps · {data.universe_size} symbols · spec {data.spec_sha256?.slice(0, 12)}. Verdict on the first {target} settled sessions only: mean &gt; 0, t ≥ {data.done_when?.t_stat_at_least ?? 2}, above random.
+        </Typography>}
+      </>}
+    </Panel>
   )
 }
 

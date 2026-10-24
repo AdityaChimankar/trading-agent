@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from zoneinfo import ZoneInfo
@@ -48,6 +48,12 @@ MAX_DAYS_PER_REQUEST = {
     "60minute": 400,
     "day": 2000,
 }
+
+INTERVAL_MINUTES = {"minute": 1, "1minute": 1, "3minute": 3, "5minute": 5,
+                    "10minute": 10, "15minute": 15, "30minute": 30, "60minute": 60}
+IST_ZONE = ZoneInfo("Asia/Kolkata")
+IST = "Asia/Kolkata"
+SESSION_OPEN_MINUTE, SESSION_EXIT_MINUTE = 9 * 60 + 15, 15 * 60 + 15
 
 INTERVAL_MAP = {
     "1minute": "minute",
@@ -262,12 +268,10 @@ class HistoricalFetcher:
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df = df.drop_duplicates("timestamp", keep="last").sort_values("timestamp").reset_index(drop=True)
-        interval_minutes = {"minute": 1, "1minute": 1, "3minute": 3, "5minute": 5,
-                            "10minute": 10, "15minute": 15, "30minute": 30, "60minute": 60}
-        if interval in interval_minutes:
+        if interval in INTERVAL_MINUTES:
             # Never expose a still-forming candle to strategies as final.
             cutoff = min(to_date, datetime.now(timezone.utc))
-            df = df[df["timestamp"] + pd.Timedelta(minutes=interval_minutes[interval]) <= cutoff]
+            df = df[df["timestamp"] + pd.Timedelta(minutes=INTERVAL_MINUTES[interval]) <= cutoff]
         df.attrs["symbol"] = symbol
 
         # Store to Parquet
@@ -313,28 +317,99 @@ class HistoricalFetcher:
 
         return results
 
+    def stored_days(self, symbol: str, interval: str) -> tuple[set[date], set[date]]:
+        """IST session dates stored for a symbol: (complete, any).
+
+        A session is complete when it has the 09:15 bar and a bar starting within
+        one bar of 15:15. Since NSE's closing auction (August 2026) many stocks
+        have no continuous-trading bars after 15:14, so a later bar is not required.
+        """
+        try:
+            frame = self.parquet.read_candles(symbol, interval, columns=["timestamp"])
+        except Exception:  # an unreadable store is refetched in full
+            return set(), set()
+        if frame.empty:
+            return set(), set()
+        stamp = pd.to_datetime(frame["timestamp"], utc=True).dt.tz_convert(IST)
+        span = pd.DataFrame({"day": stamp.dt.date, "minute": stamp.dt.hour * 60 + stamp.dt.minute}
+                            ).groupby("day")["minute"].agg(["min", "max"])
+        bar = INTERVAL_MINUTES.get(interval, 1)
+        complete = span[(span["min"] <= SESSION_OPEN_MINUTE) & (span["max"] >= SESSION_EXIT_MINUTE - bar)]
+        return set(complete.index), set(span.index)
+
+    @staticmethod
+    def missing_ranges(
+        complete: set[date],
+        sessions: set[date],
+        from_date: datetime,
+        to_date: datetime,
+    ) -> list[tuple[datetime, datetime]]:
+        """Spans of ``[from_date, to_date]`` whose sessions are missing or incomplete.
+
+        ``sessions`` is the trading calendar seen in the store (any symbol has a
+        bar that day). Weekdays outside its span count as sessions, because
+        nothing has been stored for them yet; holidays inside it are skipped.
+        """
+        first, last = from_date.astimezone(IST_ZONE).date(), to_date.astimezone(IST_ZONE).date()
+        lo, hi = (min(sessions), max(sessions)) if sessions else (last + timedelta(days=1), first - timedelta(days=1))
+        calendar = []
+        day = first
+        while day <= last:
+            if day in sessions or (day.weekday() < 5 and not lo <= day <= hi):
+                calendar.append(day)
+            day += timedelta(days=1)
+        ranges, run = [], []
+        for day in calendar:
+            if day in complete:
+                if run:
+                    ranges.append((run[0], run[-1]))
+                run = []
+            else:
+                run.append(day)
+        if run:
+            ranges.append((run[0], run[-1]))
+
+        def at(day: date, clock: str) -> datetime:
+            return datetime.fromisoformat(f"{day}T{clock}").replace(tzinfo=IST_ZONE).astimezone(timezone.utc)
+
+        return [(max(at(a, "09:15"), from_date), min(at(b, "15:30"), to_date)) for a, b in ranges]
+
     def backfill(
         self,
         symbols: list[str],
         interval: str = "5minute",
         years: int = 2,
+        days: int | None = None,
+        missing_only: bool = False,
     ) -> dict[str, int]:
         """Backfill historical data for symbols.
+
+        ``days`` overrides ``years``. With ``missing_only`` only sessions that
+        are absent or incomplete in the store are requested (see ``missing_ranges``).
 
         Returns:
             Dict of symbol -> rows fetched
         """
         to_date = datetime.now(timezone.utc)
-        from_date = to_date - timedelta(days=years * 365)
+        from_date = to_date - timedelta(days=days if days is not None else years * 365)
+
+        stored, sessions = {}, set()
+        if missing_only:
+            for symbol in symbols:
+                stored[symbol] = self.stored_days(symbol, interval)
+                sessions |= stored[symbol][1]
 
         results = {}
         for symbol in symbols:
-            try:
-                df = self.fetch_symbol(symbol, interval, from_date=from_date, to_date=to_date)
-                results[symbol] = len(df)
-            except Exception as e:
-                logger.error("backfill_failed", symbol=symbol, error=str(e))
-                results[symbol] = 0
+            ranges = (self.missing_ranges(stored[symbol][0], sessions, from_date, to_date)
+                      if missing_only else [(from_date, to_date)])
+            results[symbol] = 0
+            for start, end in ranges:
+                try:
+                    df = self.fetch_symbol(symbol, interval, from_date=start, to_date=end)
+                    results[symbol] += len(df)
+                except Exception as e:
+                    logger.error("backfill_failed", symbol=symbol, error=str(e))
 
         return results
 

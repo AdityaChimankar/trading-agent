@@ -127,5 +127,19 @@ def cross_sectional(
           "--cost-bps", str(cost_bps), "--min-value-cr", str(min_value_cr)])
 
 
+
+@app.command("ranker-trial")
+def ranker_trial(
+    action: str = typer.Argument(..., help="start | pick | settle | status"),
+    start_session: str = typer.Option(None, help="start: first session, YYYY-MM-DD (default: next one)"),
+    session: str = typer.Option(None, help="settle: one session instead of every due one"),
+    no_refresh: bool = typer.Option(False, help="Use stored candles; do not fetch from Kite"),
+):
+    """Prospective paper trial of the frozen cross-sectional ranker; research only."""
+    from trading_agent.research.ranker_trial import main
+
+    main([action, *(["--start-session", start_session] if start_session else []),
+          *(["--session", session] if session else []), *(["--no-refresh"] if no_refresh else [])])
+
 if __name__ == "__main__":
     app()

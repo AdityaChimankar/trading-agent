@@ -66,6 +66,9 @@ ML_FEATURES = ("rsi", "adx", "atr_pct", "return_1", "return_3", "return_6", "vol
                "dist_from_ma20", "ema_spread", "vwap_dist_atr", "minute_of_day", "pattern_code")
 BASELINE_FAMILIES = ("always_long", "always_short", "random_entry")
 RANDOM_ENTRY_RATE = 0.02
+ML_MIN_TRAIN_SESSIONS = 60  # sessions before the first ML prediction
+ML_RETRAIN_SESSIONS = 20    # refit cadence; each block is predicted by a model fitted on earlier sessions
+ML_MIN_TRAIN_ROWS = 1000
 SEED = 7
 
 
@@ -396,12 +399,43 @@ def score_rules(universe: Universe, costs: Costs, periods=SELECTION_PERIODS, onl
 
 # --- ML ---------------------------------------------------------------------------------------
 
+def ml_blocks(universe: Universe) -> list[tuple[str, np.ndarray]]:
+    """(period, session indices) blocks the ML scores, each predicted by a model fitted on earlier sessions.
+
+    Blocks hold at most ``ML_RETRAIN_SESSIONS`` sessions and never straddle a period
+    boundary; the first ``ML_MIN_TRAIN_SESSIONS`` sessions are training-only.
+    """
+    blocks = []
+    for period in ("development", "validation", "holdout"):
+        idx = universe.period_sessions(period)
+        idx = idx[idx >= ML_MIN_TRAIN_SESSIONS]
+        blocks += [(period, idx[i:i + ML_RETRAIN_SESSIONS]) for i in range(0, len(idx), ML_RETRAIN_SESSIONS)]
+    return blocks
+
+
+def ml_folds(session: np.ndarray, blocks) -> list[tuple[np.ndarray, np.ndarray]]:
+    """(train rows, scored rows) per block: training rows are strictly earlier sessions (expanding window).
+
+    Trades never cross a session, so no label of a training row reaches into its block.
+    """
+    return [(session < block[0], np.isin(session, block)) for _, block in blocks]
+
+
 def score_ml(universe: Universe, costs: Costs) -> tuple[dict, dict]:
-    """Ledgers for development/validation, plus deferred holdout scorers (called only after freezing)."""
+    """Out-of-sample ML ledgers for development/validation, plus deferred holdout scorers.
+
+    A model fitted on the development period and scored on it reports its own
+    training labels: in the 2026-10-24 run that showed a 68% development win rate
+    against 38% on validation, from a ~30% base rate. Every scored session here is
+    therefore predicted walk-forward (see ``ml_blocks``), so development, validation
+    and holdout ML results are all out of sample and comparable with the rules.
+    Holdout models are fitted only inside the deferred callables, after freezing.
+    """
     from sklearn.ensemble import HistGradientBoostingClassifier
 
     session_index = {d: i for i, d in enumerate(universe.sessions)}
     symbols = sorted({s for s, _ in universe.frames})
+    blocks = ml_blocks(universe)
     ledgers, deferred = {}, {}
     for bm in BAR_MINUTES:
         frames = [(s, f) for (s, b), f in universe.frames.items() if b == bm]
@@ -414,46 +448,57 @@ def score_ml(universe: Universe, costs: Costs) -> tuple[dict, dict]:
             for s, f in frames:
                 nb, eb = outcome_arrays(f, "BUY", policy, bm * 60)
                 ns, es = outcome_arrays(f, "SELL", policy, bm * 60)
-                x = f[list(ML_FEATURES)].to_numpy(dtype=float)
-                parts.append((s, f, x, np.isfinite(x).all(axis=1), nb, eb, ns, es))
-            models = {}
-            for side, net_at in (("BUY", 4), ("SELL", 6)):
-                xs, ys = [], []
-                for part in parts:
-                    _, f, x, ok = part[:4]
-                    net = part[net_at]
-                    m = _period_mask(f, universe, ("development",)) & ok & np.isfinite(net)
-                    xs.append(x[m])
-                    ys.append(net[m] > 0)
-                x, y = np.vstack(xs), np.concatenate(ys)
-                if len(y) < 1000 or y.mean() in (0.0, 1.0):
-                    break
-                models[side] = HistGradientBoostingClassifier(
-                    max_iter=200, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=200,
-                    l2_regularization=1.0, random_state=SEED).fit(x, y)
-            if len(models) < 2:
-                continue
-            scored = []
-            for s, f, x, ok, nb, eb, ns, es in parts:
-                clean = np.nan_to_num(x)
-                pb = np.where(ok, models["BUY"].predict_proba(clean)[:, 1], 0)
-                ps = np.where(ok, models["SELL"].predict_proba(clean)[:, 1], 0)
-                scored.append((s, f, pb, ps, nb, eb, ns, es, f.session.map(session_index).to_numpy()))
+                parts.append((s, f, nb, eb, ns, es, f.session.map(session_index).to_numpy()))
+            x = np.vstack([f[list(ML_FEATURES)].to_numpy(dtype=float) for _, f, *_ in parts])
+            ok = np.isfinite(x).all(axis=1)
+            clean = np.nan_to_num(x)
+            session = np.concatenate([p[6] for p in parts])
+            net = {"BUY": np.concatenate([p[2] for p in parts]), "SELL": np.concatenate([p[4] for p in parts])}
+            bounds = np.cumsum([0] + [len(p[1]) for p in parts])
+
+            def predict(period_filter, x=x, ok=ok, clean=clean, session=session, net=net):
+                """BUY/SELL probabilities for the blocks of the given periods; zero elsewhere."""
+                prob = {"BUY": np.zeros(len(x)), "SELL": np.zeros(len(x))}
+                chosen = [b for b in blocks if b[0] in period_filter]
+                for train, rows in ml_folds(session, chosen):
+                    fitted = {}
+                    for side in ("BUY", "SELL"):
+                        m = train & ok & np.isfinite(net[side])
+                        y = net[side][m] > 0
+                        if len(y) < ML_MIN_TRAIN_ROWS or y.mean() in (0.0, 1.0):
+                            break
+                        fitted[side] = HistGradientBoostingClassifier(
+                            max_iter=200, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=200,
+                            l2_regularization=1.0, random_state=SEED).fit(x[m], y)
+                    if len(fitted) < 2:
+                        continue
+                    for side in ("BUY", "SELL"):
+                        prob[side][rows] = np.where(ok[rows], fitted[side].predict_proba(clean[rows])[:, 1], 0)
+                return prob
+
+            def replay(prob, periods, threshold, parts=parts, bounds=bounds):
+                ledger = Ledger(len(universe.sessions), len(symbols))
+                for k, (s, f, nb, eb, ns, es, sess) in enumerate(parts):
+                    pb, ps = prob["BUY"][bounds[k]:bounds[k + 1]], prob["SELL"][bounds[k]:bounds[k + 1]]
+                    acts = _actions((pb >= threshold) & (pb >= ps), (ps >= threshold) & (ps > pb))
+                    trades = non_overlapping(acts, nb, eb, ns, es, _period_mask(f, universe, periods))
+                    if trades:
+                        idx = np.array([i for i, _ in trades])
+                        ledger.add(symbols.index(s), sess[idx], np.array([r for _, r in trades]))
+                return ledger
+
+            selection_prob = predict(SELECTION_PERIODS)
+            holdout_prob: dict = {}
+
+            def holdout(threshold, predict=predict, replay=replay, cache=holdout_prob):
+                if not cache:
+                    cache.update(predict(("holdout",)))
+                return replay(cache, ("holdout",), threshold)
+
             for threshold in (0.5, 0.55, 0.6, 0.65, 0.7, 0.75):
                 key = candidate_key("ml_gbm", {"threshold": threshold}, bm, policy_dict(policy))
-
-                def replay(periods, threshold=threshold, scored=scored):
-                    ledger = Ledger(len(universe.sessions), len(symbols))
-                    for s, f, pb, ps, nb, eb, ns, es, sess in scored:
-                        acts = _actions((pb >= threshold) & (pb >= ps), (ps >= threshold) & (ps > pb))
-                        trades = non_overlapping(acts, nb, eb, ns, es, _period_mask(f, universe, periods))
-                        if trades:
-                            idx = np.array([i for i, _ in trades])
-                            ledger.add(symbols.index(s), sess[idx], np.array([r for _, r in trades]))
-                    return ledger
-
-                ledgers[key] = replay(SELECTION_PERIODS)
-                deferred[key] = lambda replay=replay: replay(("holdout",))
+                ledgers[key] = replay(selection_prob, SELECTION_PERIODS, threshold)
+                deferred[key] = lambda threshold=threshold, holdout=holdout: holdout(threshold)
         logger.info("strategy_search_ml_scored", bar_minutes=bm)
     return ledgers, deferred
 
@@ -602,10 +647,11 @@ def run(symbols=DEFAULT_SYMBOLS, include_ml: bool = True, store=None,
         ml_ledgers, deferred = score_ml(universe, CONSERVATIVE)
         ledgers.update(ml_ledgers)
     selection = select(ledgers, universe, rules)
-    non_ml = [k for k in ledgers if describe(k)["family"] not in BASELINE_FAMILIES + ("ml_gbm",)]
-    rule_exits = [k for k in non_ml if describe(k)["family"] == "rule"]
+    # ML ledgers are walk-forward predictions, so ML joins the candidate pool on equal terms.
+    candidates = [k for k in ledgers if describe(k)["family"] not in BASELINE_FAMILIES]
+    rule_exits = [k for k in candidates if describe(k)["family"] == "rule"]
     walk = {"rule_exit_policies": walk_forward(ledgers, universe, rule_exits, wf),
-            "all_non_ml_candidates": walk_forward(ledgers, universe, non_ml, wf)}
+            "all_candidates": walk_forward(ledgers, universe, candidates, wf)}
     frozen = {**meta, "phase": "selection_frozen", "shortlist": selection["shortlist"],
               "candidates_tried": selection["candidates_tried"], "bonferroni_t": selection["bonferroni_t"]}
     frozen_sha = _write_atomic(directory / "selection.json", frozen, exclusive=True)

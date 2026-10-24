@@ -242,6 +242,13 @@ def cross_sectional_status():
     return jsonable({"job": get_job().state, "report": read_report()})
 
 
+@router.get("/analytics/cross-sectional/trial")
+def cross_sectional_trial():
+    from trading_agent.research.ranker_trial import status
+
+    return jsonable(status())
+
+
 @router.post("/analytics/cross-sectional/run", status_code=202)
 def cross_sectional_run(payload: RankingRequest | None = None):
     from fastapi import HTTPException
