@@ -1,0 +1,146 @@
+name: Validation and image publishing
+
+on:
+  push:
+    branches: [main, develop, gemini, rework, unified-platform]
+  pull_request:
+    branches: [main, develop, gemini, rework, unified-platform]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  static-checks:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Compile Python sources
+        run: python -m compileall -q src migrations
+
+      - name: Run correctness lint baseline
+        run: ruff check src tests migrations
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Validate database migrations
+        run: |
+          mkdir -p data
+          alembic upgrade head
+          alembic check
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --cov=trading_agent --cov-report=xml --cov-fail-under=45
+        env:
+          DB_URL: sqlite:///data/test.db
+          ENVIRONMENT: testing
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [static-checks, test]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha
+
+      - name: Build backend for integration test
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          push: false
+          tags: trading-agent-app:latest
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Validate frontend container build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: trading-agent-frontend:latest
+
+      - name: Browser and container integration check
+        run: docker compose -f docker-compose.smoke.yml -p trading-agent-audit up --abort-on-container-exit --exit-code-from smoke
+
+      - name: Remove isolated test stack
+        if: always()
+        run: docker compose -f docker-compose.smoke.yml -p trading-agent-audit down
+
+      - name: Publish validated backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

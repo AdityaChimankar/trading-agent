@@ -11,19 +11,21 @@ import types
 import pandas as pd
 import pytest
 
-import analysis.rankings as rankings
-import risk.portfolio_risk as pr
-from core.position_sizing import PositionPlan
+import trading_agent.analysis.rankings as rankings
+import trading_agent.risk.portfolio_risk as pr
+from trading_agent.core.position_sizing import PositionSizeResult
 
 
 def _plan(symbol="X", action="BUY", entry=100.0, size=100, stop_distance=5.0):
-    return PositionPlan(
-        symbol=symbol, action=action, entry_price=entry,
-        atr=stop_distance / 1.5,
-        stop_loss=entry - stop_distance if action == "BUY" else entry + stop_distance,
-        take_profit=None, stop_distance=stop_distance,
-        risk_amount=size * stop_distance, position_size=size,
-        position_value=round(size * entry, 2), capped_by_max_position=False,
+    return PositionSizeResult(
+        shares=size,
+        position_value=size * entry,
+        risk_amount=size * stop_distance,
+        stop_price=entry - stop_distance if action == "BUY" else entry + stop_distance,
+        take_profit_price=None,
+        atr_value=stop_distance / 1.5,
+        atr_percentile=0.5,
+        risk_pct_of_portfolio=0.0,
     )
 
 
@@ -127,7 +129,7 @@ def test_zero_capital_does_not_divide_by_zero(book, monkeypatch):
 # --- the self-consistent list mode ---------------------------------------------
 
 def test_reserve_prior_bounds_the_whole_list_to_the_cap(book, monkeypatch):
-    monkeypatch.setattr(rankings, "rank_watchlist", lambda: _scored(3))
+    monkeypatch.setattr(rankings, "rank_watchlist", lambda max_symbols=500: _scored(3))
     monkeypatch.setattr(pr, "get_open_positions", lambda: [])
     monkeypatch.setattr(pr, "calculate_position",
                         lambda s, a, c: _plan(s, a, size=400, entry=100.0))
@@ -146,7 +148,7 @@ def test_reserve_prior_bounds_the_whole_list_to_the_cap(book, monkeypatch):
 def test_blocked_row_releases_no_reservation(book, monkeypatch):
     """A row refused by Check 0 (symbol already open) promised nothing, so it
     must not shrink the rows after it."""
-    monkeypatch.setattr(rankings, "rank_watchlist", lambda: _scored(2))
+    monkeypatch.setattr(rankings, "rank_watchlist", lambda max_symbols=500: _scored(2))
     monkeypatch.setattr(pr, "get_open_positions", lambda: [_open("S0", 10000)])
     monkeypatch.setattr(pr, "calculate_position",
                         lambda s, a, c: _plan(s, a, size=400, entry=100.0))
@@ -161,7 +163,7 @@ def test_blocked_row_releases_no_reservation(book, monkeypatch):
 def test_default_sizing_stays_per_row_and_unchanged(book, monkeypatch):
     """Callers that do not opt in get exactly the historical behaviour: every
     row sized independently against what is genuinely open."""
-    monkeypatch.setattr(rankings, "rank_watchlist", lambda: _scored(3))
+    monkeypatch.setattr(rankings, "rank_watchlist", lambda max_symbols=500: _scored(3))
     monkeypatch.setattr(pr, "get_open_positions", lambda: [])
     monkeypatch.setattr(pr, "calculate_position",
                         lambda s, a, c: _plan(s, a, size=400, entry=100.0))
@@ -200,29 +202,18 @@ def test_exposure_summary_handles_zero_capital(book, monkeypatch):
     }
 
 
-def test_wallet_endpoint_exposes_the_notional_split(monkeypatch):
-    """The split has to reach the response, not just exist in a helper."""
-    import api.routers.wallet as wallet_router
+def test_sizing_uses_real_price_and_cannot_undo_exposure_cap(book, monkeypatch):
+    # Both constraints apply: exposure allows 20 shares, risk allows 50.
+    monkeypatch.setattr(pr, "get_open_positions", lambda: [_open("A", 45000, risk=5750)])
+    monkeypatch.setattr(pr, "calculate_position", lambda s, a, c: _plan(s, a, entry=250, size=100))
+    plan = pr.calculate_portfolio_adjusted_position("X", "BUY", 100000)
+    assert plan.entry_price == 250
+    assert plan.approved_size == 20
+    assert plan.approved_value == 5000
 
-    class _Conn:
-        def close(self):
-            pass
 
-    monkeypatch.setattr(wallet_router, "get_connection", lambda: _Conn())
-    monkeypatch.setattr(wallet_router, "ensure_wallet_settings", lambda conn: 1.0)
-    monkeypatch.setattr(wallet_router, "wallet_snapshot", lambda conn: {
-        "capital": 500000.0, "total_deposits": 0.0, "total_withdrawals": 0.0,
-        "realized_pnl_total": 1791.0, "book_balance": 501791.0, "unified_equity": 501791.0, "open_positions": [],
-    })
-    monkeypatch.setattr(wallet_router, "_closed_pnl_today", lambda conn: 0.0)
-    monkeypatch.setattr(wallet_router, "_recent_trades_summary", lambda conn, days: {})
-    monkeypatch.setattr(wallet_router, "exposure_summary", lambda capital: {
-        "committed_notional": 99708.0, "free_notional": 402083.0, "exposure_pct": 19.87,
-    })
-
-    result = wallet_router.wallet()
-
-    # Measured against the book balance, so the two views cannot disagree.
-    assert result["fixed"]["committed_notional"] == 99708.0
-    assert result["fixed"]["free_notional"] == 402083.0
-    assert result["fixed"]["exposure_pct"] == 19.87
+def test_duplicate_symbol_is_blocked(book, monkeypatch):
+    monkeypatch.setattr(pr, "get_open_positions", lambda: [_open("X", 1000)])
+    monkeypatch.setattr(pr, "calculate_position", lambda s, a, c: _plan(s, a))
+    plan = pr.calculate_portfolio_adjusted_position("X", "BUY", 100000)
+    assert plan.blocked and plan.approved_size == 0

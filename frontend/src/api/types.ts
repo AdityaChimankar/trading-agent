@@ -144,6 +144,9 @@ export interface IndicatorArrays {
   atr: (number | null)[]
   ma20: (number | null)[]
   ma50: (number | null)[]
+  ema9?: (number | null)[]
+  ema21?: (number | null)[]
+  vwap?: (number | null)[]
 }
 
 export interface PatternFlags {
@@ -373,4 +376,16 @@ export interface PipelineResponse {
     llm_agreement_pct: number | null
   }
   rows: PipelineRow[]
+}
+
+export interface TechnicalReading { name: string; value: number; verdict: 'Bullish' | 'Bearish' | 'Neutral' }
+export interface PivotLevels {
+  session: string; based_on: string; prev_high: number; prev_low: number; prev_close: number; price: number
+  pivot: number; r1: number; r2: number; r3: number; s1: number; s2: number; s3: number
+  nearest_resistance: number | null; nearest_support: number | null
+}
+export interface TechnicalsResponse {
+  symbol: string; interval?: string; as_of?: string; insufficient_data?: boolean
+  readings?: TechnicalReading[]; bullish_count?: number; bearish_count?: number; neutral_count?: number
+  total?: number; verdict?: string; pivots?: PivotLevels | null
 }

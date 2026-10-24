@@ -7,12 +7,12 @@
 // host with no config, and they survive a page reload - which is the whole
 // point of having separate pages instead of one long scroll.
 //
-// A full router library is not worth a dependency for three views, so this
-// is deliberately tiny and total: any unknown or missing hash resolves to
+// A full router library is not worth a dependency for a handful of views, so
+// this is deliberately tiny and total: any unknown or missing hash resolves to
 // the dashboard rather than a blank screen.
 import { useEffect, useState } from 'react'
 
-export const ROUTES = ['dashboard', 'history', 'pipeline', 'news'] as const
+export const ROUTES = ['dashboard', 'research', 'paper', 'risk', 'analytics', 'pipeline', 'history', 'news'] as const
 
 export type Route = (typeof ROUTES)[number]
 

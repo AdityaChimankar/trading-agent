@@ -1,10 +1,86 @@
-.env
-.access_token
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.log
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.test-tmp*/
+coverage.xml
+.audit-tests/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Data files
+data/parquet/
+data/*_cache.json
+data/sentiment_cache/
+data/controls/
+data/ml_monitoring/
+data/ticker-heartbeat.json
+data/research/
 *.db
-*.db-shm
+# SQLite WAL-mode sidecar files
 *.db-wal
-/data/
-.claude/settings.local.json
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Cache
+.cache/
+
+# Access tokens
+.access_token
+data/.access_token
+
+# Models
+data/indicator_cache/*.pkl
+models/*.pkl
+models/registry.json
+models/outcome_candidates/
+models/outcome-active.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated output (smoke screenshots, optimizer results)
+artifacts/
+optimization_results/
+
+# Temporary files
+.worktrees/
+*.tmp
+*.temp

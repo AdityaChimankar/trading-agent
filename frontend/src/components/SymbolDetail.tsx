@@ -11,6 +11,7 @@ import {
   useSizing,
 } from '../api/queries'
 import { actionClass, cx, inr, num, shortTime } from '../lib/format'
+import TechnicalsPanel from './TechnicalsPanel'
 import { DataTable, Metric, Panel, StateMessage, type Column } from './ui'
 
 const PriceChart = lazy(() => import('./PriceChart'))
@@ -69,6 +70,8 @@ export default function SymbolDetail({
           </Suspense>
         )}
       </Panel>
+
+      <TechnicalsPanel symbol={symbol} />
 
       <Panel
         title="Position Sizing"

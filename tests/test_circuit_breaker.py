@@ -3,16 +3,13 @@ import time
 
 import pytest
 
-from core.circuit_breaker import (
+from trading_agent.core.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerConfig,
     CircuitState,
-    CircuitOpenError,
-    get_kite_circuit,
-    get_openrouter_circuit,
-    call_with_kite_circuit,
-    call_with_openrouter_circuit,
-    get_circuit_status,
+    CircuitBreakerError,
+    get_circuit_breaker,
+    get_all_circuit_breaker_stats,
 )
 
 
@@ -36,6 +33,20 @@ def test_circuit_breaker_opens_after_threshold():
     assert cb.state == CircuitState.OPEN
 
 
+def test_success_resets_consecutive_failure_count():
+    cb = CircuitBreaker("consecutive", CircuitBreakerConfig(failure_threshold=2))
+
+    with pytest.raises(RuntimeError):
+        cb.call(lambda: (_ for _ in ()).throw(RuntimeError("first")))
+
+    assert cb.call(lambda: "recovered") == "recovered"
+
+    with pytest.raises(RuntimeError):
+        cb.call(lambda: (_ for _ in ()).throw(RuntimeError("second")))
+
+    assert cb.state == CircuitState.CLOSED
+
+
 def test_circuit_breaker_blocks_calls_when_open():
     """Test circuit breaker blocks calls when open."""
     cb = CircuitBreaker("test", CircuitBreakerConfig(failure_threshold=1))
@@ -47,13 +58,13 @@ def test_circuit_breaker_blocks_calls_when_open():
         pass
 
     # Next call should be blocked
-    with pytest.raises(CircuitOpenError):
+    with pytest.raises(CircuitBreakerError):
         cb.call(lambda: "success")
 
 
 def test_circuit_breaker_half_open_after_timeout():
     """Test circuit breaker transitions to half-open after timeout."""
-    cb = CircuitBreaker("test", CircuitBreakerConfig(failure_threshold=1, timeout_seconds=0.1))
+    cb = CircuitBreaker("test", CircuitBreakerConfig(failure_threshold=1, timeout=0.1))
 
     # Trigger open
     try:
@@ -75,7 +86,7 @@ def test_circuit_breaker_closes_after_successes():
     cb = CircuitBreaker("test", CircuitBreakerConfig(
         failure_threshold=1,
         success_threshold=2,
-        timeout_seconds=0.1,
+        timeout=0.1,
     ))
 
     # Trigger open
@@ -100,7 +111,7 @@ def test_circuit_breaker_reopens_on_half_open_failure():
     cb = CircuitBreaker("test", CircuitBreakerConfig(
         failure_threshold=1,
         success_threshold=2,
-        timeout_seconds=0.1,
+        timeout=0.1,
     ))
 
     # Trigger open
@@ -156,22 +167,19 @@ def test_circuit_breaker_reset():
     assert cb._failure_count == 0
 
 
-def test_call_with_kite_circuit():
-    """Test kite circuit helper."""
-    result = call_with_kite_circuit(lambda x: x * 2, 5)
-    assert result == 10
+def test_get_circuit_breaker():
+    """Test get_circuit_breaker helper."""
+    cb = get_circuit_breaker("test_kite", CircuitBreakerConfig(failure_threshold=2))
+    assert isinstance(cb, CircuitBreaker)
+    assert cb.name == "test_kite"
 
 
-def test_call_with_openrouter_circuit():
-    """Test openrouter circuit helper."""
-    result = call_with_openrouter_circuit(lambda x: x + 1, 5)
-    assert result == 6
-
-
-def test_get_circuit_status():
+def test_get_all_circuit_breaker_stats():
     """Test circuit status helper."""
-    status = get_circuit_status()
-    assert "kite" in status
-    assert "openrouter" in status
-    assert status["kite"]["state"] in ("closed", "open", "half_open")
-    assert status["openrouter"]["state"] in ("closed", "open", "half_open")
+    get_circuit_breaker("test_stats_1")
+    get_circuit_breaker("test_stats_2")
+    stats = get_all_circuit_breaker_stats()
+    assert "test_stats_1" in stats
+    assert "test_stats_2" in stats
+    # CircuitBreakerStats has total_calls, successful_calls, failed_calls, etc.
+    assert stats["test_stats_1"].total_calls >= 0

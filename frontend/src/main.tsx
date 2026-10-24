@@ -1,12 +1,14 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { CssBaseline, ThemeProvider } from '@mui/material'
 
 import App from './App'
+import { theme } from './theme'
 import './styles.css'
 
 // One shared client for every panel. Individual queries set their own
-// refetchInterval (see api/queries.ts); these are just the defaults.
+// refetchInterval; these are just the defaults.
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -23,7 +25,10 @@ if (!container) throw new Error('Root container #root not found in index.html')
 createRoot(container).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <App />
+      </ThemeProvider>
     </QueryClientProvider>
   </StrictMode>,
 )
