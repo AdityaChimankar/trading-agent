@@ -78,6 +78,7 @@ Keep paper mode until those are evidenced.
 | P0 | Run the ranker paper trial | started 2026-10-24: first session 2026-10-26, spec `da100b7c01949a78...` in `data/research/ranker_trial/spec.json`, frozen at `449418e`. Needs the scheduler from this branch (the main checkout is on `rework`, which lacks the trial) running each session with a valid Kite token, then the verdict on the first 60 settled sessions (mean net > 0, t >= 2, above random) recorded here. Every historical window has been inspected, so only these sessions are clean evidence |
 | P0 | Run the `hgb` trial arm | started 2026-10-24 beside `rf`, first session 2026-10-26, spec `0111c28619f97074...` in `data/research/ranker_trial_hgb/`, frozen at `68aaee0`. Verdict on its first 60 settled sessions; t >= 2.0 keeps the family-wise error across both arms below 5% |
 | P1 | Cross-sectional ranking on longer history | daily or intraday history long enough for `--max-lag 240`; point-in-time Nifty 500 membership to remove survivorship bias |
+| P1 | Align legacy database indexes | `alembic check` on the live `data/trading.db` reports no drift (index names, nullability on `ml_models`, `opportunities`, `candles` and others) |
 | P1 | Exchange holiday calendar | session gates and scheduler skip NSE holidays and special sessions |
 | P1 | Finish MUI conversion | remaining `.btn` and legacy markup in older pages replaced by MUI components |
 | P1 | Lint/type baselines | selected Ruff rules and type checks pass and become required CI gates |
@@ -96,6 +97,7 @@ Keep paper mode until those are evidenced.
 | Paper fills are modelled (5 bps slippage) | treat paper P&L as optimistic |
 | RVOL needs ≥ 5 prior sessions of minute data | the page flags unreliable values |
 | Legacy ML artifact has no training provenance | treat ML output as exploratory; rule path is authoritative |
+| The API creates missing tables at startup, before migrations | after a schema change, run `docker compose run --rm tools alembic upgrade head` before starting the new image; otherwise a pre-created table blocks the migration |
 | NSE closing auction (from 2026-08-03): ~40% of the universe has no continuous-trading minute bars after 15:14 | ranker features use the 15:15 price; the bracket replay force-exits on the session's last bar when it ends at or after 15:15. Any other code that needs a 15:25+ bar must be checked |
 | `STORAGE_PARQUET_ROOT=data/parquet` in `.env` is relative to the working directory | run data jobs from the main checkout, or set an absolute path; a worktree otherwise writes its own empty store |
 | `.test-tmp*` and `.pytest_cache` in the worktree have locked ACLs | gitignored; delete with elevated permissions if needed |
@@ -114,6 +116,16 @@ Newest first. Each entry records what changed and why; verification counts were 
 - The browser check opened the site root, which is the overview since the UI merge. It now opens `/#/research`.
 
 The smoke stack then passed: migrations, Parquet replay and compaction, nginx proxy, authentication, research panels, and the browser paper lifecycle with persistence.
+
+**Live stack switched to the new images.** The running containers (compose project `trading-agent`, project directory = main checkout, file = this worktree's `docker-compose.yml`) were still on the old images. Recreating them left the API unhealthy: `data/trading.db` was at revision `001` and the code needs `003`. Steps taken:
+
+1. Stopped the writers.
+2. Backed up with the SQLite backup API to `data/backups/pre-schema-003-20261024T100259Z.db` (integrity ok).
+3. Ran `alembic upgrade head`. Revision `002` applied; `003` failed because the briefly started new API had already created an empty `orders` table at startup (`database_tables_created`).
+4. Checked that table against the migration (same columns and indexes, 0 rows), dropped it, and re-ran: the database is at `003`.
+5. Started the stack: API ready, frontend 200, both trial arms visible (`rf` `da100b7c...`, `hgb` `0111c286...`), and the scheduler registered `ranker_trial_pick_cycle` and `ranker_trial_settle_cycle`.
+
+`alembic check` still reports legacy index-name and nullability drift in this older database (a fresh database is clean); a migration for it is open work.
 
 ### 2026-10-24: Second paper-trial arm (gradient boosting)
 
