@@ -76,6 +76,7 @@ docker compose ps
 | When | Command | Purpose |
 |---|---|---|
 | Before the first market-data operation each day | `docker compose run --rm tools trading-agent login` | Refresh the Kite token in `data/.access_token` |
+| After the close | `docker compose run --rm tools trading-agent data-check --universe all` | Confirm every stored symbol is complete through today; it prints the backfill command for any gaps (see [Market data and backfill](#market-data-and-backfill)) |
 | After downtime | `docker compose run --rm tools trading-agent heal-gaps --interval 5minute --limit 100` | Replay a one-day overlap and catch up; drop `--limit` after reviewing |
 | Market session | `docker compose --profile live up -d api frontend ticker scheduler` | Live candles, scheduled decisions, 15:15 square-off, 15:40 drift check |
 | After startup | `docker compose ps` | Confirm services are healthy |
@@ -92,6 +93,70 @@ Use the same interval as `STORAGE_CANDLE_INTERVAL` (default `5minute`) for gap h
 3. Each trading day: `trading-agent login` (automated) or `python manual_login.py` (manual fallback).
 
 The token is stored at `data/.access_token`, ignored by Git and shared with Docker.
+
+## Market data and backfill
+
+Candles are stored as Parquet under `STORAGE_PARQUET_ROOT` (default `data/parquet`), one folder per symbol and interval. `minute` and `5minute` are stored separately; the live ticker writes `STORAGE_CANDLE_INTERVAL`, and research and the ranker trial read `minute`. Every download needs a valid Kite token (`trading-agent login`).
+
+| Command | Use it for |
+|---|---|
+| `trading-agent ingest SYMBOL... --interval minute --days 100` | The last N days for a few symbols |
+| `trading-agent backfill SYMBOL... --interval minute --years 2` | A long history: the full range, chunked to Kite's per-request limits (minute: 7 days; 5minute: 30; 15/30minute: 200) |
+| `trading-agent backfill --universe all --interval minute --days 30 --missing-only` | Top-up: request only sessions that are missing or incomplete |
+| `trading-agent heal-gaps --interval 5minute` | Catch up the live interval after the ticker or the machine was down |
+| `trading-agent data-check --universe all` | Check that everything is current; exit 1 if not |
+
+**`--universe`** (for `backfill` and `data-check`) picks the symbols when none are given:
+
+- `watchlist`: `symbols.txt`, the default;
+- `nifty500`: `symbols_nifty500_plus.txt`, the ranker trial's universe;
+- `all`: every symbol already stored for the interval, about 2,300 NSE stocks.
+
+**`--missing-only`** checks each symbol against the trading calendar seen across the whole store. It fetches:
+
+- sessions with no bars;
+- partial sessions, such as a morning the live ticker recorded before it stopped;
+- weekdays after the newest stored session.
+
+Weekdays that no symbol has (holidays) are skipped. A session counts as complete with the 09:15 bar and a bar at 15:14 or later: since NSE's closing auction (3 August 2026) about 40% of stocks have no continuous-trading bars after 15:14. Without `--missing-only`, `backfill` re-requests the whole range; overlapping candles replace stored ones by timestamp, so nothing is duplicated.
+
+**How long it takes.** Requests are paced at about 2.5 a second.
+
+| Job | Approximate time |
+|---|---|
+| One year of minute data, one symbol (52 requests) | ~20 s |
+| One year for the Nifty 500 from empty | ~3 hours |
+| 30-day top-up of all ~2,300 symbols | 30–40 minutes, plus ~5 minutes to scan the store |
+| A `data-check --universe all` | ~5 minutes; it reads the store only, except for one token check |
+
+Rerunning after an interruption continues from what was stored. Run one download at a time.
+
+**What `data-check` reports:**
+
+- **The store:** its newest session against the last weekday whose market has closed.
+- **Each symbol** (last 30 days by default, `--days N`):
+  - up to date;
+  - behind: last complete session older than the newest;
+  - holes: sessions missing inside the window;
+  - empty: no data at all.
+- **Symbols Kite no longer lists** (renamed, delisted, REITs) are shown separately and never fail the check.
+- **Also:** the Kite token, the ticker heartbeat and each trial arm.
+
+It ends with the exact `backfill` command that fills the gaps.
+
+```bash
+trading-agent data-check --universe all            # e.g. "up to date 494 | behind 1794 | ... not listed by Kite 24"
+trading-agent backfill --universe all --interval minute --days 30 --missing-only
+trading-agent data-check --universe all            # confirm; exit 0 when current
+```
+
+In Docker, prefix any of these with `docker compose run --rm tools`.
+
+**Pitfalls:**
+
+- **Relative storage path:** `STORAGE_PARQUET_ROOT=data/parquet` is relative to the working directory. A job started from a linked worktree writes its own empty store. Run data jobs from the main checkout, or set an absolute path.
+- **Renamed or delisted symbols:** symbols not in Kite's instrument list fail with `Symbol not found`. Nothing can be fetched for them; remove them from the symbol files, or ignore them.
+- **5-minute data:** heal it with `--interval 5minute`. Minute data does not fill it.
 
 ## Common workflow
 
