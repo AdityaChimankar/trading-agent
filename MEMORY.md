@@ -104,6 +104,17 @@ Keep paper mode until those are evidenced.
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
 
+### 2026-10-24: Docker images rebuilt
+
+**Images.** Built from `4494f3f`: `trading-agent-app:unified-platform` and `trading-agent-frontend:unified-platform`, also tagged `latest`. The previous `latest` images are kept as `pre-unified-20261024`. The app image includes the ranker trial (both arms), the ranking lab and the scheduler's trial jobs.
+
+**Smoke fixes.** `docker-compose.smoke.yml` was failing for two reasons unrelated to the build:
+
+- Its synthetic paper positions hit the intraday session gate on a weekend (`409 Market closed`). The smoke `api` and `smoke` services now set `PAPER_ENFORCE_SESSION=false`, as the pytest suite does.
+- The browser check opened the site root, which is the overview since the UI merge. It now opens `/#/research`.
+
+The smoke stack then passed: migrations, Parquet replay and compaction, nginx proxy, authentication, research panels, and the browser paper lifecycle with persistence.
+
 ### 2026-10-24: Second paper-trial arm (gradient boosting)
 
 **Change.**

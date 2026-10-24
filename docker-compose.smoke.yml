@@ -14,6 +14,8 @@ services:
       STORAGE_PARQUET_ROOT: /tmp/smoke-data/parquet
       DB_URL: sqlite:////tmp/smoke-data/trading.db
       PAPER_INITIAL_CAPITAL: "1000000"
+      # Synthetic paper positions must not depend on the clock (weekends, 09:15-15:00 gate).
+      PAPER_ENFORCE_SESSION: "false"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8000/api/v1/ready"]
       interval: 2s
@@ -33,6 +35,8 @@ services:
       ML_MODEL_DIR: /tmp/checks/models
       STORAGE_PARQUET_ROOT: /tmp/checks/parquet
       DB_URL: sqlite:////tmp/checks/data/verification.db
+      # The synthetic paper position must not depend on the clock (weekends, 09:15-15:00 gate).
+      PAPER_ENFORCE_SESSION: "false"
     volumes:
       - ./tests/docker_smoke.py:/checks/docker_smoke.py:ro
     depends_on:

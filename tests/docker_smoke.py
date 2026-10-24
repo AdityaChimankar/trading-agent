@@ -95,7 +95,8 @@ def main():
         page.on("pageerror", lambda error: failures.append(str(error)))
         # Serve an actual isolated API response to exercise Plotly rendering.
         page.route("**/api/v1/research/symbols/CHART?*", lambda route: route.fulfill(json=chart_fixture))
-        page.goto("http://frontend:8080", wait_until="networkidle")
+        # The research workspace is a hash route; the site root opens the overview.
+        page.goto("http://frontend:8080/#/research", wait_until="networkidle")
         expect(page.get_by_role("heading", name="Watchlist Bias", exact=True)).to_be_visible()
         expect(page.get_by_role("button", name="Scan entire watchlist", exact=True)).to_be_visible()
         page.get_by_text("API authentication", exact=True).click()
