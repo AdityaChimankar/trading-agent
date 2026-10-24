@@ -128,6 +128,16 @@ def cross_sectional(
 
 
 
+@app.command("ranking-lab")
+def ranking_lab(
+    symbols: list[str] = typer.Argument(None, help="Symbols (default: symbols_nifty500_plus.txt)"),
+    snapshots: str = typer.Option(None, help="Parquet cache for session snapshots (read if present)"),
+):
+    """Pre-registered cross-sectional variants with frozen validation selection; research only."""
+    from trading_agent.research.ranking_lab import main
+
+    main([*(symbols or []), *(["--snapshots", snapshots] if snapshots else [])])
+
 @app.command("ranker-trial")
 def ranker_trial(
     action: str = typer.Argument(..., help="start | pick | settle | status"),

@@ -117,6 +117,9 @@ trading-agent optimize strategy-lab RELIANCE --interval minute   # includes open
 # Cross-sectional ranking research (walk-forward, after costs, vs random picks)
 trading-agent optimize cross-sectional --interval minute             # --max-lag 240 for the paper's lags
 
+# Ranking lab: 60 pre-registered cross-sectional variants, selection frozen on validation
+trading-agent optimize ranking-lab --snapshots data/research/ranking_lab/snapshots.parquet
+
 # Prospective paper trial of the frozen ranker (scheduler runs pick 09:16 and settle 15:50)
 trading-agent optimize ranker-trial start                           # freezes config, universe, first session
 trading-agent optimize ranker-trial status

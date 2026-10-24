@@ -15,7 +15,7 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-24 (one-year data top-up, closing-auction fixes, out-of-sample ML scoring, ranker paper trial). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
+Last updated: 2026-10-24 (ranking lab: 60 cross-sectional variants; one-year data, closing-auction fixes, out-of-sample ML, ranker paper trial). Active branch: `unified-platform` (from `gemini`), not yet pushed or merged.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
@@ -53,6 +53,7 @@ Keep paper mode until those are evidenced.
 | Analytics | Net-of-cost performance, Sharpe/Sortino/drawdown/profit factor/expectancy/R, attribution | `analysis/performance.py` |
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
 | Analytics | U-shape remaining-volume forecast with out-of-sample check; router caps size at 5% of forecast remaining volume | `volume_insights.forecast_day_volume / evaluate_volume_forecast`, `/api/v1/analytics/volume/{s}/forecast-check` |
+| Research | Ranking lab: 60 pre-registered cross-sectional variants (fixed-sign gap/reversal/opening-drive ranks; RF/logit/HGB walk-forward; 09:15 or 09:45 entry; 10:15/12:00/15:15 exit; k 5/10/20); validation-only selection with a Bonferroni t over 60, frozen before holdout; rolling choose-best | `research/ranking_lab.py`, `trading-agent optimize ranking-lab` |
 | Research | Ranker paper trial: hashed frozen spec (config, universe, first session), pick after 09:15 bar (deadline 09:45), entry at the first bar after the pick, 15:15 exit, random book, missed sessions recorded, verdict fixed on the first 60 settled sessions | `research/ranker_trial.py`, `trading-agent optimize ranker-trial`, scheduler `ranker_trial_pick`/`ranker_trial_settle`, `/api/v1/analytics/cross-sectional/trial`, Analytics panel |
 | Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, 15:15 MIS exit, >= INR 10 crore liquidity filter, research gate, long/short list only when passed | `research/cross_sectional.py`, `trading-agent optimize cross-sectional`, `/api/v1/analytics/cross-sectional`, Analytics panel |
 | Research | Strategy search: 2,508 entry x bar-size x exit candidates; selection on development/validation only (Bonferroni clustered t, session bootstrap, symbol stability, always-long/short/random baselines, 10+2x2 bps) frozen to a hashed run file before holdout; ML predicted walk-forward (expanding, refit every 20 sessions after 60), never on its own training sessions; rolling walk-forward over exit policies and all candidates including ML; immutable runs with git revision, versions and data fingerprints | `research/strategy_search.py`, `trading-agent optimize strategy-search` |
@@ -75,6 +76,7 @@ Keep paper mode until those are evidenced.
 | P0 | Re-run research on corrected timestamps | earlier walk-forward, outcome-validation and outcome-model results were computed on history whose legacy sessions were shifted 5h30m; rerun before relying on any of them |
 | P1 | Ingest Nifty 50 candles and run `orb` / `orb_gap` in Strategy Lab | NIFTY50 minute candles stored; profiles compared with baselines after costs on several symbols |
 | P0 | Run the ranker paper trial | started 2026-10-24: first session 2026-10-26, spec `da100b7c01949a78...` in `data/research/ranker_trial/spec.json`, frozen at `449418e`. Needs the scheduler from this branch (the main checkout is on `rework`, which lacks the trial) running each session with a valid Kite token, then the verdict on the first 60 settled sessions (mean net > 0, t >= 2, above random) recorded here. Every historical window has been inspected, so only these sessions are clean evidence |
+| P1 | Second trial arm for `hgb_lags` k10 | ranking lab validation best (+16.8 bps/day, t 2.73; holdout +13.3, t 2.51, 66% day win) run prospectively beside the frozen RF arm; both verdicts judged against a family-wise bar for two arms |
 | P1 | Cross-sectional ranking on longer history | daily or intraday history long enough for `--max-lag 240`; point-in-time Nifty 500 membership to remove survivorship bias |
 | P1 | Exchange holiday calendar | session gates and scheduler skip NSE holidays and special sessions |
 | P1 | Finish MUI conversion | remaining `.btn` and legacy markup in older pages replaced by MUI components |
@@ -101,6 +103,39 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-24: Ranking lab (60 cross-sectional variants)
+
+**Request.** Try more methods and variations for a better win rate. Variants are ranked by net return after costs, because the strategy search showed that high win rates are easy to buy at negative expectancy.
+
+**Method.** `research/ranking_lab.py` (see the User Guide). Run `20261024T073205Z-ef51dc21`: 495 symbols, 192 common test days, validation 2026-01-13 to 2026-07-03 (115 days), holdout 2026-07-06 to 2026-10-23 (77 days), 15 bps per position, Bonferroni t ≥ 3.14 over 60 variants.
+
+**Validation.** 18 of 60 variants were positive net; 38 of 60 positive gross. **None passed the Bonferroni bar.**
+
+| Variant | Net bps/day | t | Day win | Position win |
+|---|---|---|---|---|
+| `hgb_lags` 09:15–15:15, k10 (validation best) | +16.8 | 2.73 | 56.5% | 55.2% |
+| `hgb_lags` k5 | +15.5 | 1.97 | 53.9% | 54.1% |
+| `gap_reversal` 09:15–15:15, k5 | +12.8 | 1.12 | 57.4% | 52.2% |
+| `hgb_lags` k20 (highest day win rate) | +10.2 | 2.44 | 60.9% | 53.3% |
+| `logit_lags` k10 | +10.0 | 1.42 | 52.2% | 53.4% |
+
+The opening-drive (09:45 entry) variants and the momentum signs did not make the top 15.
+
+**Holdout** (frozen set only):
+
+- `hgb_lags` k10: **+13.3 bps/day, t 2.51, day win 66.2%, position win 54.2%**.
+- Reference `rf_lags` k10 (the trial config): +14.1 bps/day, t 2.20, day win 59.7%.
+
+**Rolling choose-best** over all test days: +2.9 bps/day, t 0.49. The chosen variant flipped between folds (+26, +0.2, −22.6, −11.0, +20.8, +4.7, +1.2 bps), so picking a variant from the data is not yet reliable.
+
+**Reading.**
+
+- Lag-feature models (gradient boosting, then logit and random forest) and overnight-gap reversal are the consistent winners. Gradient boosting on per-session ranked lags has the best validation result and the best holdout win rate.
+- It did not clear the multiple-testing bar.
+- The holdout coincides with the post-closing-auction period, where the reference RF did as well. Part of the holdout strength is therefore that period, not the method.
+
+**Decision.** Nothing changes in live trading or in the frozen trial. The candidate for a second prospective arm is `hgb_lags` k10; its verdict would need a family-wise bar across both arms.
 
 ### 2026-10-24: One year of data, closing-auction fixes, out-of-sample ML, ranker paper trial
 

@@ -73,6 +73,16 @@ The research gate needs at least 60 test days, a positive net mean, a t-stat of 
 
 Run it from **Analytics → Run evaluation** or `trading-agent optimize cross-sectional`. Daily bars come from stored intraday candles, and sessions without a 09:15 bar or a 15:15 price are skipped. All features use the 15:15 price as the day's close: since NSE's closing auction (3 August 2026) about 40% of stocks have no minute bars after 15:14. The paper's longest lag is 240 days; `--max-lag 10` is the default because most stored history is shorter. Survivorship bias (today's watchlist omits delisted stocks) makes results look better than reality.
 
+**Ranking lab (research).** `trading-agent optimize ranking-lab` (module `research/ranking_lab.py`) tries 60 variants of the cross-sectional idea, fixed before the run:
+
+- **Rule ranks with a sign fixed in advance** (nothing is fitted): overnight-gap reversal and momentum, previous-day and 5-day reversal, opening-drive (09:15–09:45) momentum and reversal, and drive times opening volume shock.
+- **Walk-forward models:** random forest, logistic regression and gradient boosting, on the lag features alone or with gap, drive and volume shock.
+- **Settings:** entry at 09:15 or 09:45; exit at 10:15, 12:00 or 15:15; books of the top and bottom 5, 10 or 20.
+
+Every variant is a long/short book at 15 bps per position, on the same test days. Selection uses the first 60% of test days only: a positive mean and a daily t-stat above the Bonferroni bar for 60 variants (3.14). The shortlist, the validation-best and the trial's reference configuration are written to `runs/<id>/selection.json` before any holdout statistic is computed. A rolling choose-best (trailing 60 test days, apply the next 20) measures the selection procedure itself. Day and position win rates are reported, but variants are ranked by mean net return.
+
+`--snapshots FILE` caches the per-session price snapshots, so later runs skip reading the minute store.
+
 **Ranker paper trial (prospective).** Every historical window has been inspected, so the only clean evidence for the ranker is sessions that have not happened yet. `trading-agent optimize ranker-trial start` freezes the defaults, the universe and the first session (the next one; a start in the past is refused) in `data/research/ranker_trial/spec.json`, with a hash that is checked on every read. Each session then gets two records under `sessions/`, each written once:
 
 1. **Pick** (scheduler, 09:16:30 IST, deadline 09:45). It fetches today's minute candles for the liquid names, trains on the preceding 60 labelled sessions and records the top and bottom 10 with the pick time. Only today's open is used; later bars are blanked.
@@ -466,6 +476,7 @@ docker compose down
 | `trading-agent optimize strategy-search [SYMBOL...] [--no-ml]` | Frozen-selection strategy search with baselines and walk-forward |
 | `trading-agent optimize cross-sectional [SYMBOL...]` | Cross-sectional ranking walk-forward vs random picks |
 | `trading-agent optimize ranker-trial start / pick / settle / status` | Prospective paper trial of the frozen ranker |
+| `trading-agent optimize ranking-lab [SYMBOL...] [--snapshots FILE]` | 60 pre-registered cross-sectional variants, selection frozen on validation |
 
 Always use `--help` on a command before a long or quota-consuming run.
 
