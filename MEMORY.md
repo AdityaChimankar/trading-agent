@@ -136,6 +136,8 @@ The smoke stack then passed: migrations, Parquet replay and compaction, nginx pr
 
 `alembic check` still reports legacy index-name and nullability drift in this older database (a fresh database is clean); a migration for it is open work.
 
+**Rebuilt again from `adfa557`** (adds `data-check`, `backfill --universe`): app `dcfcebec8d50`, tagged `unified-platform` and `latest`. The previous images are kept as `unified-4494f3f`. There was no new migration (head still `003`), so the stack was recreated directly: API ready, frontend 200, scheduler trial jobs registered, and `data-check --universe nifty500` run inside the container (494 up to date, 7 not listed by Kite).
+
 ### 2026-10-24: Second paper-trial arm (gradient boosting)
 
 **Change.**
