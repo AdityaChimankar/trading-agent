@@ -31,7 +31,7 @@ from trading_agent.core.exceptions import (
     KiteAPIError,
     RateLimitError,
 )
-from trading_agent.ingest.coverage import INTERVAL_MINUTES
+from trading_agent.ingest.coverage import INTERVAL_MINUTES, record_fetch
 from trading_agent.core.circuit_breaker import CircuitBreakerConfig, get_circuit_breaker
 from trading_agent.ingest.kite_auth import get_kite_auth
 from trading_agent.ingest.instrument_lookup import get_instrument_lookup
@@ -242,8 +242,11 @@ class HistoricalFetcher:
 
             current_start = current_end + timedelta(seconds=1)
 
+        covered_until = min(to_date, datetime.now(timezone.utc))
         if not all_candles:
             logger.warning("no_historical_data", symbol=symbol, interval=interval)
+            if store:
+                record_fetch(symbol, interval, from_date, covered_until)
             return pd.DataFrame()
 
         # Convert to DataFrame
@@ -274,6 +277,8 @@ class HistoricalFetcher:
         # Store to Parquet
         if store:
             self.parquet.write_candles(df, symbol, interval)
+            # Kite returned everything it has for this window, even for sessions a thin stock never traded.
+            record_fetch(symbol, interval, from_date, covered_until)
 
         logger.info("historical_fetch_complete", symbol=symbol, interval=interval, rows=len(df))
         return df
@@ -315,10 +320,10 @@ class HistoricalFetcher:
         return results
 
     def stored_days(self, symbol: str, interval: str) -> tuple[set[date], set[date]]:
-        """IST session dates stored for a symbol: (complete, any). See ``ingest.coverage``."""
-        from trading_agent.ingest.coverage import stored_days
+        """IST sessions for a symbol: (complete or fully fetched, any with bars). See ``ingest.coverage``."""
+        from trading_agent.ingest.coverage import covered_days
 
-        return stored_days(self.parquet, symbol, interval)
+        return covered_days(self.parquet, symbol, interval)
 
     @staticmethod
     def missing_ranges(
@@ -374,7 +379,12 @@ class HistoricalFetcher:
             Dict of symbol -> rows fetched
         """
         to_date = datetime.now(timezone.utc)
-        from_date = to_date - timedelta(days=days if days is not None else years * 365)
+        span = days if days is not None else years * 365
+        from_date = to_date - timedelta(days=span)
+        if missing_only:  # start at a session boundary, the same window data-check requires
+            from trading_agent.ingest.coverage import window_start
+
+            from_date = datetime.combine(window_start(span), datetime.min.time(), IST_ZONE).astimezone(timezone.utc)
 
         stored, sessions = {}, set()
         if missing_only:

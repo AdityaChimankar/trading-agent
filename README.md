@@ -118,7 +118,7 @@ Candles are stored as Parquet under `STORAGE_PARQUET_ROOT` (default `data/parque
 - partial sessions, such as a morning the live ticker recorded before it stopped;
 - weekdays after the newest stored session.
 
-Weekdays that no symbol has (holidays) are skipped. A session counts as complete with the 09:15 bar and a bar at 15:14 or later: since NSE's closing auction (3 August 2026) about 40% of stocks have no continuous-trading bars after 15:14. Without `--missing-only`, `backfill` re-requests the whole range; overlapping candles replace stored ones by timestamp, so nothing is duplicated.
+Weekdays that no symbol has (holidays) are skipped. A session counts as complete with the 09:15 bar and a bar at 15:14 or later: since NSE's closing auction (3 August 2026) about 40% of stocks have no continuous-trading bars after 15:14. Thinly traded stocks often have no trade at 09:15 or near 15:14, so their bars never look complete. Every successful fetch therefore records the window it covered in `data/ingest_coverage/<interval>/<SYMBOL>.json`, and a session that was fully fetched counts as covered even with sparse or no bars. Thin stocks are not re-requested on every run. Without `--missing-only`, `backfill` re-requests the whole range; overlapping candles replace stored ones by timestamp, so nothing is duplicated.
 
 **How long it takes.** Requests are paced at about 2.5 a second.
 

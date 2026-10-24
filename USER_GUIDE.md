@@ -357,7 +357,7 @@ trading-agent backfill --universe all --interval minute --days 30 --missing-only
   - **holes:** sessions missing or incomplete inside the window;
   - **empty:** no data at all.
 
-  A session is complete with the 09:15 bar and a bar at 15:14 or later (closing-auction stocks stop at 15:14). Today counts only after 15:30.
+  A session is complete with the 09:15 bar and a bar at 15:14 or later (closing-auction stocks stop at 15:14). A session fully fetched from Kite also counts, even with sparse or no bars: thin stocks often have no trade at 09:15 or near 15:14. Each fetch records its window in `data/ingest_coverage/<interval>/<SYMBOL>.json`. Today counts only after 15:30.
 - **Not listed by Kite:** symbols missing from Kite's instrument list (renamed, delisted, REITs). Nothing can be fetched for them, so they are shown apart and do not fail the check.
 - **Also:** the Kite token, the ticker heartbeat, and each trial arm's picks, settlements and missed sessions.
 

@@ -257,7 +257,11 @@ def data_check(
     token: bool = typer.Option(True, help="Also check the Kite token (one API call)"),
     show: int = typer.Option(15, help="Problem symbols to list"),
 ):
-    """Report whether stored candles, the Kite token, the ticker and the trial are up to date."""
+    """Report whether stored candles, the Kite token, the ticker and the trial are up to date.
+
+    A session counts when its bars are complete or it was fully fetched from Kite (thin stocks
+    often have no trade at 09:15 or near 15:14).
+    """
     from trading_agent.ingest.coverage import check
 
     selected = _select_symbols(symbols, universe, interval)
