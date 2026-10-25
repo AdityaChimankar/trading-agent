@@ -15,11 +15,11 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-25 (data-check and fetch manifest, decision outcomes, LLM model tiers, ranker paper trial). Active branch: `unified-platform`, merged with `origin/main` and pushed for a pull request into `main`.
+Last updated: 2026-10-25 (worst-case daily loss, fresh-price entry risk, stop checks, trade replay). Active branch: `risk-hardening`, from `main` after PR #2, pushed for a pull request into `main`.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
-**Verified** (2026-10-25, on the pull-request head): 553 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, both offline browser smokes passed, and the Docker smoke stack passed on the current images. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
+**Verified** (2026-10-25, on `risk-hardening` at `5c0f3ac`): 593 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, both offline browser smokes passed, and the Docker smoke stack passed on the rebuilt images. The trade-replay panel was also driven in a browser against the real API and stored candles at desktop and phone width. Before that (on the PR #2 head): 553 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, both offline browser smokes passed, and the Docker smoke stack passed on the current images. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
 
 **Not verified:**
 
@@ -175,6 +175,8 @@ The smoke stack then passed: migrations, Parquet replay and compaction, nginx pr
 **Rebuilt again from `adfa557`** (adds `data-check`, `backfill --universe`): app `dcfcebec8d50`, tagged `unified-platform` and `latest`. The previous images are kept as `unified-4494f3f`. There was no new migration (head still `003`), so the stack was recreated directly: API ready, frontend 200, scheduler trial jobs registered, and `data-check --universe nifty500` run inside the container (494 up to date, 7 not listed by Kite).
 
 **Rebuilt again from `c2d4d6d`** (adds the fetch manifest, the aligned windows, decision outcomes and LLM model tiers): app `ddd202c66e31`, tagged `unified-platform` and `latest`. The previous images are kept as `unified-adfa557`. The migration head is still `003`. Stack recreated: API ready, frontend 200; the scheduler registered `decision_outcomes_cycle` (15:55) and both trial jobs; `/api/v1/analytics/decision-outcomes` returns 200; both arms are collecting from 2026-10-26.
+
+**Rebuilt again from `5c0f3ac`** (`risk-hardening`: worst-case daily loss, fresh-price entry risk, stop checks, trade replay): app `d04512552406`, frontend `b54427ee7ed5`, tagged `risk-hardening` and `latest`. The previous images are kept as `unified-c2d4d6d`. No migration (head still `003`), so the stack was recreated directly with ticker and scheduler: API ready, frontend 200, all 15 scheduler jobs registered including both trial jobs and `decision_outcomes_cycle`, both arms `collecting`, the ledger reports `daily_risk_headroom`, and `POST /api/v1/analytics/trade-replay` answers on real candles inside the container. The trial code is unchanged, so the frozen specs still apply to the first session on 2026-10-26.
 
 ### 2026-10-24: Second paper-trial arm (gradient boosting)
 
