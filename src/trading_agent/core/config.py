@@ -104,6 +104,9 @@ class PaperRiskSettings(BaseSettings):
     max_trade_risk_pct: float = Field(default=0.02, gt=0, le=1)
     max_daily_loss_pct: float = Field(default=0.03, gt=0, le=1)
     max_drawdown_pct: float = Field(default=0.15, gt=0, le=1)
+    # A stop nearer than this fraction of the entry sits inside normal spread
+    # and noise, and inflates quantity under fixed-risk sizing: refused.
+    min_stop_distance_pct: float = Field(default=0.0005, ge=0, lt=1)
     # Intraday session discipline (IST). No new entries after the cutoff; every
     # open position is squared off at square_off_time, like broker MIS.
     # Session gates (cutoff, open, weekend) can be disabled for back-office
@@ -129,6 +132,9 @@ class ExecutionSettings(BaseSettings):
     # Also cap at this share of the forecast volume still to trade today.
     max_remaining_volume_pct: float = Field(default=0.05, gt=0, le=1)
     max_participation_pct: float = Field(default=0.01, gt=0, le=0.25)
+    # Entry risk is measured from the worse of the plan price and the latest
+    # stored candle no older than this. Live entries need such a candle.
+    max_quote_age_seconds: int = Field(default=900, ge=60)
 
 
 class MonitoringSettings(BaseSettings):

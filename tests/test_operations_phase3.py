@@ -358,3 +358,68 @@ def test_order_timestamps_carry_utc_offset(client):
     client.post("/api/v1/execution/enter", json=ENTRY)
     created = client.get("/api/v1/execution/orders").json()[0]["created_at"]
     assert created.endswith("+00:00")
+
+
+def _stale_candles(store, symbol, close, minutes_old):
+    end = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=minutes_old)
+    ts = pd.date_range(end=end, periods=5, freq="min")
+    df = pd.DataFrame({"timestamp": ts, "open": close, "high": close + 1, "low": close - 1, "close": close,
+                       "volume": 1000, "oi": 0})
+    store.write_candles(df, symbol, get_settings().storage.candle_interval)
+
+
+def test_entry_risk_and_fill_use_a_fresh_price_when_it_is_worse(client):
+    _candles(client.store, "TEST", 104.0)
+    filled = client.post("/api/v1/execution/enter", json=ENTRY).json()
+    assert filled["fill_price"] == 104.1  # the market plus slippage, not the 100 plan price
+
+
+def test_stale_price_is_ignored(client):
+    _stale_candles(client.store, "TEST", 104.0, minutes_old=60)
+    assert client.post("/api/v1/execution/enter", json=ENTRY).json()["fill_price"] == 100.1
+
+
+@pytest.mark.parametrize("close, message", [(94.0, "through the stop"), (111.0, "past the target")])
+def test_price_through_the_stop_or_target_blocks_entry(client, close, message):
+    _candles(client.store, "TEST", close)
+    response = client.post("/api/v1/execution/enter", json=ENTRY)
+    assert response.status_code == 409 and message in response.json()["detail"]
+    assert client.get("/api/v1/positions/").json() == []
+
+
+def test_fresh_price_risk_is_checked_against_limits(client):
+    # 2% trade risk on 10L = 20,000. At the plan price: 900 x 17 = 15,300. At 106: 900 x 23 = 20,700.
+    _candles(client.store, "TEST", 106.0)
+    entry = ENTRY | {"quantity": 900, "stop_loss": 83.0, "take_profit": 130.0}
+    response = client.post("/api/v1/execution/enter", json=entry)
+    assert response.status_code == 409 and "risk limit" in response.json()["detail"]
+
+
+def test_live_entry_needs_a_fresh_price(client):
+    from trading_agent.execution.router import OrderRouter
+
+    calls = []
+
+    class LiveRecording:
+        mode, slippage_bps = "live", 0.0
+
+        async def execute(self, order):
+            calls.append(order)
+
+    with pytest.raises(Exception, match="fresh price"):
+        asyncio.run(OrderRouter(LiveRecording()).enter(symbol="TEST", side="BUY", quantity=1, reference_price=100,
+                                                       stop_loss=95, take_profit=None))
+    assert calls == []
+
+
+def test_worst_case_daily_loss_blocks_a_new_entry(client):
+    # Daily limit 3% of 10L = 30,000. Each trade risks 18,000 (under the 20,000 per-trade cap).
+    first = ENTRY | {"quantity": 1000, "stop_loss": 82.0, "take_profit": 130.0}
+    assert client.post("/api/v1/execution/enter", json=first).status_code == 200
+    response = client.post("/api/v1/execution/enter", json=first | {"symbol": "OTHER"})
+    assert response.status_code == 409 and "worst-case daily loss" in response.json()["detail"]
+
+
+def test_stop_inside_the_spread_is_refused(client):
+    response = client.post("/api/v1/execution/enter", json=ENTRY | {"stop_loss": 99.99})
+    assert response.status_code == 409 and "too tight" in response.json()["detail"]

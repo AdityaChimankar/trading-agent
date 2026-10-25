@@ -90,7 +90,7 @@ No inference path retrains or overwrites models. No scan makes broker requests, 
 | Module | Responsibility |
 |---|---|
 | `risk/controls.py` | Kill switch, session gates, trade cap, square-off, JSONL audit |
-| `risk/ledger_guard.py` | Realized equity, daily-loss and drawdown state inside `BEGIN IMMEDIATE` |
+| `risk/ledger_guard.py` | Realized equity, daily-loss, worst-case daily risk headroom and drawdown state inside `BEGIN IMMEDIATE` |
 | `analysis/performance.py` | Closed-trade rows net of order or modelled charges; summary, attribution, equity curve |
 | `analysis/volume_insights.py` | Time-of-day RVOL, VWAP, liquidity tier, participation-capped size, agreement with scan |
 | `analysis/technical_summary.py` | Groww-style indicator votes and verdict |

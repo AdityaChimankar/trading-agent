@@ -47,8 +47,9 @@ Keep paper mode until those are evidenced.
 | Decisions | Rule agent is the validated path; LLM and ML run in parallel in separate tables and never override it | `strategy/`, `signals` / `llm_signals` / `ml_signals` |
 | Decisions | Full-universe research scan, watchlist bias, contradictions, Top Opportunity by conviction and room to S/R | `analysis/research_jobs.py`, `api/routers/legacy_ui.py` |
 | Risk | ATR stop/target/sizing, portfolio exposure/risk caps, realized daily-loss and drawdown gates | `risk/`, `risk/ledger_guard.py` |
+| Risk | Worst-case daily loss (realized P&L + every open stop + the new risk within `PAPER_MAX_DAILY_LOSS_PCT`), enforced at entry and in scan sizing; stops nearer than `PAPER_MIN_STOP_DISTANCE_PCT` refused; scan stops rounded to the Kite tick away from entry (ideas from the day-trader-skill pack) | `ledger_guard.daily_risk_headroom`, `api/routers/positions.py`, `research_engine.size_opportunities`, `position_sizing.round_to_tick` |
 | Risk | Kill switch (persisted, fails closed), session gates (09:15 / 15:00 cutoff / weekends), trade cap, optional one entry per symbol per day, 15:15 square-off, JSONL audit | `risk/controls.py`, scheduler `square_off_cycle` |
-| Execution | Order router: risk checks before any order, paper fills with slippage, live Kite MARKET/MIS behind double opt-in, reconciliation | `execution/router.py`, `execution/reconcile.py` |
+| Execution | Order router: risk checks before any order at the worse of the plan price and a fresh stored candle (`EXECUTION_MAX_QUOTE_AGE_SECONDS`; refused through the stop or target; live needs one), paper fills with slippage, live Kite MARKET/MIS behind double opt-in, reconciliation | `execution/router.py`, `execution/reconcile.py` |
 | Execution | Zerodha intraday cost model | `execution/costs.py` |
 | Analytics | Net-of-cost performance, Sharpe/Sortino/drawdown/profit factor/expectancy/R, attribution | `analysis/performance.py` |
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |

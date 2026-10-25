@@ -166,7 +166,7 @@ Status: accepted, 2026-10-23
 
 Every entry and exit goes through `execution/router.py`. On entry, the router checks the participation cap, then reserves the position through the same serialized ledger transaction as manual entries. That transaction applies the kill switch, session gates, trade cap and ledger limits. Only then does it send the order, and it rewrites the position at the fill price. A broker rejection deletes the reservation. Risk checks therefore never run after a real fill.
 
-Paper mode is the default and fills at the reference price moved by `EXECUTION_SLIPPAGE_BPS`. Live mode (Kite MARKET, product MIS) requires both `EXECUTION_MODE=live` and `EXECUTION_LIVE_CONFIRMATION=I-ACCEPT-REAL-MONEY-RISK`. Orders persist in the `orders` table (migration 003). Reconciliation compares ledger and broker net quantities.
+Paper mode is the default and fills at the reference price moved by `EXECUTION_SLIPPAGE_BPS`; the reference is the latest stored candle when it is no older than `EXECUTION_MAX_QUOTE_AGE_SECONDS`, and entry risk is reserved at the worse of that price and the plan price. Live mode (Kite MARKET, product MIS) requires both `EXECUTION_MODE=live` and `EXECUTION_LIVE_CONFIRMATION=I-ACCEPT-REAL-MONEY-RISK`. Orders persist in the `orders` table (migration 003). Reconciliation compares ledger and broker net quantities.
 
 Consequences: the router is the only code allowed to call a broker order API. Partial fills, cancels and reconnect replay are not yet handled; see [READINESS.md](READINESS.md#gates-before-institutional-or-unattended-live-use).
 

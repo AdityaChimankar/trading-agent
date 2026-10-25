@@ -28,6 +28,7 @@ class InstrumentLookup:
         self._df: pd.DataFrame | None = None
         self._symbol_to_token: dict[str, int] = {}
         self._token_to_symbol: dict[int, str] = {}
+        self._symbol_to_tick: dict[str, float] = {}
 
     def load(self, force_refresh: bool = False) -> pd.DataFrame:
         """Load instruments from cache or download."""
@@ -103,6 +104,10 @@ class InstrumentLookup:
         self._token_to_symbol = dict(
             zip(eq_df["instrument_token"], eq_df["tradingsymbol"], strict=False)
         )
+        if "tick_size" in eq_df:
+            self._symbol_to_tick = dict(
+                zip(eq_df["tradingsymbol"], eq_df["tick_size"].astype(float), strict=False)
+            )
 
     def _save_cache(self) -> None:
         """Save instruments to cache."""
@@ -139,6 +144,21 @@ class InstrumentLookup:
         if not row.empty:
             return int(row.iloc[0].get("lot_size", 1))
         return 1
+
+    def get_tick_size(self, symbol: str) -> float | None:
+        """Exchange tick size from the cached instrument dump; never downloads."""
+        if self._df is None:
+            if not self.cache_path.exists():
+                return None
+            try:
+                self._df = pd.read_csv(self.cache_path, compression="gzip")
+                self._build_indexes()
+            except Exception as e:
+                logger.warning("instruments_cache_corrupt", error=str(e))
+                self._df = None
+                return None
+        tick = self._symbol_to_tick.get(symbol)
+        return tick if tick is not None and tick > 0 else None
 
     def get_exchange_token(self, symbol: str) -> int | None:
         """Get exchange token for a symbol."""

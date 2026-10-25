@@ -259,7 +259,7 @@ def test_completed_scan_sizes_against_final_ledger_and_respects_loss_blocks(tmp_
     limits = PaperRiskSettings(max_single_position_pct=.05)
     monkeypatch.setattr(jobs, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path, paper=limits))
     ledger = {"fingerprint": "original", "realized_equity": 200000, "positions": [],
-              "entries_allowed": True, "block_reason": None}
+              "entries_allowed": True, "block_reason": None, "daily_risk_headroom": 6000}
     monkeypatch.setattr(jobs, "read_ledger_state", lambda *args: ledger)
     monkeypatch.setattr(jobs, "model_for_research", lambda: SimpleNamespace(status="loaded", warning=None))
     monkeypatch.setattr(jobs, "estimate", lambda *args: {"status": "unqualified"})
@@ -278,3 +278,21 @@ def test_completed_scan_sizes_against_final_ledger_and_respects_loss_blocks(tmp_
     assert result["effective_capital"] == 100000
     assert result["rows"][0]["plan"]["position_value"] == (0 if blocked else 5000)
     assert result["rows"][0]["plan"]["blocked"] is blocked
+
+
+def opened(ident, risk):
+    # 10 shares at 100, stop placed so the stop loss equals `risk`.
+    return {"id": ident, "symbol": f"S{ident}", "action": "BUY", "status": "open", "entry_price": 100.0,
+            "position_size": 10, "position_value": 1000.0, "stop_loss": 100 - risk / 10, "risk_amount": risk}
+
+
+def test_daily_headroom_counts_realized_loss_and_every_open_stop():
+    limits = PaperRiskSettings(initial_capital=100000)  # 3% of session-start equity = 3000
+    assert guard.ledger_state([], limits, NOW)["daily_risk_headroom"] == 3000
+    result = guard.ledger_state([closed(1, -1500), opened(2, 500), opened(3, 400)], limits, NOW)
+    assert result["entries_allowed"]  # realized loss alone is under the limit
+    assert result["open_risk"] == 900
+    assert result["daily_risk_headroom"] == pytest.approx(600)
+    # A win today adds room; losses past the limit floor it at zero.
+    assert guard.ledger_state([closed(1, 1000)], limits, NOW)["daily_risk_headroom"] == 4000
+    assert guard.ledger_state([closed(1, -2900), opened(2, 500)], limits, NOW)["daily_risk_headroom"] == 0

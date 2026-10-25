@@ -4,7 +4,8 @@ Entry order of operations (the part that matters with real money):
 
 1. Session controls (kill switch, cutoff, daily trade count) are checked.
 2. The position is reserved through the same risk-checked ledger path manual
-   paper entries use, under the SQLite write lock, at the reference price.
+   paper entries use, under the SQLite write lock, at the worse of the
+   reference price and a fresh stored price (live entries require one).
    A risk rejection therefore happens BEFORE anything reaches a broker.
 3. The order is sent. A fill rewrites the reserved position at the actual
    fill price; a rejection removes the reservation.
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -145,10 +147,27 @@ class OrderRouter:
                     reason: str | None = None) -> dict:
         from trading_agent.api.routers.positions import PositionCreate, create_position
 
-        await self._check_participation(symbol, quantity, reference_price)
+        # A plan priced earlier must not understate risk after the market moved:
+        # measure from the worse of the plan price and a fresh stored price.
+        fresh = await fresh_price(symbol)
+        if fresh is None and self.mode == "live":
+            raise HTTPException(409, (
+                f"No stored {symbol} price in the last {get_settings().execution.max_quote_age_seconds}s; "
+                "live entries need a fresh price"))
+        risk_price = reference_price
+        if fresh is not None:
+            direction = 1 if side == "BUY" else -1
+            if direction * (fresh - stop_loss) <= 0:
+                raise HTTPException(409, f"{symbol} last traded {fresh:g}, at or through the stop {stop_loss:g}; re-plan")
+            risk_price = max(reference_price, fresh) if direction > 0 else min(reference_price, fresh)
+            if take_profit is not None and direction * (take_profit - risk_price) <= 0:
+                raise HTTPException(409, f"{symbol} price {risk_price:g} is at or past the target {take_profit:g}; re-plan")
+            reference_price = fresh  # a market order fills at the market, not at the plan price
+
+        await self._check_participation(symbol, quantity, risk_price)
         # Step 2: reserve through the risk-checked ledger path (raises 409 on any limit).
         reserved = await create_position(PositionCreate(
-            symbol=symbol, action=side, entry_price=reference_price, quantity=quantity,
+            symbol=symbol, action=side, entry_price=risk_price, quantity=quantity,
             stop_loss=stop_loss, take_profit=take_profit, strategy=strategy,
         ))
         order = await self._new_order(position_id=reserved.id, symbol=symbol, side=side, quantity=quantity,
@@ -224,6 +243,24 @@ async def latest_price(symbol: str) -> float:
                                     get_settings().storage.candle_interval, 1)
     if frame.empty:
         raise HTTPException(409, f"No stored price for {symbol}")
+    return float(frame["close"].iloc[-1])
+
+
+async def fresh_price(symbol: str) -> float | None:
+    """Latest stored close no older than EXECUTION_MAX_QUOTE_AGE_SECONDS, else None."""
+    from trading_agent.storage.parquet_store import get_parquet_store
+
+    settings = get_settings()
+    try:
+        frame = await run_in_threadpool(get_parquet_store().read_latest, symbol,
+                                        settings.storage.candle_interval, 1)
+    except Exception:
+        return None
+    if frame.empty:
+        return None
+    age = datetime.now(UTC) - frame["timestamp"].iloc[-1].to_pydatetime()
+    if age > timedelta(seconds=settings.execution.max_quote_age_seconds):
+        return None
     return float(frame["close"].iloc[-1])
 
 

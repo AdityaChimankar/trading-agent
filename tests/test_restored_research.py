@@ -159,7 +159,7 @@ def test_scan_counts_all_symbols_and_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs_module, "model_for_research", lambda: SimpleNamespace(status="loaded", warning="test"))
     monkeypatch.setattr(jobs_module, "read_ledger_state", lambda *args: {
         "positions": [], "realized_equity": 100000, "fingerprint": "empty-book",
-        "entries_allowed": True, "block_reason": None,
+        "entries_allowed": True, "block_reason": None, "daily_risk_headroom": 3000,
     })
 
     def analyze(symbol, *args):
@@ -177,3 +177,27 @@ def test_scan_counts_all_symbols_and_errors(tmp_path, monkeypatch):
     assert snapshot["processed"] == 3 and snapshot["evaluated"] == 1
     assert len(snapshot["skipped"]) == 1 and len(snapshot["errors"]) == 1
     assert jobs.path.exists()
+
+
+def test_stops_snap_to_tick_away_from_entry_and_risk_follows():
+    rows = [candidate("LONG") | {"atr": 2.013}, candidate("SHORT", "SELL") | {"atr": 2.013}]
+    result = {r["symbol"]: r["plan"] for r in engine.size_opportunities(rows, 100000, [], PaperRiskSettings())}
+    assert result["LONG"]["stop_loss"] == 96.95 and result["LONG"]["take_profit"] == 106.1
+    assert result["SHORT"]["stop_loss"] == 103.05 and result["SHORT"]["take_profit"] == 93.9
+    assert result["LONG"]["risk_amount"] == pytest.approx(result["LONG"]["quantity"] * 3.05)
+    fine = engine.size_opportunities([candidate("LONG") | {"atr": 2.013}], 100000, [], PaperRiskSettings(),
+                                     tick_size=lambda symbol: 0.01)
+    assert fine[0]["plan"]["stop_loss"] == 96.98
+
+
+def test_stop_inside_the_spread_is_blocked():
+    rows = [candidate("TIGHT") | {"price": 1000.0, "atr": 0.1}]
+    plan = engine.size_opportunities(rows, 1000000, [], PaperRiskSettings())[0]["plan"]
+    assert plan["blocked"] and "too tight" in plan["block_reason"] and plan["quantity"] == 0
+
+
+def test_daily_headroom_caps_the_basket():
+    rows = [candidate(f"S{i}") for i in range(3)]  # stop distance 3: risk 3 a share
+    result = engine.size_opportunities(rows, 100000, [], PaperRiskSettings(), daily_risk_headroom=500)
+    assert sum(r["plan"]["risk_amount"] for r in result) <= 500
+    assert any("daily loss" in (r["plan"]["block_reason"] or "") for r in result)

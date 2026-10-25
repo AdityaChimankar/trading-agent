@@ -228,6 +228,9 @@ Every entry, whether from the dashboard, the paper book or the API, passes the s
 - Participation caps: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value, or above `EXECUTION_MAX_REMAINING_VOLUME_PCT` of the volume still forecast to trade today.
 
 The scheduler squares off every open position at `PAPER_SQUARE_OFF_TIME` (15:15). Each entry, exit, fill, rejection and halt is written to `data/controls/audit-YYYY-MM-DD.jsonl`.
+- Worst-case daily loss: today's realized P&L, minus every open position's risk at its stop, minus the new trade's risk, must stay inside `PAPER_MAX_DAILY_LOSS_PCT`.
+- Fresh price: risk is measured from the worse of the plan price and the latest stored candle no older than `EXECUTION_MAX_QUOTE_AGE_SECONDS`; an entry whose price is already through the stop or the target is refused, and live entries need such a candle.
+- Stop distance: a stop nearer than `PAPER_MIN_STOP_DISTANCE_PCT` of the entry is refused. Scan plans round stops to the instrument's tick, away from the entry.
 
 Paper fills move `EXECUTION_SLIPPAGE_BPS` (5 bps) against you. Net P&L subtracts modelled Zerodha intraday charges: brokerage, STT, exchange, SEBI, stamp duty and GST.
 
@@ -257,7 +260,8 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `PAPER_MAX_POSITIONS` | `10` | Open positions |
 | `PAPER_MAX_EXPOSURE_PCT` / `PAPER_MAX_RISK_PCT` | `0.50` / `0.06` | Aggregate notional and stop risk |
 | `PAPER_MAX_TRADE_RISK_PCT` / `PAPER_MAX_SINGLE_POSITION_PCT` | `0.02` / `0.10` | Per-trade risk and per-symbol notional |
-| `PAPER_MAX_DAILY_LOSS_PCT` / `PAPER_MAX_DRAWDOWN_PCT` | `0.03` / `0.15` | Realized loss limits |
+| `PAPER_MAX_DAILY_LOSS_PCT` / `PAPER_MAX_DRAWDOWN_PCT` | `0.03` / `0.15` | Realized loss limits; the daily limit also caps realized loss plus open and new stop risk |
+| `PAPER_MIN_STOP_DISTANCE_PCT` | `0.0005` | Refuse stops nearer than 0.05% of the entry |
 | `PAPER_MAX_TRADES_PER_DAY` | `20` | Daily entry cap |
 | `PAPER_ENTRY_CUTOFF` / `PAPER_SQUARE_OFF_TIME` | `15:00` / `15:15` | IST session discipline |
 | `PAPER_ENFORCE_SESSION` | `true` | `false` disables time gates (tests); the trade cap still applies |
@@ -269,6 +273,7 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `LLM_PROVIDER` | `mock` in code, `openrouter` in `.env.example` | `mock` makes no calls |
 | `LLM_API_KEY` / `OPENROUTER_API_KEY` / `LLM_MODEL` | empty / empty / `gpt-4o-mini` in code (`.env.example`: `google/gemini-2.0-flash-001`) | OpenRouter credentials and model id |
 | `LLM_QUICK_MODEL` / `LLM_DEEP_MODEL` | empty (use `LLM_MODEL`) | Cheap model for headline sentiment and setup checks; stronger model for LLM decisions |
+| `EXECUTION_MAX_QUOTE_AGE_SECONDS` | `900` | Oldest stored candle used as a fresh entry price |
 | `LLM_MIN_INTERVAL_SECONDS` / `LLM_MAX_RETRIES` | `4.5` / `4` | Throttling and 429 retries |
 | `MONITOR_PSI_WARN` / `MONITOR_PSI_DRIFT` | `0.1` / `0.25` | Drift thresholds per feature |
 | `MONITOR_DRIFT_FEATURES_TO_FALLBACK` | `3` | Drifted features that withdraw ML |
@@ -355,7 +360,7 @@ Keep separate databases per branch until schemas are checked; `data/trading_agen
 | `No data available` | Log in, `trading-agent ingest SYMBOL`, then `trading-agent storage-stats` |
 | Kite token rejected | `trading-agent login` again |
 | Playwright browser missing | `playwright install chromium`, or `python manual_login.py` |
-| Entry rejected with 409 | Read the reason: kill switch, after 15:00, weekend, trade cap, duplicate symbol, exposure, risk, daily loss, drawdown or participation |
+| Entry rejected with 409 | Read the reason: kill switch, after 15:00, weekend, trade cap, duplicate symbol, exposure, risk, daily loss (realized or worst case), drawdown, participation, stop too tight, or price already through the stop or target |
 | Entry rejected with 502 | The broker rejected the order; the reservation was removed. Check the audit log |
 | Sentiment calls return 429 | Raise `LLM_MIN_INTERVAL_SECONDS`; retries already honour `Retry-After` |
 | Drift monitor says "no baseline" | Run `python -m trading_agent.strategy.model_monitoring baseline` |

@@ -32,8 +32,9 @@ All entry paths (Dashboard, Paper operations, `POST /api/v1/execution/enter`) us
 1. kill switch: **Risk & execution → Engage kill switch** writes `data/controls/kill_switch.json`, which survives restarts. An unreadable file blocks entries; **Resume trading** clears it;
 2. session: no entries before 09:15 IST, after `PAPER_ENTRY_CUTOFF` (15:00) or at weekends. `PAPER_ENFORCE_SESSION=false` disables only these time gates;
 3. the daily trade cap (`PAPER_MAX_TRADES_PER_DAY`), and, when `PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY=true`, no second entry in a symbol already traded today (no re-entry after its stop or target);
-4. the participation cap: quantity × price must not exceed `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value;
-5. the paper-ledger limits inside one SQLite `BEGIN IMMEDIATE` transaction: duplicates, positions, exposure, stop risk, single-name cap, realized daily loss and drawdown.
+4. the entry price: the latest stored candle, if it is no older than `EXECUTION_MAX_QUOTE_AGE_SECONDS` (900), is the fresh price. Risk is measured from the worse of it and the plan price, and the paper fill starts from it. A fresh price at or through the stop or the target refuses the entry. Live entries need a fresh price;
+5. the participation cap: quantity × price must not exceed `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value;
+6. the paper-ledger limits inside one SQLite `BEGIN IMMEDIATE` transaction: stop distance (`PAPER_MIN_STOP_DISTANCE_PCT`), duplicates, positions, exposure, stop risk, single-name cap, realized daily loss, worst-case daily loss and drawdown.
 
 The router reserves the position, sends the order and then rewrites the position at the fill price. If the broker rejects the order, the reservation is deleted and the API returns 502. Exits always remain available.
 
@@ -177,7 +178,7 @@ After a validation completes, news is refreshed or a paper position changes, the
 
 Sizing uses 1.5×ATR stops, the requested reward/risk target, integer shares, the configured single-stock notional cap (10% by default) and the paper book's exposure/risk/position-count limits. Both directional lists share reservations. Short-selling leverage, sector/correlation limits, taxes, fees and execution slippage are not modeled in these plans. A score measures rule/model evidence, not probability of profit.
 
-`PAPER_MAX_SINGLE_POSITION_PCT=0.10` caps each symbol's notional. `PAPER_MAX_DAILY_LOSS_PCT=0.03` blocks new paper entries once the day's realized loss reaches 3% of IST session-start equity. `PAPER_MAX_DRAWDOWN_PCT=0.15` blocks entries at 15% realized drawdown from the ledger's peak, including previous sessions. These are fractions, not whole percentages. Existing positions can still be closed. The entry API checks the limits and inserts the position in one serialized SQLite transaction. Missing or invalid ledger evidence blocks entries; these limits do not measure unrealized losses or actual execution costs.
+`PAPER_MAX_SINGLE_POSITION_PCT=0.10` caps each symbol's notional. `PAPER_MAX_DAILY_LOSS_PCT=0.03` blocks new paper entries once the day's realized loss reaches 3% of IST session-start equity. `PAPER_MAX_DRAWDOWN_PCT=0.15` blocks entries at 15% realized drawdown from the ledger's peak, including previous sessions. The daily limit also applies to the worst case: today's realized P&L, minus the risk at the stop of every open position, minus the new trade's risk, must not pass it, so a day that has lost 2.5% with 1% open risk takes no new risk. These are fractions, not whole percentages. Existing positions can still be closed. The entry API checks the limits and inserts the position in one serialized SQLite transaction. Missing or invalid ledger evidence blocks entries; these limits do not measure unrealized losses or actual execution costs.
 
 Each scan allocation records a fingerprint of the paper ledger, session date and risk settings. A later change from any client blocks that old allocation and asks for a re-scan. The original research result remains available. Keep initial capital fixed for an existing ledger; changing it redefines historical risk.
 
@@ -621,7 +622,7 @@ If an in-process API restart reports that the previous research worker is still 
 
 ### Entry rejected
 
-A 409 names the blocking rule: kill switch, before 09:15, after the cutoff, weekend, daily trade cap, participation cap, duplicate symbol, exposure, stop risk, daily loss or drawdown. Check **Risk & execution → Trading controls**. A 502 means the broker rejected the order and the reservation was removed; the audit trail has the broker message.
+A 409 names the blocking rule: kill switch, before 09:15, after the cutoff, weekend, daily trade cap, participation cap, duplicate symbol, exposure, stop risk, daily loss (realized or worst case), drawdown, a stop too near the entry, or a fresh price already through the stop or the target. Check **Risk & execution → Trading controls**. A 502 means the broker rejected the order and the reservation was removed; the audit trail has the broker message.
 
 ### Sentiment 429 errors
 

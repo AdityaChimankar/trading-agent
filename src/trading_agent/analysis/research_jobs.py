@@ -144,7 +144,8 @@ class ResearchJobs:
             ledger = read_ledger_state()
             capital = max(0, min(options["capital"], ledger["realized_equity"]))
             sized = size_opportunities(rows, capital, ledger["positions"], get_settings().paper,
-                                       options["risk_pct"], options["reward_risk"], options.get("require_validated", True))
+                                       options["risk_pct"], options["reward_risk"], options.get("require_validated", True),
+                                       daily_risk_headroom=ledger["daily_risk_headroom"], tick_size=_tick_size)
             if not ledger["entries_allowed"]:
                 for row in sized:
                     row["plan"].update(blocked=True, block_reason=ledger["block_reason"],
@@ -164,6 +165,16 @@ class ResearchJobs:
                 self.save()
         finally:
             self.run_lock.release()
+
+
+def _tick_size(symbol):
+    """Tick from the cached Kite instrument dump; None (sizing assumes 0.05) when unknown."""
+    from trading_agent.ingest.instrument_lookup import get_instrument_lookup
+
+    try:
+        return get_instrument_lookup().get_tick_size(symbol)
+    except Exception:
+        return None
 
 
 _jobs = None

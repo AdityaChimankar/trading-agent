@@ -3,6 +3,7 @@
 All computations use one completed-candle frame per symbol. No broker orders,
 training, per-symbol backtests, or external AI calls run inside this engine.
 """
+import math
 from datetime import UTC, datetime, timedelta
 from datetime import time
 from zoneinfo import ZoneInfo
@@ -13,6 +14,7 @@ import pandas as pd
 from scipy.signal import find_peaks
 
 from trading_agent.core.config import get_settings
+from trading_agent.core.position_sizing import round_to_tick
 from trading_agent.core.signals import evaluate_signals
 from trading_agent.paths import SYMBOLS_TXT
 from trading_agent.strategy.research_features import FEATURES, ResearchModel, prepare_research_frame
@@ -145,7 +147,8 @@ def analyze_frame(symbol, frame, interval, model, mode, now, news=None):
     return row, df
 
 
-def size_opportunities(rows, capital, positions, limits, risk_pct=1.0, reward_risk=2.0, require_validated=False):
+def size_opportunities(rows, capital, positions, limits, risk_pct=1.0, reward_risk=2.0, require_validated=False,
+                       daily_risk_headroom=None, tick_size=None):
     """Rank once, then reserve across the whole bullish/bearish basket.
 
     Entry-cost notional, no short-sale leverage, no correlation claim. The
@@ -161,12 +164,21 @@ def size_opportunities(rows, capital, positions, limits, risk_pct=1.0, reward_ri
     used_value = sum(p["position_value"] for p in positions)
     used_risk = sum(p["risk_amount"] for p in positions)
     slots = max(0, limits.max_positions - len(positions))
+    # Worst case today: realized P&L and every open stop already count (ledger_guard).
+    daily_left = math.inf if daily_risk_headroom is None else daily_risk_headroom
     for row in ranked:
         entry, distance = row["price"], row["atr"] * 1.5
         sign = 1 if row["action"] == "BUY" else -1
         direction = row["action"] in {"BUY", "SELL"}
         stop = entry - sign * distance if direction else None
-        target = entry + sign * distance * reward_risk if direction else None
+        if direction and math.isfinite(distance) and distance > 0:
+            # Stop on the exchange tick, rounded away from the entry; risk follows the rounded stop.
+            tick = (tick_size(row["symbol"]) if tick_size else None) or 0.05
+            stop = round_to_tick(stop, tick, away_from=entry)
+            distance = abs(entry - stop)
+            target = round_to_tick(entry + sign * distance * reward_risk, tick)
+        else:
+            target = entry + sign * distance * reward_risk if direction else None
         reason = None
         if not direction:
             reason = "No directional hybrid signal"
@@ -185,15 +197,20 @@ def size_opportunities(rows, capital, positions, limits, risk_pct=1.0, reward_ri
             reason = "Portfolio position-count limit"
         elif stop <= 0 or target <= 0:
             reason = "Invalid price bracket"
-        risk_budget = max(0, min(capital * min(risk_pct / 100, limits.max_trade_risk_pct), capital * limits.max_risk_pct - used_risk))
+        elif distance < entry * limits.min_stop_distance_pct:
+            reason = f"Stop within {limits.min_stop_distance_pct:.2%} of entry: too tight to survive the spread"
+        risk_budget = max(0, min(capital * min(risk_pct / 100, limits.max_trade_risk_pct),
+                                 capital * limits.max_risk_pct - used_risk, daily_left))
         notional_budget = max(0, min(capital * limits.max_single_position_pct, capital * limits.max_exposure_pct - used_value, capital - used_value))
-        quantity = max(0, min(int(risk_budget / distance), int(notional_budget / entry))) if direction else 0
+        quantity = max(0, min(int(risk_budget / distance), int(notional_budget / entry))) if direction and distance > 0 else 0
         if not reason and (quantity == 0 or quantity * entry < 5000):
-            reason = "Insufficient capital or remaining portfolio risk/exposure"
+            reason = ("Worst-case daily loss limit: no risk budget left today" if daily_left < distance
+                      else "Insufficient capital or remaining portfolio risk/exposure")
         approved = quantity if not reason else 0
         if approved:
             used_value += approved * entry
             used_risk += approved * distance
+            daily_left -= approved * distance
             slots -= 1
         row["plan"] = {"entry_price": entry, "stop_loss": stop, "take_profit": target,
                        "quantity": approved, "position_value": approved * entry, "risk_amount": approved * distance,

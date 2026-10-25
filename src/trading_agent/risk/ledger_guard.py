@@ -88,8 +88,13 @@ def ledger_state(rows, limits, now=None):
     fingerprint = hashlib.sha256(json.dumps({
         "rows": rows, "limits": limits.model_dump(), "session_date": str(today),
     }, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False).encode()).hexdigest()
+    # Worst case for today: every open position stops out. New risk must fit what is left.
+    open_risk = sum(p["risk_amount"] for p in opened)
+    daily_risk_headroom = max(0.0, session_start_equity * limits.max_daily_loss_pct + daily - open_risk)
     return {"fingerprint": fingerprint, "entries_allowed": reason is None, "block_reason": reason,
             "realized_equity": equity, "daily_realized_pnl": daily,
+            "session_start_equity": session_start_equity, "open_risk": open_risk,
+            "daily_risk_headroom": daily_risk_headroom,
             "realized_drawdown_pct": drawdown * 100, "positions": opened,
             "accounting_basis": "realized_gross_entry_cost"}
 
