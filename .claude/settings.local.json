@@ -1,7 +1,0 @@
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://api.kie.ai/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "d38caba5299f0253641c23dc111ac1ac"
-    
-  }
-}
