@@ -140,6 +140,35 @@ def decision_outcomes(
     main(["--days", str(days), "--horizon", str(horizon), "--cost-bps", str(cost_bps)])
 
 
+@app.command("trade-replay")
+def trade_replay(
+    symbol: str = typer.Argument(..., help="Symbol with stored minute or 5-minute candles"),
+    side: str = typer.Option(..., help="BUY or SELL"),
+    entry: float = typer.Option(..., help="Entry price"),
+    stop: float = typer.Option(..., help="Stop price"),
+    target: float = typer.Option(..., help="Target price"),
+    at: str = typer.Option(None, help='Entry time, IST "YYYY-MM-DD HH:MM" (default: end of the latest stored bar)'),
+    replays: int = typer.Option(10_000, help="Simulated sessions"),
+    seed: int = typer.Option(19, help="Random seed; same seed, same numbers"),
+    sessions: int = typer.Option(60, help="Complete past sessions in the pool"),
+    cost_bps: float = typer.Option(14.0, help="Round-trip cost, incl. slippage"),
+    bar_minutes: int = typer.Option(None, help="1 or 5 (default: 1 when the 1-minute history is complete enough)"),
+    json_output: bool = typer.Option(False, "--json", help="Print JSON"),
+):
+    """Odds and a conclusion for one bracket's target, stop or neither by 15:15; research only."""
+    from trading_agent.research.trade_replay import main
+
+    argv = [symbol, "--side", side.upper(), "--entry", str(entry), "--stop", str(stop), "--target", str(target),
+            "--replays", str(replays), "--seed", str(seed), "--sessions", str(sessions), "--cost-bps", str(cost_bps)]
+    if at:
+        argv += ["--at", at]
+    if bar_minutes:
+        argv += ["--bar-minutes", str(bar_minutes)]
+    if json_output:
+        argv.append("--json")
+    raise typer.Exit(main(argv))
+
+
 @app.command("ranking-lab")
 def ranking_lab(
     symbols: list[str] = typer.Argument(None, help="Symbols (default: symbols_nifty500_plus.txt)"),

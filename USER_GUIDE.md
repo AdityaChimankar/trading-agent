@@ -83,6 +83,18 @@ Run it from **Analytics → Run evaluation** or `trading-agent optimize cross-se
 
 The scheduler scores the last 30 days at 15:55 on weekdays. See **Analytics → Decision outcomes**, or `GET /api/v1/analytics/decision-outcomes` (`POST …/run` re-scores). With `LLM_PROVIDER=mock` (the code default), stored `llm` signals come from the mock client, and the report says so.
 
+**Trade replay (research).** `trading-agent optimize trade-replay` (module `research/trade_replay.py`, after the day-trader-skill pack's Time Machine) asks how the rest of today could treat one bracket before you size it. On the Dashboard, **Position Sizing → Replay this plan** runs it for the shown plan; the API is `POST /api/v1/analytics/trade-replay`.
+
+- **Bars:** fixed, non-overlapping bars anchored at 09:15 IST (open first, high max, low min, close last). 1-minute bars are used when the 1-minute history has at least 90% as many usable sessions as the 5-minute one, so exits are checked minute by minute; otherwise 5-minute bars (`--bar-minutes` overrides). A session needs its 09:15 bar and at most 2% of its bars missing; a missing bar had no trade and is filled flat.
+- **Simulation:** filtered historical simulation with a stationary block bootstrap. Each past bar is divided by its session's volatility and the time-of-day volatility profile, then rescaled to today's volatility (today's bars before the entry, blended with the median of the last 10 sessions). Each of 10,000 replays (seed 19, repeatable) copies runs of consecutive bars from random past sessions at the same time of day (±10 minutes). Run length is random, with a mean chosen per stock from the data (Politis–White, capped at 60 minutes), so trends and volatility bursts inside a run survive.
+- **History:** the same percentage bracket entered at the same time on each of those real sessions. It is a base rate for the time of day, not for the signal.
+- **Exits:** the same as the outcome research. A bar that opens through the stop exits at that open, one that opens through the target exits at the target, a bar touching both counts as the stop, and anything still open exits at 15:15.
+- **Verdict:** weighs the target's R and costs. A 2R bracket with 14 bps of costs only has to hit the target first in about 1 of 3 replays that hit a side, plus the cost share.
+- **Conclusion:** the replay is rerun on 200 resamples of the session pool to get a 90% range of net R and of the target-first share. It reports `conclusive negative` or `conclusive positive` only when the pool has 40+ sessions, both ranges clear zero and break-even on the same side, and three checks agree in sign: single-bar draws, unscaled bars, and the real-session history. Otherwise it reports `inconclusive` with the failed checks. A positive is a recent base rate for this bracket at this time of day, not evidence that the signal has an edge. The status is shown on the Dashboard; it never blocks an entry.
+- **Entry time:** defaults to the end of the latest stored bar. After the last bar before 15:15 there is nothing left to replay, so after hours pass `--at` (CLI) or `entry_time` (API). At least 20 usable sessions are required.
+
+News, earnings and halts are missing, and dependence longer than a block is lost. The odds are not a win probability, not a prediction and not evidence of an edge.
+
 **LLM model tiers.** `LLM_QUICK_MODEL` serves the high-volume, low-stakes calls (headline sentiment and the setup check), and `LLM_DEEP_MODEL` serves LLM trading decisions. Both fall back to `LLM_MODEL`. This mirrors TradingAgents' quick/deep split, which keeps cost down without weakening the decision model.
 
 **Ranking lab (research).** `trading-agent optimize ranking-lab` (module `research/ranking_lab.py`) tries 60 variants of the cross-sectional idea, fixed before the run:
@@ -515,6 +527,7 @@ docker compose down
 | `trading-agent optimize cross-sectional [SYMBOL...]` | Cross-sectional ranking walk-forward vs random picks |
 | `trading-agent optimize ranker-trial start / pick / settle / status [--arm rf\|hgb\|all]` | Prospective paper trial of the frozen rankers (start needs one arm) |
 | `trading-agent optimize decision-outcomes [--days N] [--horizon MIN] [--cost-bps X]` | Score stored rule/ML/LLM signals on realised returns after costs |
+| `trading-agent optimize trade-replay SYMBOL --side BUY\|SELL --entry X --stop X --target X [--at "YYYY-MM-DD HH:MM"] [--replays N] [--seed N] [--sessions N] [--json]` | Simulated and historical odds of target first, stop first or neither by 15:15 for one bracket |
 | `trading-agent optimize ranking-lab [SYMBOL...] [--snapshots FILE]` | 60 pre-registered cross-sectional variants, selection frozen on validation |
 
 Always use `--help` on a command before a long or quota-consuming run.

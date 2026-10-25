@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -258,6 +260,43 @@ def decision_outcomes_run(days: int = 30, horizon: int = 60):
     if not 1 <= days <= 365 or not 5 <= horizon <= 375:
         raise HTTPException(400, "days must be 1-365 and horizon 5-375 minutes")
     return jsonable({"report": run(ScoreConfig(days=days, horizon_minutes=horizon))})
+
+
+class TradeReplayRequest(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
+    symbol: str = Field(min_length=1, max_length=20, pattern=r"^[A-Za-z0-9&_.-]+$")
+    side: Literal["BUY", "SELL"]
+    entry: float = Field(gt=0)
+    stop: float = Field(gt=0)
+    target: float = Field(gt=0)
+    entry_time: datetime | None = None  # naive = IST; default: end of the latest stored bar
+    replays: int = Field(default=10_000, ge=100, le=100_000)
+    seed: int = 19
+    sessions: int = Field(default=60, ge=20, le=1000)
+
+    @field_validator("symbol", "side", mode="before")
+    @classmethod
+    def upper(cls, value):
+        return value.strip().upper() if isinstance(value, str) else value
+
+
+@router.post("/analytics/trade-replay")
+def trade_replay(payload: TradeReplayRequest):
+    """Simulated and historical odds for one bracket over the rest of the session; research only."""
+    from fastapi import HTTPException
+
+    from trading_agent.research import trade_replay as tr
+
+    try:
+        frame, interval = tr.load_candles(payload.symbol)
+        at = payload.entry_time or tr.default_entry_time(frame, interval)
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=ZoneInfo(tr.IST))
+        plan = tr.Plan(payload.symbol, payload.side, payload.entry, payload.stop, payload.target, at)
+        config = tr.ReplayConfig(replays=payload.replays, seed=payload.seed, sessions=payload.sessions)
+        return jsonable(tr.replay(plan, config, frame, interval))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @router.get("/analytics/cross-sectional/trial")

@@ -187,6 +187,9 @@ trading-agent optimize cross-sectional --interval minute             # --max-lag
 # Ranking lab: 60 pre-registered cross-sectional variants, selection frozen on validation
 trading-agent optimize ranking-lab --snapshots data/research/ranking_lab/snapshots.parquet
 
+# Odds that one bracket hits its target, its stop or neither by 15:15, from recent sessions
+trading-agent optimize trade-replay TCS --side BUY --entry 3000 --stop 2985 --target 3030 --at "2026-10-23 11:00"
+
 # Score stored rule/ML/LLM signals on realised returns (scheduler runs it at 15:55)
 trading-agent optimize decision-outcomes --days 30 --horizon 60
 
@@ -225,12 +228,12 @@ Every entry, whether from the dashboard, the paper book or the API, passes the s
 - Session: no entries before 09:15, after `PAPER_ENTRY_CUTOFF` (15:00) or on weekends.
 - Daily trade cap (`PAPER_MAX_TRADES_PER_DAY`), and optionally one entry per symbol per day (`PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY`).
 - Portfolio exposure, stop risk, position count, single-name cap, realized daily loss and drawdown.
-- Participation caps: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value, or above `EXECUTION_MAX_REMAINING_VOLUME_PCT` of the volume still forecast to trade today.
-
-The scheduler squares off every open position at `PAPER_SQUARE_OFF_TIME` (15:15). Each entry, exit, fill, rejection and halt is written to `data/controls/audit-YYYY-MM-DD.jsonl`.
 - Worst-case daily loss: today's realized P&L, minus every open position's risk at its stop, minus the new trade's risk, must stay inside `PAPER_MAX_DAILY_LOSS_PCT`.
 - Fresh price: risk is measured from the worse of the plan price and the latest stored candle no older than `EXECUTION_MAX_QUOTE_AGE_SECONDS`; an entry whose price is already through the stop or the target is refused, and live entries need such a candle.
 - Stop distance: a stop nearer than `PAPER_MIN_STOP_DISTANCE_PCT` of the entry is refused. Scan plans round stops to the instrument's tick, away from the entry.
+- Participation caps: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value, or above `EXECUTION_MAX_REMAINING_VOLUME_PCT` of the volume still forecast to trade today.
+
+The scheduler squares off every open position at `PAPER_SQUARE_OFF_TIME` (15:15). Each entry, exit, fill, rejection and halt is written to `data/controls/audit-YYYY-MM-DD.jsonl`.
 
 Paper fills move `EXECUTION_SLIPPAGE_BPS` (5 bps) against you. Net P&L subtracts modelled Zerodha intraday charges: brokerage, STT, exchange, SEBI, stamp duty and GST.
 
@@ -270,10 +273,10 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `EXECUTION_SLIPPAGE_BPS` / `EXECUTION_PRODUCT` | `5` / `MIS` | Paper slippage; live product |
 | `EXECUTION_MAX_PARTICIPATION_PCT` | `0.01` | Share of average daily traded value |
 | `EXECUTION_MAX_REMAINING_VOLUME_PCT` | `0.05` | Share of the volume still forecast to trade today |
+| `EXECUTION_MAX_QUOTE_AGE_SECONDS` | `900` | Oldest stored candle used as a fresh entry price |
 | `LLM_PROVIDER` | `mock` in code, `openrouter` in `.env.example` | `mock` makes no calls |
 | `LLM_API_KEY` / `OPENROUTER_API_KEY` / `LLM_MODEL` | empty / empty / `gpt-4o-mini` in code (`.env.example`: `google/gemini-2.0-flash-001`) | OpenRouter credentials and model id |
 | `LLM_QUICK_MODEL` / `LLM_DEEP_MODEL` | empty (use `LLM_MODEL`) | Cheap model for headline sentiment and setup checks; stronger model for LLM decisions |
-| `EXECUTION_MAX_QUOTE_AGE_SECONDS` | `900` | Oldest stored candle used as a fresh entry price |
 | `LLM_MIN_INTERVAL_SECONDS` / `LLM_MAX_RETRIES` | `4.5` / `4` | Throttling and 429 retries |
 | `MONITOR_PSI_WARN` / `MONITOR_PSI_DRIFT` | `0.1` / `0.25` | Drift thresholds per feature |
 | `MONITOR_DRIFT_FEATURES_TO_FALLBACK` | `3` | Drifted features that withdraw ML |
