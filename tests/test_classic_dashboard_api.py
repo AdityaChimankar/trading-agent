@@ -75,6 +75,7 @@ def _write_candles(store, symbol, close, n=120):
 def test_rankings_and_opportunities_come_from_the_scan(client):
     ranked = client.get("/api/rankings").json()
     assert [e["symbol"] for e in ranked["scored"]] == ["AAA", "BBB", "CCC", "OLD"]
+    assert ranked["scanned"] == ["AAA", "BBB", "CCC", "OLD"]  # every evaluated name, strongest first
     assert [e["symbol"] for e in ranked["bullish"]] == ["AAA", "CCC", "OLD"]
     assert [e["blocked"] for e in ranked["bullish"]] == [False, True, True]  # OLD expired
     assert ranked["bearish"][0]["symbol"] == "BBB"

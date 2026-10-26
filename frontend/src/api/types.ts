@@ -33,6 +33,7 @@ export interface RankedEntry {
 
 export interface RankingsResponse {
   scored: RankedEntry[]
+  scanned?: string[]
   bullish: RankedEntry[]
   bearish: RankedEntry[]
   contradictions: RankedEntry[]

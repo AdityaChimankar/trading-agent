@@ -160,7 +160,8 @@ async def rankings(capital: float = Query(100_000.0, gt=0)):
     ``capital`` is accepted for compatibility; sizing comes from the scan's own
     capital so the sidebar and the Opportunity panel never disagree.
     """
-    rows = await run_in_threadpool(_scan_rows)
+    scan = await run_in_threadpool(_scan)
+    rows = [row for row in scan.get("rows", []) if row.get("action") in {"BUY", "SELL"}]
     held = {s["position"]["symbol"]: s for s in await _statuses()}
     scored = [_ranked_entry(row, held) for row in rows]
     # Like the original sized lists, blocked names stay in (flagged) so the
@@ -170,6 +171,9 @@ async def rankings(capital: float = Query(100_000.0, gt=0)):
         "bullish": [e for e in scored if e["action"] == "BUY"][:10],
         "bearish": [e for e in scored if e["action"] == "SELL"][:10],
         "contradictions": [e for e in scored if e["contradiction"]],
+        # Every symbol the scan evaluated, strongest first: these have live data
+        # even when none has a signal, unlike the alphabetical watchlist.
+        "scanned": [row["symbol"] for row in sorted(scan.get("rows", []), key=lambda row: -row.get("score", 0))],
     })
 
 

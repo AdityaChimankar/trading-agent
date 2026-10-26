@@ -39,7 +39,8 @@ export default function App() {
     if (symbol) return
     const strongest = [...(rankings.data?.scored ?? [])]
       .sort((a, b) => Math.max(b.bullish_score, b.bearish_score) - Math.max(a.bullish_score, a.bearish_score))[0]
-    if (strongest) setSymbol(strongest.symbol)
+    const scanned = rankings.data?.scanned?.[0]
+    if (strongest || scanned) setSymbol(strongest?.symbol ?? scanned!)
     else if (rankings.isFetched && watchlist?.symbols.length) setSymbol(watchlist.symbols[0])
   }, [rankings.data, rankings.isFetched, watchlist, symbol])
 

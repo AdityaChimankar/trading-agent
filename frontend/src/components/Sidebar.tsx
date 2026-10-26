@@ -36,7 +36,7 @@ export default function Sidebar({
   // first (they have live data), not the alphabetical start of the watchlist.
   const filteredSymbols = useMemo(() => {
     if (!search) {
-      const scanned = (data?.scored ?? []).map((entry) => entry.symbol)
+      const scanned = [...new Set([...(data?.scored ?? []).map((entry) => entry.symbol), ...(data?.scanned ?? [])])]
       return [...scanned, ...watchlistSymbols.filter((s) => !scanned.includes(s))]
     }
     const q = search.toLowerCase()
