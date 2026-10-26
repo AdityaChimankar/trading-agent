@@ -78,6 +78,7 @@ Keep paper mode until those are evidenced.
 | P0 | Broker order lifecycle hardening | partial fills, rejects, cancels, reconnect replay and idempotent intent IDs covered by fault-injection tests |
 | P0 | Strategy edge before more plumbing | a signal family with positive net R after 14 bps on held-out sessions; see the 2026-10-26 plan in the decision log. The current rule/hybrid signals have none |
 | P1 | Gate entries on the trade-replay verdict | entries whose replay is `conclusive_negative` are refused (today display only); 5 of 6 entries on 2026-10-26 were |
+| P1 | Current LLM model | `LLM_MODEL` in `.env` names a model OpenRouter still serves; `gemini-2.0-flash-001` returned 404 on 2026-10-26 |
 | P1 | Ticker reloads the Kite token | after `trading-agent login` the running ticker reconnects without a restart (it stayed on 403 on 2026-10-26) |
 | P1 | Scheduler survives host sleep | jobs fire after the laptop wakes (on 2026-10-26 none ran until a restart) |
 | P1 | Live 1-minute refresh | a scheduled job keeps today's 1-minute bars current for the scan set; on 2026-10-26 only a scratch driver did |
@@ -136,6 +137,15 @@ Paper only (live stayed off). Kite login, the ticker, the scheduler and a scratc
 **Trades** (all SELL, unvalidated hybrid signals; BSE, IDEA, GROWW and KARURVYSYA were closed at market by the operator after their brackets had triggered unenforced; BHARTIARTL and NYKAA by the new enforcement): 6 trades, 2 wins, gross INR -337.78, charges 59.34, net -397.12, average -1.14R. Five of six had a `conclusive_negative` trade replay before entry. Charges were about INR 10 a round trip against INR 19-91 of risk, because the 10% position cap binds long before the 1% risk budget.
 
 **Analysis on real data.** Rule signals over about 182k trades on the 50 liquid names win about 28% against about 38% needed, about -0.13% net a trade, no positive name. In 100 replayed standard brackets (1.5x 1-minute ATR stop, 2R), gross R is about 0 to +0.1 in every stop-width quartile while net R tracks the cost share: -0.85R at 0.12-0.19% stops, -0.22R at 0.35-0.67%. Wider brackets lose less but cannot create an edge; breaking even needs a gross edge first.
+
+**End-to-end validation (afternoon).** Every GET route was swept with a 1-second `/health` heartbeat, and all eight dashboard pages were driven in a browser. Fixed along the way:
+
+- `2153ea1`: the v1 digest routes ran the generator over every stored symbol on the event loop. One call froze the whole API, dashboard included, until a restart. They are now bounded to the scan's strongest 30 names and run in the threadpool. `/api/symbols/news` lists the news folder once instead of 2,300 `exists()` calls (12 s to 0.2 s). Nightly compaction uses 8 workers, about 4x faster on the bind mount.
+- `8617d67`: failed LLM calls were stored as HOLD signals, and the cycle never stopped. The configured OpenRouter model `google/gemini-2.0-flash-001` is retired, so every call returns 404. Failures are no longer stored, and the cycle aborts after 3 in a row. **Set a current `LLM_MODEL` in `.env`** (for example a `google/gemini-3.x-flash` slug) to get real LLM decisions.
+- `f863fa6`: nine `async` endpoints never awaited, so their disk work ran on the event loop. `/liveness/storage/stats` froze the API for over 10 minutes. They are plain `def` now, and `tests/test_endpoint_event_loop.py` fails any new one.
+- `8a9f016`: `/api/v1/opportunities/` defaulted to every stored symbol; it now uses the scan's strongest names. Storage details returned 500 on a NaN `oi`.
+
+Result: every route returns 200 except `/liveness/storage/stats`, which opens every file and takes minutes (it no longer blocks anything). The heartbeat never exceeded 0.51 s. All pages render with no console errors or failed calls. The 5-minute store was compacted once (2,286 symbols). After any scheduler restart the first decision pass still reads every symbol cold, about 30 minutes for 2,319 symbols.
 
 **Plan, in order.** (1) Stop adding live plumbing; research a signal with positive gross R on held-out sessions. Candidates: the ranker trial already running (60 sessions), `orb_gap` with NIFTY50 data, and session-structure filters (time of day, gap, relative volume). (2) Make costs small in R by construction: a minimum stop of about 0.7% (14 bps is 0.2R) via 5- or 15-minute ATR, a position cap that lets the risk budget bind, and liquid names only. (3) Gate entries on `conclusive_negative` replays and on `qualified_research` evidence (`require_validated` stays on). (4) Only then, 20+ paper sessions before any live discussion.
 
