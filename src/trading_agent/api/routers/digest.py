@@ -23,20 +23,11 @@ class DailyDigest(BaseModel):
 
 
 def _digest_symbols() -> list[str]:
-    """The latest scan's strongest directional names, else the first stored symbols.
+    # Every stored symbol (~2,300) ran for minutes on the API's event loop and froze
+    # every endpoint (2026-10-26); bounded like the classic dashboard's digest.
+    from trading_agent.analysis.research_jobs import strongest_scan_symbols
 
-    The generator analyses every symbol it is given. Over all ~2,300 stored symbols
-    one request ran for minutes on the API's event loop and froze every other
-    endpoint (2026-10-26), so it is bounded like the classic dashboard's digest.
-    """
-    from trading_agent.analysis.research_jobs import get_research_jobs
-    from trading_agent.storage.parquet_store import get_parquet_store
-
-    rows = [row for row in get_research_jobs().snapshot(completed=True).get("rows", [])
-            if row.get("action") in {"BUY", "SELL"}]
-    if rows:
-        return [row["symbol"] for row in sorted(rows, key=lambda row: -row["score"])[:DIGEST_SYMBOLS]]
-    return get_parquet_store().get_symbols()[:DIGEST_SYMBOLS]
+    return strongest_scan_symbols(DIGEST_SYMBOLS)
 
 
 def _daily(target_date: date | None):

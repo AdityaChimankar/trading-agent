@@ -6,6 +6,7 @@ from typing import Optional, List
 from datetime import datetime
 
 from trading_agent.core.freshness import get_freshness_monitor, FreshnessStatus
+from trading_agent.api.serializers import jsonable
 from trading_agent.storage.parquet_store import get_parquet_store
 
 router = APIRouter()
@@ -81,4 +82,5 @@ def get_symbol_storage(symbol: str):
             "latest_candle": df.iloc[-1].to_dict() if not df.empty else None,
         }
 
-    return {"symbol": symbol, "intervals": details}
+    # The latest candle can hold NaN (an empty oi column), which plain JSON rejects.
+    return jsonable({"symbol": symbol, "intervals": details})

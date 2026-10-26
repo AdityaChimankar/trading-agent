@@ -173,6 +173,21 @@ class ResearchJobs:
             self.run_lock.release()
 
 
+def strongest_scan_symbols(limit: int = 30) -> list[str]:
+    """The latest completed scan's strongest directional names, else the first stored symbols.
+
+    For endpoints that analyse "the market" by default: run over every stored
+    symbol (~2,300), one request took minutes on 2026-10-26.
+    """
+    from trading_agent.storage.parquet_store import get_parquet_store
+
+    rows = [row for row in get_research_jobs().snapshot(completed=True).get("rows", [])
+            if row.get("action") in {"BUY", "SELL"}]
+    if rows:
+        return [row["symbol"] for row in sorted(rows, key=lambda row: -row["score"])[:limit]]
+    return get_parquet_store().get_symbols()[:limit]
+
+
 def _tick_size(symbol):
     """Tick from the cached Kite instrument dump; None (sizing assumes 0.05) when unknown."""
     from trading_agent.ingest.instrument_lookup import get_instrument_lookup

@@ -238,3 +238,26 @@ def test_all_news_reads_only_stored_news_files(client, tmp_path, monkeypatch):
     (news / "ZZZ.json").write_text(json.dumps({"articles": [{"headline": "not on the watchlist"}]}), encoding="utf-8")
     rows = client.get("/api/symbols/news").json()
     assert [(r["symbol"], r["headline"], r["score"]) for r in rows] == [("AAA", "AAA wins order", 0.4)]
+
+
+def test_symbol_storage_details_survive_nan_candle_fields(client):
+    stamps = pd.date_range(end=datetime.now(UTC).replace(second=0, microsecond=0), periods=3, freq="5min")
+    client.store.write_candles(pd.DataFrame({"timestamp": stamps, "open": 100.0, "high": 101.0, "low": 99.0,
+                                             "close": 100.0, "volume": 10, "oi": np.nan}), "AAA", "5minute")
+    response = client.get("/api/v1/liveness/storage/symbols/AAA")
+    assert response.status_code == 200
+    assert response.json()["intervals"]["5minute"]["latest_candle"]["oi"] is None
+
+
+def test_v1_opportunities_default_to_the_scan_not_every_stored_symbol(client, monkeypatch, scan_rows):
+    from types import SimpleNamespace
+
+    from trading_agent.analysis import opportunity_finder
+
+    monkeypatch.setattr("trading_agent.analysis.research_jobs.get_research_jobs",
+                        lambda: SimpleNamespace(snapshot=lambda completed=False: {"rows": scan_rows}))
+    seen = []
+    monkeypatch.setattr(opportunity_finder.OpportunityFinder, "find_opportunities",
+                        lambda self, symbols, interval="5minute", *a, **k: seen.append(list(symbols)) or [])
+    assert client.get("/api/v1/opportunities/").json() == []
+    assert seen == [["AAA", "BBB", "CCC", "OLD"]]

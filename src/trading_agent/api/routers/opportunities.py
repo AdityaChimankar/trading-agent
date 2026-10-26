@@ -44,9 +44,10 @@ def get_opportunities(
     if symbols:
         symbol_list = [s.strip().upper() for s in symbols.split(",")]
     else:
-        # Default to all symbols with data
-        parquet = get_parquet_store()
-        symbol_list = parquet.get_symbols()
+        # Default to the latest scan's strongest names, not all ~2,300 stored symbols.
+        from trading_agent.analysis.research_jobs import strongest_scan_symbols
+
+        symbol_list = strongest_scan_symbols(max(30, max_results))
 
     if not symbol_list:
         return []
