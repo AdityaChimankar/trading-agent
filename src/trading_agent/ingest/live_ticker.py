@@ -70,9 +70,13 @@ class LiveTicker:
         interval: str = "5minute",
         on_candle: Callable[[CandleData], None] | None = None,
         on_tick: Callable[[TickData], None] | None = None,
+        minute_symbols: list[str] | None = None,
     ):
         self.symbols = symbols
         self.interval = interval
+        # The live set also gets 1-minute bars, so 1-minute research does not wait
+        # on a historical backfill (a plan expires ~75 s after its bar closes).
+        self.minute_symbols = set(minute_symbols or ()) if interval not in {"minute", "1minute"} else set()
         self.on_candle = on_candle
         self.on_tick = on_tick
 
@@ -86,6 +90,10 @@ class LiveTicker:
         self._last_candle_time: dict[int, datetime] = {}
         self._last_volume: dict[int, tuple[object, int]] = {}
         self._last_tick: dict[int, datetime] = {}
+        self._minute_bars: dict[int, CandleData] = {}
+        # Per token, the first minute seen since (re)connecting: that bar missed
+        # earlier ticks, so it is never written.
+        self._minute_partial: dict[int, datetime] = {}
         self._running = False
         self._ticker: KiteTicker | None = None
         self._last_heartbeat = 0.0
@@ -162,6 +170,30 @@ class LiveTicker:
 
         return candle
 
+    def _update_minute_bar(self, token: int, tick: TickData) -> None:
+        """Fold a tick into the token's 1-minute bar; emit the previous bar on a new minute."""
+        start = tick.timestamp.replace(second=0, microsecond=0)
+        bar = self._minute_bars.get(token)
+        if bar is not None and start > bar.timestamp:
+            if bar.timestamp != self._minute_partial.get(token) and self.on_candle:
+                try:
+                    self.on_candle(bar)
+                except Exception as e:
+                    logger.error("candle_callback_failed", error=str(e))
+            bar = None
+        if bar is None:
+            self._minute_partial.setdefault(token, start)
+            self._minute_bars[token] = CandleData(
+                symbol=tick.symbol, interval="minute", timestamp=start, open=tick.last_price,
+                high=tick.last_price, low=tick.last_price, close=tick.last_price,
+                volume=tick.volume, oi=tick.oi)
+            return
+        bar.high = max(bar.high, tick.last_price)
+        bar.low = min(bar.low, tick.last_price)
+        bar.close = tick.last_price
+        bar.volume += tick.volume
+        bar.oi = tick.oi
+
     def _on_ticks(self, ws, ticks: list[dict]) -> None:
         """Handle incoming ticks."""
         for tick in ticks:
@@ -216,6 +248,9 @@ class LiveTicker:
                 ask_price=sells[0].get("price"),
             )
 
+            if symbol in self.minute_symbols:
+                self._update_minute_bar(token, tick_data)
+
             # Callback for raw tick
             if self.on_tick:
                 try:
@@ -247,6 +282,8 @@ class LiveTicker:
         logger.info("ticker_connected", tokens=len(self._tokens))
         write_heartbeat(True, max(self._last_tick.values(), default=None))
         self._last_volume.clear()
+        self._minute_bars.clear()
+        self._minute_partial.clear()
         ws.subscribe(self._tokens)
         ws.set_mode(ws.MODE_FULL, self._tokens)
         self._reconnect_attempts = 0
@@ -425,13 +462,17 @@ def main() -> None:
     if not auth.credentials.access_token and not auth.load_access_token():
         raise SystemExit("No Kite access token. Run `trading-agent login` first.")
 
+    from trading_agent.analysis.research_engine import live_symbols
+
     symbols = get_watchlist_symbols()
     if not symbols:
         raise SystemExit("The watchlist is empty. Add symbols to symbols.txt.")
+    live = live_symbols()
+    symbols = symbols + [symbol for symbol in live if symbol not in set(symbols)]
 
     writer = BackgroundCandleWriter(create_default_candle_handler())
     ticker = LiveTicker(symbols=symbols, interval=get_settings().storage.candle_interval,
-                        on_candle=writer)
+                        on_candle=writer, minute_symbols=live)
     def stop(signum, frame):
         raise SystemExit(0)
 

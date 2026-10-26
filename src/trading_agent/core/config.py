@@ -90,6 +90,8 @@ class APISettings(BaseSettings):
     port: int = Field(default=8000, description="Server port")
     reload: bool = Field(default=False, description="Auto-reload on changes")
     workers: int = Field(default=1, description="Number of workers")
+    research_autostart: Literal["off", "live"] = Field(
+        default="off", description="Arm research automation at startup: off, or the live set (live_symbols.txt)")
     cors_origins: list[str] = Field(
         default=["http://localhost:3000", "http://localhost:5173"],
         description="CORS allowed origins",

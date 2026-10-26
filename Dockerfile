@@ -67,7 +67,7 @@ COPY --from=playwright /opt/playwright /opt/playwright
 # Copy application code
 COPY --chown=trader:trader src/ ./src/
 COPY --chown=trader:trader pyproject.toml README.md ./
-COPY --chown=trader:trader symbols*.txt ./
+COPY --chown=trader:trader symbols*.txt live_symbols.txt ./
 COPY --chown=trader:trader alembic.ini ./
 COPY --chown=trader:trader migrations/ ./migrations/
 

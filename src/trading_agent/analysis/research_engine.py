@@ -16,7 +16,7 @@ from scipy.signal import find_peaks
 from trading_agent.core.config import get_settings
 from trading_agent.core.position_sizing import round_to_tick
 from trading_agent.core.signals import evaluate_signals
-from trading_agent.paths import SYMBOLS_TXT
+from trading_agent.paths import LIVE_SYMBOLS_TXT, SYMBOLS_TXT
 from trading_agent.strategy.research_features import FEATURES, ResearchModel, prepare_research_frame
 from trading_agent.analysis.research_news import read_news, usable_sentiment
 from trading_agent.storage.parquet_store import get_parquet_store
@@ -52,6 +52,21 @@ def universe():
     else:
         symbols = get_parquet_store().get_symbols()
     return sorted(set(symbols))
+
+
+def live_symbols():
+    """The live set: 1-minute bars from the ticker, scanned as each bar closes.
+
+    ``data/live_symbols.txt`` overrides the shipped ``live_symbols.txt``; empty when neither exists.
+    """
+    from trading_agent.core.config import get_settings
+
+    path = get_settings().data_dir / "live_symbols.txt"
+    path = path if path.exists() else LIVE_SYMBOLS_TXT
+    if not path.exists():
+        return []
+    return sorted({line.strip().upper() for line in path.read_text(encoding="utf-8-sig").splitlines()
+                   if line.strip() and not line.lstrip().startswith("#")})
 
 
 def combine(rule, rule_confidence, ml, mode="rule_ml_combined"):

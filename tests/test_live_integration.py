@@ -104,3 +104,45 @@ def test_connect_without_new_ticks_does_not_erase_last_tick(ticker):
     ticker._last_tick = {1: old_tick}
     ticker._on_connect(Mock(), {})
     module.write_heartbeat.assert_called_with(True, old_tick)
+
+
+def _live_ticker(monkeypatch, minute_symbols, interval="5minute"):
+    monkeypatch.setattr(module, "write_heartbeat", Mock())
+    monkeypatch.setattr(module, "get_kite_auth", Mock())
+    monkeypatch.setattr(module, "get_instrument_lookup", Mock())
+    monkeypatch.setattr(module, "get_parquet_store", Mock())
+    result = LiveTicker(["TEST", "OTHER"], interval=interval, on_candle=Mock(), minute_symbols=minute_symbols)
+    result._symbol_by_token = {1: "TEST", 2: "OTHER"}
+    return result
+
+
+def _bars(ticker, interval):
+    return [c.args[0] for c in ticker.on_candle.call_args_list if c.args[0].interval == interval]
+
+
+def test_live_set_gets_completed_minute_bars_beside_the_live_interval(monkeypatch):
+    ticker = _live_ticker(monkeypatch, ["TEST"])
+    ticker._on_ticks(None, [tick(10), tick(70, 101, 1010), tick(100, 103, 1020), tick(130, 102, 1030)])
+    minute = _bars(ticker, "minute")
+    # The first minute after connecting missed earlier ticks: never written.
+    assert [(b.timestamp.minute, b.open, b.high, b.low, b.close, b.volume) for b in minute] == [(46, 101, 103, 101, 103, 20)]
+    assert minute[0].symbol == "TEST" and _bars(ticker, "5minute") == []
+    ticker._on_ticks(None, [tick(300, 104, 1040)])
+    assert [b.timestamp.minute for b in _bars(ticker, "minute")] == [46, 47]
+    assert len(_bars(ticker, "5minute")) == 1
+
+
+def test_reconnect_restarts_the_partial_minute_and_other_symbols_get_none(monkeypatch):
+    ticker = _live_ticker(monkeypatch, ["TEST"])
+    other = dict(tick(10), instrument_token=2)
+    ticker._on_ticks(None, [tick(10), other, tick(70, 101, 1010), dict(tick(70), instrument_token=2)])
+    assert [b.symbol for b in _bars(ticker, "minute")] == []  # TEST's first minute was partial
+    ws = Mock()
+    ticker._on_connect(ws, None)
+    ticker._on_ticks(None, [tick(130, 102, 1030), tick(190, 103, 1040), tick(250, 104, 1050)])
+    assert [b.timestamp.minute for b in _bars(ticker, "minute")] == [48]  # 47 restarted partial; 46 dropped
+
+
+def test_a_minute_feed_does_not_build_a_second_minute_series(monkeypatch):
+    ticker = _live_ticker(monkeypatch, ["TEST"], interval="minute")
+    assert ticker.minute_symbols == set()

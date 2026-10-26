@@ -342,3 +342,46 @@ def test_api_validates_automatic_settings_and_worker(monkeypatch, setup):
         client.post("/scan/cancel")
         assert not worker.snapshot()["enabled"]
         assert jobs.cancelled.is_set()
+
+
+def test_live_scope_observes_and_scans_only_the_live_set_every_10_seconds(setup, monkeypatch):
+    _, jobs, clock, data, ledger, observations = setup
+    monkeypatch.setattr("trading_agent.analysis.research_engine.live_symbols", lambda: ["AAA", "BBB"])
+    worker = ResearchAutomation(jobs=lambda: jobs, observe=lambda symbols, interval, now: observations.append(
+        (symbols, interval)) or dict(data, latest_completed_at=(now - timedelta(minutes=1)).isoformat()),
+        ledger=lambda _: ledger, clock=lambda: clock.now)
+    worker.enable(dict(OPTIONS, scope="live"), 60)
+    worker.tick()
+    assert observations == [(["AAA", "BBB"], "minute")]
+    assert jobs.calls == [dict(OPTIONS, scope="live", symbols=["AAA", "BBB"])]
+    assert worker.snapshot()["next_check_at"] == (NOW + timedelta(seconds=10)).isoformat()
+    assert "live set" in worker.snapshot()["reason"]
+
+
+def test_live_scope_needs_a_live_set_and_scopes_are_restricted(setup, monkeypatch):
+    worker, *_ = setup
+    with pytest.raises(ValueError):
+        worker.enable(dict(OPTIONS, scope="handpicked"))
+    monkeypatch.setattr("trading_agent.analysis.research_engine.live_symbols", lambda: [])
+    with pytest.raises(ValueError):
+        worker.enable(dict(OPTIONS, scope="live"))
+
+
+def test_api_can_arm_the_live_scope_at_startup(tmp_path, monkeypatch):
+    from trading_agent.analysis import research_automation
+    from trading_agent.api.main import create_app
+    from trading_agent.core.config import get_settings
+
+    monkeypatch.setenv("API_RESEARCH_AUTOSTART", "live")
+    monkeypatch.setenv("API_AUTH_TOKEN", "")
+    monkeypatch.setattr(research_automation, "_automation", None)
+    monkeypatch.setattr(ResearchAutomation, "tick", lambda self: None)  # no stored-data checks here
+    monkeypatch.setattr("trading_agent.analysis.research_engine.live_symbols", lambda: ["AAA"])
+    get_settings.cache_clear()
+    try:
+        with TestClient(create_app()) as client:
+            state = client.get("/api/v1/research/automation").json()
+        assert state["enabled"] and state["options"]["scope"] == "live"
+        assert state["options"]["require_validated"] is True and state["min_scan_seconds"] == 60
+    finally:
+        get_settings.cache_clear()
