@@ -50,14 +50,14 @@ async def controls_status():
 
 
 @router.post("/controls/halt")
-async def halt(payload: HaltRequest):
+def halt(payload: HaltRequest):
     from trading_agent.risk.controls import engage_kill_switch
 
     return engage_kill_switch(payload.reason)
 
 
 @router.post("/controls/resume")
-async def resume():
+def resume():
     from trading_agent.risk.controls import release_kill_switch
 
     return release_kill_switch()

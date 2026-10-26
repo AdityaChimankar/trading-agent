@@ -26,7 +26,7 @@ class FreshnessResponse(BaseModel):
 
 
 @router.get("/freshness", response_model=List[FreshnessResponse])
-async def get_freshness():
+def get_freshness():
     """Get data freshness for all sources."""
     monitor = get_freshness_monitor()
     summary = monitor.get_status_summary()
@@ -47,21 +47,21 @@ async def get_freshness():
 
 
 @router.get("/freshness/summary")
-async def get_freshness_summary():
+def get_freshness_summary():
     """Get freshness summary."""
     monitor = get_freshness_monitor()
     return monitor.get_status_summary()
 
 
 @router.get("/storage/stats")
-async def get_storage_stats():
+def get_storage_stats():
     """Get storage statistics."""
     parquet = get_parquet_store()
     return parquet.get_stats()
 
 
 @router.get("/storage/symbols/{symbol}")
-async def get_symbol_storage(symbol: str):
+def get_symbol_storage(symbol: str):
     """Get storage details for a symbol."""
     symbol = symbol.upper()
     parquet = get_parquet_store()

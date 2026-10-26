@@ -107,7 +107,7 @@ def get_latest_candle(
 
 
 @router.get("/{symbol}/range")
-async def get_date_range(symbol: str, interval: str = Query("5minute")):
+def get_date_range(symbol: str, interval: str = Query("5minute")):
     """Get available date range for symbol."""
     symbol = symbol.upper()
     parquet = get_parquet_store()

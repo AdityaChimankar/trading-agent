@@ -27,7 +27,7 @@ def list_stored_symbols():
 
 
 @router.get("/", response_model=list[SymbolInfo])
-async def list_symbols(
+def list_symbols(
     search: str | None = Query(None, description="Search query"),
     limit: int = Query(100, ge=1, le=500),
     has_data: bool | None = Query(None, description="Filter by data availability"),
@@ -85,7 +85,7 @@ async def list_symbols(
 
 
 @router.get("/{symbol}", response_model=SymbolInfo)
-async def get_symbol(symbol: str):
+def get_symbol(symbol: str):
     """Get symbol details."""
     symbol = symbol.upper()
     parquet = get_parquet_store()
@@ -117,7 +117,7 @@ async def get_symbol(symbol: str):
 
 
 @router.get("/{symbol}/intervals")
-async def get_symbol_intervals(symbol: str):
+def get_symbol_intervals(symbol: str):
     """Get available intervals for a symbol."""
     symbol = symbol.upper()
     parquet = get_parquet_store()
