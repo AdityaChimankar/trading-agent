@@ -20,6 +20,7 @@ from trading_agent.api.routers import (
     opportunities,
     pipeline,
     positions,
+    screener,
     research,
     strategy_lab,
     symbols,
@@ -132,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(wallet.router, prefix="/api/v1/wallet", tags=["wallet"])
     app.include_router(pipeline.router, prefix="/api/v1/pipeline", tags=["pipeline"])
     app.include_router(research.router, prefix="/api/v1/research", tags=["research"])
+    app.include_router(screener.router, prefix="/api/v1/screener", tags=["screener"])
     app.include_router(strategy_lab.router, prefix="/api/v1/strategy-lab", tags=["strategy-lab"])
     app.include_router(digest.router, prefix="/api/v1/digest", tags=["digest"])
     app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["watchlist"])

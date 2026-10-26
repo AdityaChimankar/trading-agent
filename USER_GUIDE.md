@@ -13,6 +13,7 @@ The top bar has a tab per page and a searchable symbol picker that sets the symb
 | Tab | Use it to |
 |---|---|
 | Dashboard | Review the watchlist (bias, blocked/stale flags, contradictions with open positions), the bullish/bearish Top Opportunity, symbol detail, wallet, Position Monitor and the morning digest. Open a paper trade from a fresh, unblocked plan |
+| Screener | Sectors trending today, preset trading screens and the intraday screener (below); **Update technicals** recomputes them |
 | Research | Run the full-watchlist scan and the Find → Inspect → Validate → Paper review workflow (below) |
 | Paper operations | Record, monitor and close paper positions manually |
 | Risk & execution | Engage or release the kill switch, square off everything, check session status, inspect orders and reconciliation, preview charges, read the audit trail |
@@ -22,6 +23,23 @@ The top bar has a tab per page and a searchable symbol picker that sets the symb
 | News | Read headlines matched to the watchlist with cached sentiment |
 
 The symbol view's **Technical summary** shows a Groww-style vote across RSI, MACD, Stochastic, Williams %R, CCI, ADX/DI and moving averages. Next to it are classic floor pivots for today, calculated from the previous IST session's high, low and close: pivot = (H+L+C)/3, R1 = 2P−L, S1 = 2P−H, R2/S2 = P ± (H−L), R3 = H + 2(P−L), S3 = L − 2(H−P). The panel also shows the nearest pivot above and below the price. Both are context only. They never change the rule signal or the scan's room-to-target, and pivots need a completed previous session in stored candles (`GET /api/symbols/{symbol}/technicals`).
+
+### Market screener
+
+The **Screener** tab rebuilds four sections of Groww's Explore page from stored minute candles and live Kite quotes:
+
+- **Top movers today**: gainers, losers and volume shockers within an index (NIFTY100 by default).
+- **Sectors trending today**: for each NSE industry, gainers and losers, plus the equal-weighted mean and median 1D change. Click a sector to filter the screener to it.
+- **Trading screens**: resistance breakouts (above the previous session's R1), near R1 (within 1% below), support breakdowns (below S1), MACD positive (line above zero: what Groww's "MACD above signal line" screen actually filters), MACD above or below its signal line, RSI ≥ 70 and ≤ 30, near the 52-week high (within 5%) and volume shockers (today's volume at least 2x the 1-week daily average). Each chip shows how many stocks match.
+- **Intraday screener**: combine price change (last 5 minutes, 15 minutes, 1 hour or today), RSI band, MACD side, 52-week proximity, R1–R3 breakout or nearness, index and sector. Sort by turnover, change, volume against the 1-week average, RSI or price.
+
+The conventions follow Groww's. RSI(14), MACD(12,26,9), pivots and the 52-week range use completed daily sessions. The 1-week average volume covers the sessions of the previous 7 calendar days. The previous close is the exchange's official close taken from the quote. The live-bar RSI is shown when you **Check** a row. Turnover is LTP × today's volume. Market cap is not available.
+
+Nothing is computed when a page loads. **Update technicals** (or `trading-agent screener-scan`) runs in the background. It first fetches live Kite quotes for the whole universe (about 5 calls for 2,300 symbols, one per second), then lays them over each symbol's stored minute history in worker processes, and saves `data/research/screener.json`. A full scan took about 2 minutes on 2026-10-26. Without a valid Kite token, the scan uses stored candles only, and the header says quotes were unavailable. In that case, names the ticker does not stream show as lagging. `--no-quotes` (or `{"quotes": false}`) skips the calls. **Indexed only** scans just the roughly 750 names in the sector map. During the session, `trading-agent screener-scan --watch 5` repeats the scan every 5 minutes until 15:30.
+
+The header shows the technicals check: current rows, live-quoted rows, stale rows (an older session) and lagging rows (more than 15 minutes behind the newest price, counted to 15:30 at the latest, usually a ticker gap), plus rows without enough history for RSI (15 sessions), MACD (35 sessions) or a full 52 weeks. Stale and lagging rows are left out of screens and sector breadth. **Check** on a row recomputes that stock now and lists what changed since the saved scan.
+
+Sectors and index filters need the sector map. Run `trading-agent sector-map` to download NSE's index lists (Nifty Total Market, which is Nifty 500 plus Microcap 250, with 22 industries) into `data/cache/sector_map.csv`. A copy is committed, so a fresh checkout works offline. Unlisted symbols stay unclassified.
 
 The Dashboard digest is built in the background from the top 30 scan names and cached for 15 minutes. Run a research scan first; without one, the classic pages show empty states rather than invented rankings.
 
@@ -512,6 +530,8 @@ docker compose down
 | `trading-agent backfill [SYMBOL...] [--days N] [--missing-only] [--universe watchlist\|nifty500\|all]` | Fetch a longer history; `--missing-only` requests only sessions missing or incomplete |
 | `trading-agent data-check [SYMBOL...] [--universe watchlist\|nifty500\|all] [--days N] [--no-token]` | Are candles, token, ticker and trial current? Exit 1 if not |
 | `trading-agent heal-gaps [SYMBOL...] --interval 5minute --limit 100` | Bounded catch-up with overlap, error summary, and failure exit status |
+| `trading-agent sector-map` | Download NSE index lists into `data/cache/sector_map.csv` (industry and index membership) |
+| `trading-agent screener-scan [--universe all\|indexed] [--watch MIN] [--no-quotes]` | Recompute screener technicals and sector breadth with live Kite quotes; `--watch` repeats during market hours |
 | `trading-agent storage-stats` | Summarize Parquet data |
 | `trading-agent compact SYMBOL` | Compact a symbol's Parquet data |
 | `trading-agent diagnose [SYMBOL...]` | Compare signal behavior with baselines |

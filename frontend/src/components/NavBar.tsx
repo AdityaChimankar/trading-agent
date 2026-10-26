@@ -5,6 +5,7 @@ import { tokens } from '../theme'
 
 export const ROUTE_LABELS: Record<Route, string> = {
   dashboard: 'Dashboard',
+  screener: 'Screener',
   research: 'Research',
   paper: 'Paper operations',
   risk: 'Risk & execution',

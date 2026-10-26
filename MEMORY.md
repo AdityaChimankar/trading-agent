@@ -15,7 +15,7 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-26 (first live paper session: candle read cache and compaction, paper bracket exits, test DB isolation). Earlier: 2026-10-25 (worst-case daily loss, fresh-price entry risk, stop checks, trade replay). Active branch: `risk-hardening`, from `main` after PR #2, pushed for a pull request into `main`.
+Last updated: 2026-10-26 (market screener on branch `feature/market-screener`, from `risk-hardening`; see the decision log). Before that, 2026-10-26 (first live paper session: candle read cache and compaction, paper bracket exits, test DB isolation). Earlier: 2026-10-25 (worst-case daily loss, fresh-price entry risk, stop checks, trade replay). Active branch: `risk-hardening`, from `main` after PR #2, pushed for a pull request into `main`.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
@@ -65,7 +65,8 @@ Keep paper mode until those are evidenced.
 | Research | Strategy Lab opening-range breakout and Nifty-gap-regime profiles; NIFTY50/BANKNIFTY index candles | `research/strategy_lab.py`, `ingest/instrument_lookup.INDEX_TOKENS` |
 | ML | PSI/KS drift monitor; withdraws ML (or loads `ml_model.previous.joblib`) on drift; daily 15:40 check | `strategy/model_monitoring.py` |
 | Validation | Vectorized backtest `--selftest` vs loop reference, walk-forward `--all`, lookahead and train/serve skew checks | `research/walk_forward_optimizer.py`, `strategy/session_features.py` |
-| UI | React + MUI: Dashboard, Research, Paper operations, Risk & execution, Analytics, Signal Pipeline, Transactions, News | `frontend/src/App.tsx`, `lib/router.ts` |
+| Analytics | Market screener (after Groww Explore): top movers by index, sector breadth per NSE industry, 10 preset screens, intraday screener filters (5m/15m/1h/1D change, daily RSI(14)/MACD(12,26,9) on completed sessions, 52W proximity, R1–R3 pivots, index, sector); background multi-process scan with live Kite quotes over stored candles, a technicals check (stale, lagging, quoted, short history) and per-symbol recheck | `analysis/screener.py`, `analysis/screener_jobs.py`, `ingest/sector_map.py`, `ingest/live_quotes.py`, `/api/v1/screener/*`, `trading-agent sector-map / screener-scan`, `components/ScreenerPage.tsx` |
+| UI | React + MUI: Dashboard, Screener, Research, Paper operations, Risk & execution, Analytics, Signal Pipeline, Transactions, News | `frontend/src/App.tsx`, `lib/router.ts` |
 
 ## Open work
 
@@ -119,6 +120,25 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-26: Market screener after Groww Explore
+
+A **Screener** tab rebuilds Groww Explore's top movers, sectors trending, trading screens and intraday screener (`/stocks/user/explore`, `/stocks/sectors-trending`, `/stocks/screens/*`, `/stocks/intraday`). It uses our stored minute candles, live Kite quotes and an NSE sector map. Groww's page data was read in the browser: server-rendered `__NEXT_DATA__`, plus `POST /bff/web/stocks/screener/web-pages/screener_stocks` for filter changes. Its screens are presets of a single intraday screener.
+
+**Groww conventions found and adopted.** RSI, MACD, pivots and the 52-week range use completed sessions. The 1-week average volume is the mean over the previous 7 calendar days (four sessions that week, because of Dussehra). The previous close is the official close. Groww's "MACD above signal line" screen is really MACD line > 0: 93 of its 100 names, against 50 for a signal-line test. It is offered as "MACD positive" next to a true signal-line screen.
+
+**Groww behaviour not copied.** Its R1 breakouts matched pivots from the session before the previous one (90/95 recalled, against 73/95 for the previous session, with far fewer extra flags in a 150-stock sample). Its RSI also sat between those two sessions, so on 2026-10-26 its technicals lagged a session. We keep standard previous-session pivots and RSI. Groww uses about 60 sectors of its own; we use NSE's 22 industries for the about 750 Nifty Total Market names, and other names stay unclassified. Market cap and "most bought" (Groww user data) are not available.
+
+**Side-by-side after the fixes** (Groww captured at 15:12, our scan at the close): 94 of Groww's top 100 intraday names are current in our scan; the other 5 are new listings not stored. Previous close was exact for 94/94, LTP within 1% for 90/94, 52-week high and low exact for most names, and the 1-week average volume had a median difference of 0.5%. Screen recall: RSI ≥ 70 7/7, RSI ≤ 30 87/92, MACD positive 93/100, R1 breakout 73/95 (the lag above). RSI was within about 2 points of Groww's (median about 1.5).
+
+**Fixes found by the comparison.**
+
+- Stored candles alone left 1,819-2,263 of 2,312 rows lagging, because the ticker streams only part of the universe and most minute series stopped at 09:18. One `kite.quote` call per 500 symbols now supplies LTP, OHLC, volume and the official previous close (2,288 returned).
+- After the close, most quotes freeze at about 15:31 while a few keep updating. Lag is now counted to 15:30 at the latest.
+- `.dt.date` took most of the CPU: 0.27 s a symbol, down to 0.08 s with integer IST session keys.
+- Four threads were GIL-bound: 9 minutes for the full scan, now about 2 minutes in 4 spawned processes. The worker read cache is off, because one process grew to 1.3 GB and four broke the pool.
+
+Verified on 2026-10-26: 11 screener tests passed; the full suite had 636 passed and 1 failed (`test_data_coverage::test_backfill_window_starts_where_data_check_starts` is calendar-dependent and fails on this date regardless of this change). Ruff passed, and the frontend type-check and build passed. The Screener tab was driven in Playwright against a second API instance (port 8011) at 1440 and 390 px: no console errors or failed API calls, and no page overflow. The pre-existing `test_research_lifecycle` failure seen once only appeared when runs overlapped; it passed on its own.
 
 ### 2026-10-26: First live paper session, storage speed, paper brackets
 

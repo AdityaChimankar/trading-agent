@@ -11,6 +11,7 @@ Project status, open work and decision history: [MEMORY.md](MEMORY.md).
 | Tab | What it is for |
 |---|---|
 | **Dashboard** | Classic view: watchlist sidebar with bias and contradictions, bullish/bearish Top Opportunity, symbol detail (chart, patterns, technical summary with floor pivots, sizing, news, rule/LLM/ML signals), wallet, position monitor, morning digest |
+| **Screener** | Groww-style market screener: top movers by index, sectors trending today (NSE industries), preset trading screens (R1 breakout, MACD positive / vs signal, RSI ≥ 70 / ≤ 30, near 52W high, volume shockers) and an intraday screener with combinable filters; **Update technicals** recomputes them in the background with live Kite quotes |
 | **Research** | Find → Inspect → Validate → Paper review workflow: full-watchlist scan, Plotly chart, walk-forward optimizer, trade-outcome validation, BUY/SELL outcome models |
 | **Paper operations** | Persistent paper book: open, monitor and close positions |
 | **Risk & execution** | Kill switch, square-off, session status, router orders, reconciliation, cost calculator, audit trail |
