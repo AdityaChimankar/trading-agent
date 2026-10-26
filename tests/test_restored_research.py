@@ -179,6 +179,44 @@ def test_scan_counts_all_symbols_and_errors(tmp_path, monkeypatch):
     assert jobs.path.exists()
 
 
+def test_dashboard_keeps_the_last_completed_scan_while_a_new_one_runs(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(jobs_module, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path, paper=PaperRiskSettings()))
+    monkeypatch.setattr(jobs_module, "model_for_research", lambda: SimpleNamespace(status="loaded", warning="test"))
+    monkeypatch.setattr(jobs_module, "read_ledger_state", lambda *args: {
+        "positions": [], "realized_equity": 100000, "fingerprint": "empty-book",
+        "entries_allowed": True, "block_reason": None, "daily_risk_headroom": 3000,
+    })
+    release = threading.Event()
+
+    def analyze(symbol, *args):
+        if symbol == "SECOND":
+            release.wait(10)
+        return candidate(symbol), None
+
+    monkeypatch.setattr(jobs_module, "analyze_symbol", analyze)
+    options = {"capital": 100000, "interval": "minute", "mode": "rule_only", "risk_pct": 1, "reward_risk": 2}
+    jobs = jobs_module.ResearchJobs()
+    jobs.start({**options, "symbols": ["FIRST"]})
+    for _ in range(100):
+        if jobs.snapshot()["status"] == "completed":
+            break
+        threading.Event().wait(0.05)
+    jobs.start({**options, "symbols": ["SECOND"]})
+    try:
+        assert jobs.snapshot()["status"] == "running" and jobs.snapshot()["rows"] == []
+        shown = jobs.snapshot(completed=True)
+        assert shown["status"] == "completed" and [r["symbol"] for r in shown["rows"]] == ["FIRST"]
+    finally:
+        release.set()
+    for _ in range(100):
+        if jobs.snapshot()["status"] == "completed":
+            break
+        threading.Event().wait(0.05)
+    assert [r["symbol"] for r in jobs.snapshot(completed=True)["rows"]] == ["SECOND"]
+
+
 def test_stops_snap_to_tick_away_from_entry_and_risk_follows():
     rows = [candidate("LONG") | {"atr": 2.013}, candidate("SHORT", "SELL") | {"atr": 2.013}]
     result = {r["symbol"]: r["plan"] for r in engine.size_opportunities(rows, 100000, [], PaperRiskSettings())}

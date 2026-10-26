@@ -17,6 +17,8 @@ class ResearchJobs:
         self.lock = threading.RLock()
         self.cancelled = threading.Event()
         self.state = {"status": "idle", "processed": 0, "total": 0, "rows": [], "errors": [], "skipped": []}
+        # The last completed scan, shown by the classic dashboard while a new one runs.
+        self.previous = None
         self.path = get_settings().data_dir / "research" / "latest_scan.json"
         self.run_lock = FileLock(str(self.path) + ".run.lock", timeout=0, thread_local=False)
         if self.path.exists():
@@ -27,9 +29,11 @@ class ResearchJobs:
             except (ValueError, KeyError):
                 pass
 
-    def snapshot(self):
+    def snapshot(self, completed=False):
+        """The current scan; with ``completed``, the last finished one while a scan runs."""
         with self.lock:
-            state = copy.deepcopy(self.state)
+            running = self.state["status"] == "running"
+            state = copy.deepcopy(self.previous if completed and running and self.previous else self.state)
         now = datetime.now(UTC)
         allocation_warning = None
         try:
@@ -97,6 +101,8 @@ class ResearchJobs:
             except Timeout as error:
                 raise RuntimeError("Another process is scanning this data directory") from error
             self.cancelled.clear()
+            if self.state.get("status") == "completed":
+                self.previous = copy.deepcopy(self.state)
             self.state = {"status": "running", "processed": 0, "total": len(symbols), "rows": [],
                           "errors": [], "skipped": [], "started_at": datetime.now(UTC).isoformat(),
                           "options": options, "source": source}

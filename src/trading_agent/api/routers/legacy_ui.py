@@ -41,7 +41,8 @@ DEFAULT_INTERVAL = "minute"
 def _scan() -> dict:
     from trading_agent.analysis.research_jobs import get_research_jobs
 
-    return get_research_jobs().snapshot()
+    # The classic dashboard keeps the last finished scan on screen while a new one runs.
+    return get_research_jobs().snapshot(completed=True)
 
 
 def _scan_rows() -> list[dict]:
