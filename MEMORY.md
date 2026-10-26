@@ -138,7 +138,7 @@ A **Screener** tab rebuilds Groww Explore's top movers, sectors trending, tradin
 - `.dt.date` took most of the CPU: 0.27 s a symbol, down to 0.08 s with integer IST session keys.
 - Four threads were GIL-bound: 9 minutes for the full scan, now about 2 minutes in 4 spawned processes. The worker read cache is off, because one process grew to 1.3 GB and four broke the pool.
 
-Verified on 2026-10-26: 11 screener tests passed; the full suite had 636 passed and 1 failed (`test_data_coverage::test_backfill_window_starts_where_data_check_starts` is calendar-dependent and fails on this date regardless of this change). Ruff passed, and the frontend type-check and build passed. The Screener tab was driven in Playwright against a second API instance (port 8011) at 1440 and 390 px: no console errors or failed API calls, and no page overflow. The pre-existing `test_research_lifecycle` failure seen once only appeared when runs overlapped; it passed on its own.
+Verified on 2026-10-26: 11 screener tests passed, and the full suite passed (637). `test_data_coverage::test_backfill_window_starts_where_data_check_starts` had failed on Mondays: it measured the backfill span from now, not from the last closed session with the weekend roll-forward. That is fixed in the same branch. Ruff passed, and the frontend type-check and build passed. The Screener tab was driven in Playwright against a second API instance (port 8011) at 1440 and 390 px: no console errors or failed API calls, and no page overflow. The pre-existing `test_research_lifecycle` failure seen once only appeared when runs overlapped; it passed on its own.
 
 ### 2026-10-26: First live paper session, storage speed, paper brackets
 
