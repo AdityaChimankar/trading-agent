@@ -27,6 +27,12 @@ class LLMDecision:
     reasoning: str
     key_factors: list[str]
     risk_assessment: str
+    # No decision was made (provider error or unreadable reply): never stored as a HOLD.
+    failed: bool = False
+
+# A provider that fails this many symbols in a row is down or misconfigured (on
+# 2026-10-26 a retired OpenRouter model returned 404 for every call), so the cycle stops.
+MAX_CONSECUTIVE_FAILURES = 3
 
 
 SYSTEM_PROMPT = """You are an expert intraday trader for the Indian NSE market.
@@ -126,6 +132,7 @@ class LLMDecisionAgent:
                 reasoning=f"Failed to parse LLM response: {e}",
                 key_factors=[],
                 risk_assessment="MEDIUM",
+                failed=True,
             )
 
     async def decide(self, candidate: Candidate) -> LLMDecision:
@@ -150,6 +157,7 @@ class LLMDecisionAgent:
                 reasoning=f"LLM error: {e}",
                 key_factors=[],
                 risk_assessment="HIGH",
+                failed=True,
             )
 
     async def decide_batch(self, candidates: list[Candidate]) -> list[LLMDecision]:
@@ -195,6 +203,7 @@ async def run_llm_decision_cycle(symbols: list[str] | None = None, interval: str
     agent = LLMDecisionAgent(use_mock=False)
     generator = CandidateGenerator()
     parquet = get_parquet_store()
+    failures = 0
 
     for symbol in symbols:
         try:
@@ -210,6 +219,14 @@ async def run_llm_decision_cycle(symbols: list[str] | None = None, interval: str
                 continue
 
             decision = await agent.decide(candidate)
+            if decision.failed:
+                failures += 1
+                if failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.error("llm_decision_cycle_aborted", consecutive_failures=failures,
+                                 last_error=decision.reasoning[:200])
+                    break
+                continue
+            failures = 0
             logger.info(
                 "llm_decision",
                 symbol=symbol,
