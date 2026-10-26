@@ -81,7 +81,7 @@ Keep paper mode until those are evidenced.
 | P1 | Current LLM model | `LLM_MODEL` in `.env` names a model OpenRouter still serves; `gemini-2.0-flash-001` returned 404 on 2026-10-26 |
 | P1 | Ticker reloads the Kite token | after `trading-agent login` the running ticker reconnects without a restart (it stayed on 403 on 2026-10-26) |
 | P1 | Scheduler survives host sleep | jobs fire after the laptop wakes (on 2026-10-26 none ran until a restart) |
-| P1 | Live 1-minute refresh | a scheduled job keeps today's 1-minute bars current for the scan set; on 2026-10-26 only a scratch driver did |
+| P1 | Live 1-minute bars | the ticker also writes 1-minute bars for a live set and a scan runs on each bar close. A 1-minute plan expires about 75 s after its bar closes, so a Kite backfill (~30 s for 50 names) plus a scan (~20 s) leaves the dashboard's plans expired almost always (2026-10-26). Writing 1-minute files for all 2,319 symbols would be ~38 files/s, too many for the bind mount, so restrict it to a live set |
 | P1 | Prospective paper evidence | ≥ 20 trading days of paper results so analytics stop warning about sample size |
 | P0 | Re-run research on corrected timestamps | earlier walk-forward, outcome-validation and outcome-model results were computed on history whose legacy sessions were shifted 5h30m; rerun before relying on any of them |
 | P1 | Ingest Nifty 50 candles and run `orb` / `orb_gap` in Strategy Lab | NIFTY50 minute candles stored; profiles compared with baselines after costs on several symbols |
