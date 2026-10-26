@@ -32,12 +32,16 @@ export default function Sidebar({
     return map
   }, [data])
 
-  // Symbol search within the watchlist
+  // Symbol search within the watchlist; with no search, the latest scan's names
+  // first (they have live data), not the alphabetical start of the watchlist.
   const filteredSymbols = useMemo(() => {
-    if (!search) return watchlistSymbols
+    if (!search) {
+      const scanned = (data?.scored ?? []).map((entry) => entry.symbol)
+      return [...scanned, ...watchlistSymbols.filter((s) => !scanned.includes(s))]
+    }
     const q = search.toLowerCase()
     return watchlistSymbols.filter((s) => s.toLowerCase().includes(q))
-  }, [watchlistSymbols, search])
+  }, [watchlistSymbols, search, data])
 
   const ranked: RankedEntry[] = view === 'Bullish' ? (data?.bullish ?? []) : (data?.bearish ?? [])
   const scoreKey = view === 'Bullish' ? 'bullish_score' : 'bearish_score'

@@ -161,6 +161,8 @@ export type ChartResponse =
   | {
       symbol: string
       insufficient_data: false
+      // The bars shown: 1-minute while fresh, else the live feed's interval.
+      interval?: string
       candles: CandleArrays
       indicators: IndicatorArrays
       patterns: PatternFlags

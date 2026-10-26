@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
@@ -34,6 +34,10 @@ from trading_agent.storage.db import Position, Signal, get_database
 router = APIRouter()
 IST = ZoneInfo("Asia/Kolkata")
 DEFAULT_INTERVAL = "minute"
+# 1-minute bars stay the default while fresh. Only backfill refreshes them, so for
+# the rest of the watchlist the charts follow the live feed's interval instead of
+# showing the last backfilled session (20MICRONS showed Friday on 2026-10-26).
+FRESH_MINUTE_SECONDS = 600
 
 
 # --- shared helpers ----------------------------------------------------------
@@ -427,6 +431,24 @@ def _build_digest(key: str, target) -> None:
 
 # --- per-symbol views --------------------------------------------------------------
 
+def _view_interval(symbol: str, requested: str | None) -> str:
+    """The requested interval, else 1-minute bars if fresh, else the live feed's."""
+    from trading_agent.core.config import get_settings
+    from trading_agent.storage.parquet_store import get_parquet_store
+
+    if requested:
+        return requested
+    live = get_settings().storage.candle_interval
+    if live == DEFAULT_INTERVAL:
+        return live
+    latest = get_parquet_store().read_latest(symbol, DEFAULT_INTERVAL, 1)
+    if not latest.empty:
+        ended = latest["timestamp"].iloc[-1].to_pydatetime() + timedelta(minutes=1)
+        if (_now() - ended).total_seconds() <= FRESH_MINUTE_SECONDS:
+            return DEFAULT_INTERVAL
+    return live
+
+
 def _research_frame(symbol: str, interval: str):
     from trading_agent.analysis.research_engine import completed_frame
     from trading_agent.storage.parquet_store import get_parquet_store
@@ -467,16 +489,18 @@ def _news_rows(symbol: str) -> list[dict]:
 
 
 @router.get("/symbols/{symbol}/chart")
-async def chart(symbol: str, limit: int = Query(200, ge=20, le=2000), interval: str = Query(DEFAULT_INTERVAL)):
+async def chart(symbol: str, limit: int = Query(200, ge=20, le=2000), interval: str | None = Query(None)):
     from trading_agent.analysis.research_engine import INTERVAL_SECONDS, chart_payload
 
     symbol = _require_symbol(symbol)
+    interval = await run_in_threadpool(_view_interval, symbol, interval)
     if interval not in INTERVAL_SECONDS:
         raise HTTPException(422, "Unsupported interval")
     df = await run_in_threadpool(_research_frame, symbol, interval)
     if df is None:
         return {"symbol": symbol, "insufficient_data": True, "candles": None}
     payload = chart_payload(symbol, df, limit)
+    payload["interval"] = interval
     payload["candles"]["timestamp"] = [t.isoformat() for t in payload["candles"]["timestamp"]]
     for marker in payload["signal_markers"]:
         marker["timestamp"] = marker["timestamp"].isoformat()
@@ -484,8 +508,13 @@ async def chart(symbol: str, limit: int = Query(200, ge=20, le=2000), interval: 
 
 
 @router.get("/symbols/{symbol}/patterns")
-async def patterns(symbol: str, interval: str = Query(DEFAULT_INTERVAL)):
+async def patterns(symbol: str, interval: str | None = Query(None)):
+    from trading_agent.analysis.research_engine import INTERVAL_SECONDS
+
     symbol = _require_symbol(symbol)
+    interval = await run_in_threadpool(_view_interval, symbol, interval)
+    if interval not in INTERVAL_SECONDS:
+        raise HTTPException(422, "Unsupported interval")
     df = await run_in_threadpool(_research_frame, symbol, interval)
     if df is None:
         return {"patterns": [], "bias": "neutral"}
@@ -495,14 +524,15 @@ async def patterns(symbol: str, interval: str = Query(DEFAULT_INTERVAL)):
 
 
 @router.get("/symbols/{symbol}/technicals")
-async def technicals(symbol: str, interval: str = Query(DEFAULT_INTERVAL)):
+async def technicals(symbol: str, interval: str | None = Query(None)):
     from trading_agent.analysis.research_engine import INTERVAL_SECONDS
     from trading_agent.analysis.technical_summary import summary_from_frame
 
     symbol = _require_symbol(symbol)
+    interval = await run_in_threadpool(_view_interval, symbol, interval)
     if interval not in INTERVAL_SECONDS:
         raise HTTPException(422, "Unsupported interval")
-    df =await run_in_threadpool(_research_frame, symbol, interval)
+    df = await run_in_threadpool(_research_frame, symbol, interval)
     summary = summary_from_frame(symbol, interval, df) if df is not None else None
     return to_jsonable(summary or {"symbol": symbol, "insufficient_data": True})
 

@@ -261,3 +261,23 @@ def test_v1_opportunities_default_to_the_scan_not_every_stored_symbol(client, mo
                         lambda self, symbols, interval="5minute", *a, **k: seen.append(list(symbols)) or [])
     assert client.get("/api/v1/opportunities/").json() == []
     assert seen == [["AAA", "BBB", "CCC", "OLD"]]
+
+
+def _bars(store, symbol, interval, freq, end):
+    ts = pd.date_range(end=end, periods=120, freq=freq)
+    store.write_candles(pd.DataFrame({"timestamp": ts, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                                      "volume": 1000, "oi": 0}), symbol, interval)
+
+
+def test_charts_use_minute_bars_while_fresh_else_the_live_feed(client):
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    live = get_settings().storage.candle_interval
+    assert live != "minute"
+    _bars(client.store, "AAA", "minute", "min", now - timedelta(days=3))  # last backfill: days ago
+    _bars(client.store, "AAA", live, "5min", now - timedelta(minutes=10))  # the ticker's live bars
+    for path in ("chart", "patterns", "technicals"):
+        assert client.get(f"/api/symbols/AAA/{path}").status_code == 200
+    assert client.get("/api/symbols/AAA/chart").json()["interval"] == live
+    _bars(client.store, "AAA", "minute", "min", now - timedelta(minutes=2))
+    assert client.get("/api/symbols/AAA/chart").json()["interval"] == "minute"
+    assert client.get("/api/symbols/AAA/chart?interval=5minute").json()["interval"] == "5minute"

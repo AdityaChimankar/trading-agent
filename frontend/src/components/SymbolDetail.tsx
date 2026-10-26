@@ -10,7 +10,7 @@ import {
   useSignals,
   useSizing,
 } from '../api/queries'
-import { actionClass, cx, inr, num, shortTime } from '../lib/format'
+import { actionClass, cx, inr, num, shortTime, timeAgo } from '../lib/format'
 import TechnicalsPanel from './TechnicalsPanel'
 import TradeReplay from './TradeReplay'
 import { DataTable, Metric, Panel, StateMessage, type Column } from './ui'
@@ -46,11 +46,15 @@ export default function SymbolDetail({
   const adjusted = sizingData?.has_signal ? sizingData.adjusted : null
   const plan = adjusted?.base_plan ?? null
   const canRecord = Boolean(adjusted && !adjusted.blocked && adjusted.approved_size > 0)
+  const bars = chart.data?.insufficient_data === false ? chart.data : null
+  const lastBar = bars?.candles.timestamp.at(-1)
+  const barsLabel = bars?.interval === 'minute' ? '1-minute' : bars?.interval?.replace('minute', '-minute')
 
   return (
     <>
       <Panel
         title={`${symbol} — Price, Indicators & Patterns`}
+        subtitle={lastBar ? `${barsLabel ?? 'Stored'} bars · last bar ${shortTime(lastBar)} (${timeAgo(lastBar)})` : undefined}
         actions={chart.data?.insufficient_data === false ? (
           <div className="metric-row compact">
             <Metric label="RSI" value={num(chart.data.latest.rsi, 1)} />
