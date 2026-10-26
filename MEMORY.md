@@ -15,7 +15,7 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-25 (worst-case daily loss, fresh-price entry risk, stop checks, trade replay). Active branch: `risk-hardening`, from `main` after PR #2, pushed for a pull request into `main`.
+Last updated: 2026-10-26 (first live paper session: candle read cache and compaction, paper bracket exits, test DB isolation). Earlier: 2026-10-25 (worst-case daily loss, fresh-price entry risk, stop checks, trade replay). Active branch: `risk-hardening`, from `main` after PR #2, pushed for a pull request into `main`.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
@@ -24,7 +24,7 @@ The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/
 **Not verified:**
 
 - Live Zerodha orders and broker-side reconciliation (tested only against a stubbed Kite client).
-- A full live market session with ticker, scheduler, square-off and drift check running.
+- A full live market session with ticker, scheduler, square-off and drift check running. The 2026-10-26 session ran them but needed manual recovery (see the decision log).
 - The cost model against the current Zerodha charge sheet.
 - Any trading edge. Volume signals are rules of thumb. The first BUY/SELL outcome-model candidate failed qualification. Rule walk-forward results on RELIANCE were negative after costs.
 
@@ -76,6 +76,11 @@ Keep paper mode until those are evidenced.
 | P0 | Verify charge rates | `execution/costs.py` matches zerodha.com/charges on the test date |
 | P0 | Build the drift baseline on real data | `python -m trading_agent.strategy.model_monitoring baseline` run; `/api/v1/analytics/drift` reports `ok`/`warn`, not "no baseline" |
 | P0 | Broker order lifecycle hardening | partial fills, rejects, cancels, reconnect replay and idempotent intent IDs covered by fault-injection tests |
+| P0 | Strategy edge before more plumbing | a signal family with positive net R after 14 bps on held-out sessions; see the 2026-10-26 plan in the decision log. The current rule/hybrid signals have none |
+| P1 | Gate entries on the trade-replay verdict | entries whose replay is `conclusive_negative` are refused (today display only); 5 of 6 entries on 2026-10-26 were |
+| P1 | Ticker reloads the Kite token | after `trading-agent login` the running ticker reconnects without a restart (it stayed on 403 on 2026-10-26) |
+| P1 | Scheduler survives host sleep | jobs fire after the laptop wakes (on 2026-10-26 none ran until a restart) |
+| P1 | Live 1-minute refresh | a scheduled job keeps today's 1-minute bars current for the scan set; on 2026-10-26 only a scratch driver did |
 | P1 | Prospective paper evidence | ≥ 20 trading days of paper results so analytics stop warning about sample size |
 | P0 | Re-run research on corrected timestamps | earlier walk-forward, outcome-validation and outcome-model results were computed on history whose legacy sessions were shifted 5h30m; rerun before relying on any of them |
 | P1 | Ingest Nifty 50 candles and run `orb` / `orb_gap` in Strategy Lab | NIFTY50 minute candles stored; profiles compared with baselines after costs on several symbols |
@@ -97,6 +102,8 @@ Keep paper mode until those are evidenced.
 | Limitation | Workaround |
 |---|---|
 | Kite token expires daily | `trading-agent login` or `python manual_login.py` |
+| Docker Desktop's Windows bind mount (`./data`) is 7-10x slower than native disk | the candle read cache and nightly compaction hide most of it; a named volume or WSL-native checkout removes it |
+| Never open `data/trading.db` from a Windows process while the stack runs | a host pytest run locked it on 2026-10-26; tests now use a throwaway DB (conftest), recovery steps in the decision log |
 | SQLite writer concurrency is limited | one API worker, one ticker, one scheduler, one downloader |
 | Session gates are weekday/time rules, not an exchange calendar | check holidays manually |
 | Ledger limits use realized gross P&L | unrealized losses are not in the daily-loss gate |
@@ -111,6 +118,26 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-26: First live paper session, storage speed, paper brackets
+
+Paper only (live stayed off). Kite login, the ticker, the scheduler and a scratch driver (50 most liquid names: 1-minute backfill every 5 minutes, a full validated scan for the dashboard, and one unvalidated hybrid entry every 15 minutes, at most 6) ran from 09:50 IST.
+
+**Incidents.** The scheduler fired nothing after host sleep until restarted, and the ranker-trial pick was run by hand (both arms picked, 483 eligible). The ticker stayed on 403 after the morning login until restarted. A host pytest run opened the live `data/trading.db` and Windows locked it, so the API failed for about 5 minutes. It was recovered with SQLite's backup API from an `immutable=1` read (integrity ok), the original kept as `data/backups/trading-pre-recovery-20261026T050427Z.db`, and fixed in `6d0ff6a`.
+
+**Fixed.**
+
+- `26ee9b7`: entries priced from the bar that ended last, not the 5-minute series. BSE filled at a several-minute-old price.
+- `607b899`: the dashboard keeps the last completed scan while a new one runs.
+- `fa8fa64`: candle read cache and compaction. The ticker commits one file per symbol per bar and nothing merged them, so wallet, positions and rankings took 12-34 s and the decision loops over an hour a pass. The `signals` table was still empty at 11:30, which is why Signal History and the ML/LLM panels showed no rows. Reads now take milliseconds. Empty legacy `date=` partitions (250 per symbol for 7 large names) were removed, and a 16:05 job compacts every interval with more than 20 files.
+- `ca8b15c`: paper bracket exits. The monitor only alerted, on the latest bar only, so stops never executed and IDEA lost INR 225 against INR 52 of planned risk.
+- `194a68f`: UTC offsets on dashboard times ("Opened 8h ago").
+
+**Trades** (all SELL, unvalidated hybrid signals; BSE, IDEA, GROWW and KARURVYSYA were closed at market by the operator after their brackets had triggered unenforced; BHARTIARTL and NYKAA by the new enforcement): 6 trades, 2 wins, gross INR -337.78, charges 59.34, net -397.12, average -1.14R. Five of six had a `conclusive_negative` trade replay before entry. Charges were about INR 10 a round trip against INR 19-91 of risk, because the 10% position cap binds long before the 1% risk budget.
+
+**Analysis on real data.** Rule signals over about 182k trades on the 50 liquid names win about 28% against about 38% needed, about -0.13% net a trade, no positive name. In 100 replayed standard brackets (1.5x 1-minute ATR stop, 2R), gross R is about 0 to +0.1 in every stop-width quartile while net R tracks the cost share: -0.85R at 0.12-0.19% stops, -0.22R at 0.35-0.67%. Wider brackets lose less but cannot create an edge; breaking even needs a gross edge first.
+
+**Plan, in order.** (1) Stop adding live plumbing; research a signal with positive gross R on held-out sessions. Candidates: the ranker trial already running (60 sessions), `orb_gap` with NIFTY50 data, and session-structure filters (time of day, gap, relative volume). (2) Make costs small in R by construction: a minimum stop of about 0.7% (14 bps is 0.2R) via 5- or 15-minute ATR, a position cap that lets the risk budget bind, and liquid names only. (3) Gate entries on `conclusive_negative` replays and on `qualified_research` evidence (`require_validated` stays on). (4) Only then, 20+ paper sessions before any live discussion.
 
 ### 2026-10-24: TradingAgents adaptations (decision outcomes, LLM model tiers)
 
