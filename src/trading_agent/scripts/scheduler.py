@@ -312,6 +312,28 @@ def ml_retrain_cycle():
     logger.info("Starting weekly ML retraining cycle...")
     try:
         result = ml_retrain_scheduled()
+def compact_store_cycle(min_files: int = 20) -> None:
+    """Merge each interval holding more than ``min_files`` files into one.
+
+    The live ticker commits one file per symbol per bar, about 75 a session, and
+    every read opens all of them: by 2026-10-26 a 5-minute read took 2-4 s per symbol.
+    """
+    from trading_agent.storage.parquet_store import get_parquet_store
+
+    store = get_parquet_store()
+    compacted = failed = 0
+    for symbol in store.get_symbols():
+        for interval in store.get_intervals(symbol):
+            try:
+                if store.file_count(symbol, interval) > min_files:
+                    store.compact(symbol, interval)
+                    compacted += 1
+            except Exception as e:  # one bad interval must not stop the rest
+                failed += 1
+                logger.warning("store_compaction_failed", symbol=symbol, interval=interval, error=str(e))
+    logger.info("store_compaction_completed", compacted=compacted, failed=failed)
+
+
         logger.info(f"ML retraining cycle completed: {result}")
     except Exception as e:
         logger.error("ML retraining cycle failed", extra={"error": str(e)})
@@ -419,6 +441,12 @@ scheduler.add_job(
 )
 # Daily pre-flight validation - 8:15 AM on weekdays (before market open)
 # Runs validation and logs results; doesn't stop the scheduler if it fails
+# Storage compaction after every post-close job has read the session's files.
+scheduler.add_job(
+    compact_store_cycle,
+    CronTrigger(day_of_week="mon-fri", hour=16, minute=5),
+    id="compact_store",
+)
 scheduler.add_job(
     lambda: subprocess.run(
         [sys.executable, "-m", "trading_agent.scripts.validate_setup"],

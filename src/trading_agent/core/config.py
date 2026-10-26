@@ -67,6 +67,11 @@ class StorageSettings(BaseSettings):
         default="5minute",
         description="Default candle interval",
     )
+    read_cache_rows: int = Field(
+        default=4_000_000,
+        ge=0,
+        description="Candle rows each process keeps in memory between reads (0 disables)",
+    )
     compression: Literal["snappy", "gzip", "zstd", "lz4"] = Field(
         default="snappy",
         description="Parquet compression codec",

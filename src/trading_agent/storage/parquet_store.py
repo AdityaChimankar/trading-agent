@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+from collections import OrderedDict
+from typing import NamedTuple
 from uuid import uuid4
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,14 +63,32 @@ def _parse_stored_timestamps(values: pd.Series) -> pd.Series:
     return pd.concat(parts).sort_index().astype("datetime64[ns, UTC]")
 
 
+def _commit_order(files) -> list[tuple[tuple[int, str], Path]]:
+    """Files oldest commit first; later files win on duplicate candle keys."""
+    return sorted(((file.stat().st_mtime_ns, file.name), file) for file in files)
+
+
+class _CachedFrame(NamedTuple):
+    files: frozenset[Path]
+    last: tuple[int, str]
+    frame: pd.DataFrame
+
+
 class ParquetStore:
     """Partitioned Parquet storage for candle data."""
 
-    def __init__(self, root_path: Path | None = None, compression: str = "snappy"):
+    def __init__(self, root_path: Path | None = None, compression: str = "snappy",
+                 cache_rows: int | None = None):
         settings = get_settings()
         self.root_path = root_path or settings.storage.parquet_root
         self.compression = compression
         self.root_path.mkdir(parents=True, exist_ok=True)
+        # Deduplicated frames per (symbol, interval), least recently used first.
+        # Files are immutable, so a read only opens files committed since.
+        self.cache_rows = settings.storage.read_cache_rows if cache_rows is None else cache_rows
+        self._cache: OrderedDict[tuple[str, str], _CachedFrame] = OrderedDict()
+        self._cached_rows = 0
+        self._cache_guard = threading.Lock()
 
     def _symbol_path(self, symbol: str) -> Path:
         """Get path for a symbol's partitioned data."""
@@ -96,8 +117,12 @@ class ParquetStore:
         Later committed files win on duplicate candle keys. Filtering must
         happen after deduplication so an obsolete candle cannot reappear.
         """
-        frames = []
-        for file in sorted(files, key=lambda p: (p.stat().st_mtime_ns, p.name)):
+        return self._read_ordered([file for _, file in _commit_order(files)])
+
+    @staticmethod
+    def _read_ordered(files: list[Path], base: pd.DataFrame | None = None) -> pd.DataFrame:
+        frames = [] if base is None else [base]
+        for file in files:
             frame = pq.ParquetFile(file).read().to_pandas()
             frame["timestamp"] = _parse_stored_timestamps(frame["timestamp"])
             frames.append(frame)
@@ -106,6 +131,52 @@ class ParquetStore:
         return (pd.concat(frames, ignore_index=True)
                 .drop_duplicates("timestamp", keep="last")
                 .sort_values("timestamp").reset_index(drop=True))
+
+    def _read_interval(self, symbol: str, interval: str, path: Path) -> pd.DataFrame:
+        """Every candle for one interval, deduplicated. Callers must not mutate it.
+
+        Holds the interval lock, so no writer or compaction runs meanwhile. The
+        cached frame is extended only when every new file commits after every
+        cached one; otherwise (a compaction, a deleted file, a clock step) the
+        interval is read in full, exactly as without the cache.
+        """
+        key = (symbol, interval)
+        files = list(path.rglob("*.parquet"))
+        with self._cache_guard:
+            cached = self._cache.get(key)
+        if cached is not None and cached.files.issubset(files):
+            new = _commit_order(set(files) - cached.files)
+            if not new:
+                self._remember(key, cached)
+                return cached.frame
+            if new[0][0] > cached.last:
+                frame = self._read_ordered([file for _, file in new], cached.frame)
+                self._remember(key, _CachedFrame(frozenset(files), new[-1][0], frame))
+                return frame
+        ordered = _commit_order(files)
+        frame = self._read_ordered([file for _, file in ordered])
+        if ordered:
+            self._remember(key, _CachedFrame(frozenset(files), ordered[-1][0], frame))
+        else:
+            self._forget(symbol, interval)
+        return frame
+
+    def _remember(self, key: tuple[str, str], entry: _CachedFrame) -> None:
+        with self._cache_guard:
+            old = self._cache.pop(key, None)
+            self._cached_rows -= len(old.frame) if old is not None else 0
+            if len(entry.frame) > self.cache_rows:
+                return
+            self._cache[key] = entry
+            self._cached_rows += len(entry.frame)
+            while self._cached_rows > self.cache_rows:
+                _, evicted = self._cache.popitem(last=False)
+                self._cached_rows -= len(evicted.frame)
+
+    def _forget(self, symbol: str, interval: str | None = None) -> None:
+        with self._cache_guard:
+            for key in [k for k in self._cache if k[0] == symbol and interval in (None, k[1])]:
+                self._cached_rows -= len(self._cache.pop(key).frame)
 
     def _commit_frame(self, frame: pd.DataFrame, directory: Path) -> Path:
         """Publish a complete immutable file; interrupted writes stay invisible."""
@@ -218,12 +289,13 @@ class ParquetStore:
         """
         path = self._interval_path(symbol, interval)
         if not path.exists():
+            self._forget(symbol, interval)
             return pd.DataFrame()
 
         with self._lock(symbol, interval):
-            df = self._read_files(list(path.rglob("*.parquet")))
+            df = self._read_interval(symbol, interval, path)
         if df.empty:
-            return df
+            return df.copy()
         if start is not None:
             df = df[df["timestamp"] >= pd.to_datetime(start, utc=True)]
         if end is not None:
@@ -235,7 +307,8 @@ class ParquetStore:
             if col == "timestamp":
                 value = pd.to_datetime(value, utc=True)
             df = df[getattr(df[col], operations[op])(value)]
-        return (df if columns is None else df[columns]).reset_index(drop=True)
+        # A copy: the unfiltered frame is the cached one.
+        return (df if columns is None else df[columns]).reset_index(drop=True).copy()
 
     def read_latest(
         self,
@@ -246,7 +319,13 @@ class ParquetStore:
         """Read the N most recent candles."""
         if n < 1:
             raise ValueError("n must be positive")
-        return self.read_candles(symbol, interval).tail(n).reset_index(drop=True)
+        path = self._interval_path(symbol, interval)
+        if not path.exists():
+            self._forget(symbol, interval)
+            return pd.DataFrame()
+        with self._lock(symbol, interval):
+            df = self._read_interval(symbol, interval, path)
+        return df.tail(n).reset_index(drop=True).copy()
 
     def get_symbols(self) -> list[str]:
         """Get list of symbols with data."""
@@ -290,6 +369,7 @@ class ParquetStore:
         import shutil
 
         path = self._symbol_path(symbol)
+        self._forget(symbol)
         if path.exists():
             shutil.rmtree(path)
             logger.info("parquet_symbol_deleted", symbol=symbol)
@@ -312,8 +392,19 @@ class ParquetStore:
             self._commit_frame(frame, path)
             for original in originals:
                 original.unlink()
+            # Emptied partitions stay listed by every read: 250 of them made one
+            # symbol's minute read take 2.6 s on the Docker Desktop bind mount.
+            for directory, _, _ in sorted(os.walk(path), reverse=True):
+                if Path(directory) != path and not os.listdir(directory):
+                    os.rmdir(directory)
+            self._forget(symbol, interval)
         logger.info("parquet_compacted", symbol=symbol, interval=interval, rows=len(frame))
         return len(frame)
+
+    def file_count(self, symbol: str, interval: str) -> int:
+        """Committed files for one interval; every read opens or lists each of them."""
+        path = self._interval_path(symbol, interval)
+        return sum(1 for _ in path.rglob("*.parquet")) if path.exists() else 0
 
     def get_stats(self, symbol: str | None = None) -> dict:
         """Get storage statistics."""
