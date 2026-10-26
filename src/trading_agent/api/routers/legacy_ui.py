@@ -439,10 +439,16 @@ def _research_frame(symbol: str, interval: str):
 @router.get("/symbols/news")
 def all_news(limit: int = Query(100, ge=1, le=500)):
     from trading_agent.analysis.research_engine import universe
+    from trading_agent.core.config import get_settings
 
+    # One directory listing, not an exists() per watchlist symbol: 2,300 of those
+    # took 12 s on the Docker Desktop bind mount for a dozen news files.
+    directory = get_settings().data_dir / "research" / "news"
+    stored = {path.stem for path in directory.glob("*.json")} if directory.is_dir() else set()
     rows = []
     for symbol in universe():
-        rows.extend(_news_rows(symbol))
+        if symbol in stored:
+            rows.extend(_news_rows(symbol))
     rows.sort(key=lambda r: r["published_at"] or "", reverse=True)
     return rows[:limit]
 
