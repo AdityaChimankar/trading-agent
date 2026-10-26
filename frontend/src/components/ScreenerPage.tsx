@@ -38,6 +38,20 @@ const MOVER_QUERY: Record<Mover, string> = {
   gainers: 'sort=change_pct&order=desc', losers: 'sort=change_pct&order=asc', volume: 'sort=volume_vs_week_pct&order=desc',
 }
 interface Stocks { count: number; rows: Row[] }
+interface Stat { sessions: number; mean_bps?: number; hit_rate_pct?: number; t_stat?: number | null }
+interface OutcomePart { net: Stat; edge_vs_universe: Stat; avg_names: number }
+interface ScreenOutcome {
+  id: string; title: string; side: 'long' | 'short'
+  verdict: 'edge_candidate' | 'no_edge' | 'inconclusive' | 'insufficient_sessions'
+  development: OutcomePart; holdout: OutcomePart
+}
+interface Outcomes {
+  status: string; generated_at?: string; sessions?: number; holdout_from?: string; last_session?: string
+  symbols?: number; config?: { decision_minute: number; cost_bps: number }; screens?: ScreenOutcome[]
+  universe_baseline?: { long_net: Stat; short_net: Stat }
+}
+const VERDICT_COLOR = { edge_candidate: 'success', no_edge: 'error', inconclusive: 'warning', insufficient_sessions: 'default' } as const
+const bps = (v?: number) => (v == null ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(1)}`)
 interface SymbolCheck {
   current: Row; saved_as_of: string | null; changed: Record<string, { saved: unknown; now: unknown }>
 }
@@ -87,6 +101,40 @@ function Select({ label, value, onChange, options }: {
   )
 }
 
+function ScreenTrackRecord({ outcomes }: { outcomes?: Outcomes }) {
+  if (!outcomes) return null
+  if (outcomes.status !== 'completed' || !outcomes.screens) {
+    return (
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>
+        No track record yet. Run <code>trading-agent optimize screen-outcomes</code> to test each screen on stored history.
+      </Typography>
+    )
+  }
+  const cfg = outcomes.config
+  const at = cfg ? `${String(Math.floor(cfg.decision_minute / 60)).padStart(2, '0')}:${String(cfg.decision_minute % 60).padStart(2, '0')}` : ''
+  const edges = outcomes.screens.filter((s) => s.verdict === 'edge_candidate')
+  return (
+    <Box sx={{ mt: 2 }}>
+      <Alert severity={edges.length ? 'info' : 'warning'} sx={{ mb: 1.5 }}>
+        {edges.length
+          ? `${edges.map((s) => s.title).join(', ')} passed the historical check; paper-test before relying on it.`
+          : `Historical check: no screen made money after ${cfg?.cost_bps ?? 14} bps costs, entering at ${at} and exiting by 15:15. They are watchlists, not signals.`}
+        {' '}{outcomes.sessions} sessions to {outcomes.last_session}, holdout from {outcomes.holdout_from}, {outcomes.symbols} liquid names.
+      </Alert>
+      <DataTable rows={outcomes.screens} maxRows={10} columns={[
+        { header: 'Screen', cell: r => r.title },
+        { header: 'Side', cell: r => r.side },
+        { header: 'Names/day', cell: r => num(r.holdout.avg_names, 0), align: 'right' },
+        { header: 'Holdout net bps', cell: r => <Box component="span" sx={{ color: color(r.holdout.net.mean_bps), fontFamily: tokens.mono }}>{bps(r.holdout.net.mean_bps)}</Box>, align: 'right' },
+        { header: 'vs universe', cell: r => <Box component="span" sx={{ color: color(r.holdout.edge_vs_universe.mean_bps), fontFamily: tokens.mono }}>{bps(r.holdout.edge_vs_universe.mean_bps)}</Box>, align: 'right' },
+        { header: 'Dev net / vs universe', cell: r => `${bps(r.development.net.mean_bps)} / ${bps(r.development.edge_vs_universe.mean_bps)}`, align: 'right' },
+        { header: 't (holdout)', cell: r => num(r.holdout.net.t_stat ?? null, 2), align: 'right' },
+        { header: 'Verdict', cell: r => <Chip size="small" variant="outlined" color={VERDICT_COLOR[r.verdict]} label={r.verdict.replace('_', ' ')} /> },
+      ]} />
+    </Box>
+  )
+}
+
 export default function ScreenerPage({ onSelectSymbol }: { onSelectSymbol: (symbol: string) => void }) {
   const cache = useQueryClient()
   const [filters, setFilters] = useState<Filters>(NO_FILTERS)
@@ -99,6 +147,8 @@ export default function ScreenerPage({ onSelectSymbol }: { onSelectSymbol: (symb
   const screens = useQuery({ queryKey: ['screener-screens', version], queryFn: () => apiGet<Screen[]>('/api/v1/screener/screens') })
   const stocks = useQuery({ queryKey: ['screener-stocks', version, filters],
     queryFn: () => apiGet<Stocks>(`/api/v1/screener/stocks?${query(filters)}`) })
+  const outcomes = useQuery({ queryKey: ['screen-outcomes'], queryFn: () => apiGet<Outcomes>('/api/v1/screener/outcomes'),
+    refetchInterval: 600_000 })
   const [mover, setMover] = useState<Mover>('gainers')
   const [moverIndex, setMoverIndex] = useState('NIFTY100')
   const movers = useQuery({ queryKey: ['screener-movers', version, mover, moverIndex],
@@ -194,6 +244,7 @@ export default function ScreenerPage({ onSelectSymbol }: { onSelectSymbol: (symb
               label={`${p.title} · ${p.count}`} onClick={() => set({ screen: filters.screen === p.id ? '' : p.id })} />
           ))}
         </Box>
+        <ScreenTrackRecord outcomes={outcomes.data} />
       </Panel>
 
       <Panel title="Intraday screener" subtitle={stocks.data ? `${stocks.data.count} matching stocks` : undefined}

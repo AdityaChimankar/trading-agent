@@ -66,6 +66,7 @@ Keep paper mode until those are evidenced.
 | ML | PSI/KS drift monitor; withdraws ML (or loads `ml_model.previous.joblib`) on drift; daily 15:40 check | `strategy/model_monitoring.py` |
 | Validation | Vectorized backtest `--selftest` vs loop reference, walk-forward `--all`, lookahead and train/serve skew checks | `research/walk_forward_optimizer.py`, `strategy/session_features.py` |
 | Analytics | Market screener (after Groww Explore): top movers by index, sector breadth per NSE industry, 10 preset screens, intraday screener filters (5m/15m/1h/1D change, daily RSI(14)/MACD(12,26,9) on completed sessions, 52W proximity, R1–R3 pivots, index, sector); background multi-process scan with live Kite quotes over stored candles, a technicals check (stale, lagging, quoted, short history) and per-symbol recheck | `analysis/screener.py`, `analysis/screener_jobs.py`, `ingest/sector_map.py`, `ingest/live_quotes.py`, `/api/v1/screener/*`, `trading-agent sector-map / screener-scan`, `components/ScreenerPage.tsx` |
+| Research | Screen outcomes: every screener preset evaluated historically at a decision time (default 10:15) with no look-ahead; flagged names are entered at the 10:15 open and exited before 15:15, net of 14 bps, against the liquid universe (random baseline), with a development/holdout split and a Bonferroni t ≥ 2.81 for an `edge_candidate`; track record shown under the Screener's screen chips | `research/screen_outcomes.py`, `trading-agent optimize screen-outcomes`, `/api/v1/screener/outcomes` |
 | UI | React + MUI: Dashboard, Screener, Research, Paper operations, Risk & execution, Analytics, Signal Pipeline, Transactions, News | `frontend/src/App.tsx`, `lib/router.ts` |
 
 ## Open work
@@ -120,6 +121,24 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-26: Screen outcomes (do the screener's screens predict anything?)
+
+The new Screener puts 10 trading screens on the dashboard, and RULES.md requires a signal to be validated out of sample, after costs, against a random baseline before anyone relies on it. `research/screen_outcomes.py` evaluates each screen on every stored session with only information known at the decision time. The setup:
+
+- Previous-session pivots, completed-session RSI and MACD, and the 52-week high from completed sessions.
+- Volume so far against the same time of day over the previous 20 sessions. Groww's full-day average would be meaningless at 10:15.
+- Flagged names are traded on the screen's side, from the 10:15 bar's open to the last bar before 15:15, net of 14 bps.
+- The baseline is the liquid universe's mean on the same day (a random pick). The universe is names with a 20-session mean daily value of at least INR 10 crore.
+
+**Result** (point in time; Nifty 500-plus list, 495 liquid names, 254 sessions 2025-10-14..2026-10-26, holdout from 2026-06-24): no screen has an edge.
+
+- Holdout net per trade-day ran from −2.8 bps (RSI ≥ 70, short) to −28.5 bps (near R1, long). The universe itself nets −16.5 bps long and −11.5 bps short.
+- The edge against the universe was within ±8 bps in the holdout: R1 breakout +0.7, MACD positive +1.0, RSI ≤ 30 long +7.9 (t −1.66 net).
+- The development period showed the same signs, apart from RSI ≥ 70 short at +10 bps, which faded to +1 in the holdout.
+- With a 09:30 decision the picture is unchanged: every screen is `no_edge`, and breakouts did worse (−10 bps against the universe in development).
+
+The UI now says so under the screen chips: they are watchlists, not signals. This agrees with the earlier rule-signal findings: small gross moves, costs of 14 bps decide.
 
 ### 2026-10-26: Market screener after Groww Explore
 

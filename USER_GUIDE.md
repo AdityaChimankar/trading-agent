@@ -39,6 +39,8 @@ Nothing is computed when a page loads. **Update technicals** (or `trading-agent 
 
 The header shows the technicals check: current rows, live-quoted rows, stale rows (an older session) and lagging rows (more than 15 minutes behind the newest price, counted to 15:30 at the latest, usually a ticker gap), plus rows without enough history for RSI (15 sessions), MACD (35 sessions) or a full 52 weeks. Stale and lagging rows are left out of screens and sector breadth. **Check** on a row recomputes that stock now and lists what changed since the saved scan.
 
+Below the screen chips, a **track record** shows how each screen did historically. `trading-agent optimize screen-outcomes [--decision HH:MM] [--cost-bps X]` re-runs it over the Nifty 500-plus list in about a minute and a half, and the result is saved to `data/research/screen_outcomes.json`. Each screen is evaluated at the decision time (default 10:15) with only what was known then. Flagged names are entered at the 10:15 bar's open on the screen's side and exited before 15:15. The table shows the net result after costs and the edge against the whole liquid universe (a random pick), for a development period and a later holdout. A screen counts as an `edge candidate` only with positive net and edge in both periods and a holdout t of at least 2.81 (corrected for testing 10 screens). On 2026-10-26, no screen passed, at either 10:15 or 09:30, so treat the screens as watchlists, not signals.
+
 Sectors and index filters need the sector map. Run `trading-agent sector-map` to download NSE's index lists (Nifty Total Market, which is Nifty 500 plus Microcap 250, with 22 industries) into `data/cache/sector_map.csv`. A copy is committed, so a fresh checkout works offline. Unlisted symbols stay unclassified.
 
 The Dashboard digest is built in the background from the top 30 scan names and cached for 15 minutes. Run a research scan first; without one, the classic pages show empty states rather than invented rankings.
@@ -548,6 +550,7 @@ docker compose down
 | `trading-agent optimize strategy-search [SYMBOL...] [--no-ml]` | Frozen-selection strategy search with baselines and walk-forward |
 | `trading-agent optimize cross-sectional [SYMBOL...]` | Cross-sectional ranking walk-forward vs random picks |
 | `trading-agent optimize ranker-trial start / pick / settle / status [--arm rf\|hgb\|all]` | Prospective paper trial of the frozen rankers (start needs one arm) |
+| `trading-agent optimize screen-outcomes [SYMBOL...] [--decision HH:MM] [--cost-bps X] [--min-value-cr X]` | Historical net return of each screener screen against the liquid universe, development vs holdout |
 | `trading-agent optimize decision-outcomes [--days N] [--horizon MIN] [--cost-bps X]` | Score stored rule/ML/LLM signals on realised returns after costs |
 | `trading-agent optimize trade-replay SYMBOL --side BUY\|SELL --entry X --stop X --target X [--at "YYYY-MM-DD HH:MM"] [--replays N] [--seed N] [--sessions N] [--json]` | Simulated and historical odds of target first, stop first or neither by 15:15 for one bracket |
 | `trading-agent optimize ranking-lab [SYMBOL...] [--snapshots FILE]` | 60 pre-registered cross-sectional variants, selection frozen on validation |

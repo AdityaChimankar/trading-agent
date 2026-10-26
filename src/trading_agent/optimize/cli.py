@@ -128,6 +128,40 @@ def cross_sectional(
 
 
 
+@app.command("screen-outcomes")
+def screen_outcomes(
+    symbols: list[str] = typer.Argument(None, help="Symbols (default: symbols_nifty500_plus.txt)"),
+    decision: str = typer.Option("10:15", help="IST time each screen is evaluated (HH:MM)"),
+    cost_bps: float = typer.Option(14.0, help="Round-trip cost per position, incl. slippage"),
+    min_value_cr: float = typer.Option(10.0, help="Minimum 20-day mean traded value, INR crore"),
+):
+    """Historical net return of each screener screen vs the liquid universe; research only."""
+    from trading_agent.research.screen_outcomes import OutcomeConfig, run
+
+    try:
+        hour, minute = (int(part) for part in decision.split(":"))
+    except ValueError as error:
+        raise typer.BadParameter("decision must be HH:MM") from error
+    if not (9 * 60 + 20 <= hour * 60 + minute <= 14 * 60 + 45):
+        raise typer.BadParameter("decision must be between 09:20 and 14:45")
+    report = run([s.upper() for s in symbols] if symbols else None,
+                 OutcomeConfig(decision_minute=hour * 60 + minute, cost_bps=cost_bps, min_avg_value_cr=min_value_cr))
+    if report["status"] != "completed":
+        typer.echo(f"{report['status']}: {report.get('sessions', 0)} sessions", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"{report['sessions']} sessions {report['first_session']}..{report['last_session']}, "
+               f"holdout from {report['holdout_from']}, {report['symbols']} liquid symbols")
+    base = report["universe_baseline"]
+    typer.echo(f"universe baseline: long {base['long_net'].get('mean_bps')} bps, "
+               f"short {base['short_net'].get('mean_bps')} bps net a day")
+    typer.echo(f"{'screen':22s} side  dev net / edge     holdout net / edge (t)   names  verdict")
+    for s in report["screens"]:
+        dev, hold = s["development"], s["holdout"]
+        typer.echo(f"{s['id']:22s} {s['side']:5s} {dev['net'].get('mean_bps')!s:>7} / {dev['edge_vs_universe'].get('mean_bps')!s:<7}"
+                   f" {hold['net'].get('mean_bps')!s:>7} / {hold['edge_vs_universe'].get('mean_bps')!s:<7}"
+                   f" ({hold['net'].get('t_stat')})  {hold['avg_names']:>6}  {s['verdict']}")
+
+
 @app.command("decision-outcomes")
 def decision_outcomes(
     days: int = typer.Option(30, help="Signals stored in the last N days"),

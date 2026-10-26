@@ -73,6 +73,14 @@ def screens():
     return jsonable(screen_counts(get_screener_jobs().rows()))
 
 
+@router.get("/outcomes")
+def screen_outcomes():
+    """Saved historical track record of each screen (`trading-agent optimize screen-outcomes`)."""
+    from trading_agent.research.screen_outcomes import read_report
+
+    return jsonable(read_report() or {"status": "not_run"})
+
+
 @router.get("/sectors")
 def sectors(include_stale: bool = False):
     jobs = get_screener_jobs()
