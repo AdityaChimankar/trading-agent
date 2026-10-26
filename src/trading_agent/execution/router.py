@@ -217,7 +217,8 @@ class OrderRouter:
             position = await session.get(Position, position_id)
         if position is None or position.status.lower() != "open":
             raise HTTPException(404, "Open position not found")
-        reference = price if price is not None else await latest_price(position.symbol)
+        reference = price if price is not None else (await fresh_price(position.symbol)
+                                                     or await latest_price(position.symbol))
         side = "SELL" if position.action == "BUY" else "BUY"
         order = await self._new_order(position_id=position_id, symbol=position.symbol, side=side,
                                       quantity=position.quantity, purpose="exit",

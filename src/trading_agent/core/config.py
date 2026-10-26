@@ -115,6 +115,8 @@ class PaperRiskSettings(BaseSettings):
     # Target distance over stop distance at the price risk is measured from; a plan
     # whose target the market has nearly reached is refused, not entered at a poor ratio.
     min_reward_risk: float = Field(default=1.0, ge=0, le=10)
+    # Paper only: the monitor closes a position once its stop or target trades.
+    enforce_brackets: bool = True
     # Intraday session discipline (IST). No new entries after the cutoff; every
     # open position is squared off at square_off_time, like broker MIS.
     # Session gates (cutoff, open, weekend) can be disabled for back-office

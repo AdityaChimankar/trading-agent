@@ -174,7 +174,15 @@ def _fresh_decision_inputs():
 
 
 async def run_monitor_cycle():
-    """Run position monitor cycle."""
+    """Run position monitor cycle: paper bracket exits first, then alerts for what stays open."""
+    from trading_agent.risk.position_monitor import enforce_brackets
+
+    try:
+        exits = await enforce_brackets()
+        if exits["closed"]:
+            logger.info("paper_bracket_exits", closed=len(exits["closed"]))
+    except Exception as e:  # alerts must still run
+        logger.error("paper_bracket_enforcement_failed", error=str(e))
     result = await monitor_positions()
     logger.info("run_monitor_cycle_completed", **result)
 
@@ -304,14 +312,6 @@ scheduler = BlockingScheduler(timezone="Asia/Kolkata")
 
 
 # Weekly ML model retraining with drift detection.
-def ml_retrain_cycle():
-    """Weekly ML model retraining with drift detection.
-    
-    Runs outside market hours to avoid contention with live trading.
-    """
-    logger.info("Starting weekly ML retraining cycle...")
-    try:
-        result = ml_retrain_scheduled()
 def compact_store_cycle(min_files: int = 20) -> None:
     """Merge each interval holding more than ``min_files`` files into one.
 
@@ -334,6 +334,14 @@ def compact_store_cycle(min_files: int = 20) -> None:
     logger.info("store_compaction_completed", compacted=compacted, failed=failed)
 
 
+def ml_retrain_cycle():
+    """Weekly ML model retraining with drift detection.
+    
+    Runs outside market hours to avoid contention with live trading.
+    """
+    logger.info("Starting weekly ML retraining cycle...")
+    try:
+        result = ml_retrain_scheduled()
         logger.info(f"ML retraining cycle completed: {result}")
     except Exception as e:
         logger.error("ML retraining cycle failed", extra={"error": str(e)})
@@ -433,6 +441,12 @@ scheduler.add_job(
     CronTrigger(day_of_week="mon-fri", hour=15, minute=55),
     id="decision_outcomes",
 )
+# Storage compaction after every post-close job has read the session's files.
+scheduler.add_job(
+    compact_store_cycle,
+    CronTrigger(day_of_week="mon-fri", hour=16, minute=5),
+    id="compact_store",
+)
 # Daily news flush - 8:00 AM on weekdays (before market open)
 scheduler.add_job(
     lambda: flush_old_news(days=3),
@@ -441,12 +455,6 @@ scheduler.add_job(
 )
 # Daily pre-flight validation - 8:15 AM on weekdays (before market open)
 # Runs validation and logs results; doesn't stop the scheduler if it fails
-# Storage compaction after every post-close job has read the session's files.
-scheduler.add_job(
-    compact_store_cycle,
-    CronTrigger(day_of_week="mon-fri", hour=16, minute=5),
-    id="compact_store",
-)
 scheduler.add_job(
     lambda: subprocess.run(
         [sys.executable, "-m", "trading_agent.scripts.validate_setup"],

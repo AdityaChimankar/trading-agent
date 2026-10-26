@@ -445,3 +445,74 @@ def test_fresh_price_is_the_bar_that_ended_last_not_the_live_interval(client):
 def test_entry_under_the_minimum_reward_risk_is_refused(client):
     response = client.post("/api/v1/execution/enter", json=ENTRY | {"take_profit": 104.0})  # 0.8R
     assert response.status_code == 409 and "Reward:risk 0.80" in response.json()["detail"]
+
+
+# --- paper bracket exits -------------------------------------------------------------
+
+def _after_entry(store, symbol, bars):
+    """Live-interval bars starting after the entry; each is (open, high, low, close)."""
+    start = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(minutes=5)
+    df = pd.DataFrame(bars, columns=["open", "high", "low", "close"])
+    df["timestamp"] = pd.date_range(start, periods=len(df), freq="5min")
+    df["volume"], df["oi"] = 1000, 0
+    store.write_candles(df, symbol, get_settings().storage.candle_interval)
+
+
+@pytest.mark.parametrize("action, bars, expected", [
+    ("BUY", [(100, 101, 99, 100), (99, 100, 94.5, 96)], (95, "stop")),
+    ("BUY", [(100, 111, 94, 100)], (95, "stop")),  # both sides in one bar: the stop
+    ("BUY", [(93, 96, 92, 95)], (93, "gap_stop")),
+    ("BUY", [(100, 110.5, 99, 110)], (110, "target")),
+    ("BUY", [(112, 113, 111, 112)], (110, "target")),
+    ("BUY", [(100, 104, 96, 101)], None),
+    ("SELL", [(100, 105.2, 99, 104)], (105, "stop")),
+    ("SELL", [(100, 101, 89.5, 90)], (90, "target")),
+])
+def test_bracket_exit_follows_the_replay_rules(action, bars, expected):
+    from trading_agent.risk.position_monitor import bracket_exit
+
+    frame = pd.DataFrame(bars, columns=["open", "high", "low", "close"])
+    stop, target = (95, 110) if action == "BUY" else (105, 90)
+    assert bracket_exit(frame, action, stop, target) == expected
+
+
+def test_monitor_closes_a_paper_position_once_its_stop_trades(client):
+    from trading_agent.risk.position_monitor import enforce_brackets
+
+    filled = client.post("/api/v1/execution/enter", json=ENTRY).json()
+    _after_entry(client.store, "TEST", [(100, 101, 99, 100), (99, 100, 94.5, 96)])
+    result = asyncio.run(enforce_brackets())
+    assert [c["reason"] for c in result["closed"]] == ["stop"]
+    assert result["closed"][0]["exit_price"] == 94.91  # the stop less 10 bps slippage, rounded
+    assert client.get("/api/v1/positions/").json() == []
+    exit_order = client.get("/api/v1/execution/orders").json()[0]
+    assert exit_order["position_id"] == filled["position_id"] and exit_order["reason"] == "paper_bracket_stop"
+    assert asyncio.run(enforce_brackets())["closed"] == []
+
+
+def test_bars_before_the_entry_never_close_it(client):
+    from trading_agent.risk.position_monitor import enforce_brackets
+
+    stamps = pd.date_range(end=datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=10),
+                           periods=3, freq="5min")
+    client.store.write_candles(pd.DataFrame({"timestamp": stamps, "open": 100.0, "high": 101.0, "low": 90.0,
+                                             "close": 100.0, "volume": 1000, "oi": 0}),
+                               "TEST", get_settings().storage.candle_interval)
+    client.post("/api/v1/execution/enter", json=ENTRY)
+    assert asyncio.run(enforce_brackets()) == {"checked": 1, "closed": []}
+
+
+def test_brackets_are_left_alone_in_live_mode_or_when_disabled(client, monkeypatch):
+    from trading_agent.execution import router as router_module
+    from trading_agent.risk.position_monitor import enforce_brackets
+
+    client.post("/api/v1/execution/enter", json=ENTRY)
+    _after_entry(client.store, "TEST", [(99, 100, 94.5, 96)])
+    monkeypatch.setenv("PAPER_ENFORCE_BRACKETS", "false")
+    get_settings.cache_clear()
+    assert asyncio.run(enforce_brackets()) == {"checked": 0, "closed": []}
+    monkeypatch.delenv("PAPER_ENFORCE_BRACKETS")
+    get_settings.cache_clear()
+    monkeypatch.setattr(router_module.OrderRouter, "mode", property(lambda self: "live"))
+    assert asyncio.run(enforce_brackets()) == {"checked": 0, "closed": []}
+    assert len(client.get("/api/v1/positions/").json()) == 1
