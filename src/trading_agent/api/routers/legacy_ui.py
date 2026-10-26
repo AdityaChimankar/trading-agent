@@ -78,7 +78,12 @@ def _position_dict(p: Position) -> dict:
     return {"id": p.id, "symbol": p.symbol, "action": p.action, "entry_price": p.entry_price,
             "position_size": p.position_size, "position_value": p.position_value,
             "risk_amount": p.risk_amount, "stop_loss": p.stop_loss, "take_profit": p.take_profit,
-            "opened_at": p.opened_at.isoformat() if p.opened_at else None, "status": p.status}
+            "opened_at": _utc(p.opened_at), "status": p.status}
+
+
+def _utc(stamp: datetime | None) -> datetime | None:
+    """SQLite returns naive UTC; an explicit offset stops browsers reading it as local time."""
+    return stamp.replace(tzinfo=UTC) if stamp is not None and stamp.tzinfo is None else stamp
 
 
 async def _statuses() -> list[dict]:
@@ -325,8 +330,8 @@ async def transactions(limit: int = Query(200, ge=1, le=2000)):
         )).scalars())[:limit]
     trades = [{
         "id": p.id, "symbol": p.symbol, "action": p.action, "position_id": p.id,
-        "entry_price": p.entry_price, "entry_at": p.opened_at, "exit_price": p.exit_price,
-        "exit_at": p.exit_time, "position_size": p.position_size,
+        "entry_price": p.entry_price, "entry_at": _utc(p.opened_at), "exit_price": p.exit_price,
+        "exit_at": _utc(p.exit_time), "position_size": p.position_size,
         "realized_pnl_rupees": float(p.pnl or 0), "exit_reason": "closed", "slippage_deducted": 0.0,
     } for p in closed]
     ledger = [{"id": 0, "type": "deposit", "amount": book.initial_cash, "note": "Paper starting capital",
