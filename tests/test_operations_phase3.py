@@ -370,7 +370,8 @@ def _stale_candles(store, symbol, close, minutes_old):
 
 def test_entry_risk_and_fill_use_a_fresh_price_when_it_is_worse(client):
     _candles(client.store, "TEST", 104.0)
-    filled = client.post("/api/v1/execution/enter", json=ENTRY).json()
+    # Target 120 keeps reward:risk above 1 at 104; at the default 110 it would be refused (0.67).
+    filled = client.post("/api/v1/execution/enter", json=ENTRY | {"take_profit": 120.0}).json()
     assert filled["fill_price"] == 104.1  # the market plus slippage, not the 100 plan price
 
 
@@ -423,3 +424,24 @@ def test_worst_case_daily_loss_blocks_a_new_entry(client):
 def test_stop_inside_the_spread_is_refused(client):
     response = client.post("/api/v1/execution/enter", json=ENTRY | {"stop_loss": 99.99})
     assert response.status_code == 409 and "too tight" in response.json()["detail"]
+
+
+def _bars(store, symbol, close, interval, minutes_per_bar, ends_minutes_ago):
+    end = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=ends_minutes_ago + minutes_per_bar)
+    ts = pd.date_range(end=end, periods=3, freq=f"{minutes_per_bar}min")
+    df = pd.DataFrame({"timestamp": ts, "open": close, "high": close + 1, "low": close - 1, "close": close,
+                       "volume": 1000, "oi": 0})
+    store.write_candles(df, symbol, interval)
+
+
+def test_fresh_price_is_the_bar_that_ended_last_not_the_live_interval(client):
+    # 2026-10-26 BSE: the ticker's last closed 5-minute bar was minutes behind the backfilled 1-minute bars.
+    _bars(client.store, "TEST", 104.0, "5minute", 5, ends_minutes_ago=5)
+    _bars(client.store, "TEST", 100.5, "minute", 1, ends_minutes_ago=0)
+    filled = client.post("/api/v1/execution/enter", json=ENTRY).json()
+    assert filled["fill_price"] == 100.6  # 100.5 plus 10 bps slippage on the tick, not the older 104
+
+
+def test_entry_under_the_minimum_reward_risk_is_refused(client):
+    response = client.post("/api/v1/execution/enter", json=ENTRY | {"take_profit": 104.0})  # 0.8R
+    assert response.status_code == 409 and "Reward:risk 0.80" in response.json()["detail"]

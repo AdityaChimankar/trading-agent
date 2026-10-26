@@ -229,7 +229,7 @@ Every entry, whether from the dashboard, the paper book or the API, passes the s
 - Daily trade cap (`PAPER_MAX_TRADES_PER_DAY`), and optionally one entry per symbol per day (`PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY`).
 - Portfolio exposure, stop risk, position count, single-name cap, realized daily loss and drawdown.
 - Worst-case daily loss: today's realized P&L, minus every open position's risk at its stop, minus the new trade's risk, must stay inside `PAPER_MAX_DAILY_LOSS_PCT`.
-- Fresh price: risk is measured from the worse of the plan price and the latest stored candle no older than `EXECUTION_MAX_QUOTE_AGE_SECONDS`; an entry whose price is already through the stop or the target is refused, and live entries need such a candle.
+- Fresh price: risk is measured from the worse of the plan price and the most recently ended stored bar (1-minute or the live interval) no older than `EXECUTION_MAX_QUOTE_AGE_SECONDS`; an entry whose price is already through the stop or the target, or whose reward:risk at that price is under `PAPER_MIN_REWARD_RISK`, is refused, and live entries need such a bar.
 - Stop distance: a stop nearer than `PAPER_MIN_STOP_DISTANCE_PCT` of the entry is refused. Scan plans round stops to the instrument's tick, away from the entry.
 - Participation caps: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value, or above `EXECUTION_MAX_REMAINING_VOLUME_PCT` of the volume still forecast to trade today.
 
@@ -265,6 +265,7 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `PAPER_MAX_TRADE_RISK_PCT` / `PAPER_MAX_SINGLE_POSITION_PCT` | `0.02` / `0.10` | Per-trade risk and per-symbol notional |
 | `PAPER_MAX_DAILY_LOSS_PCT` / `PAPER_MAX_DRAWDOWN_PCT` | `0.03` / `0.15` | Realized loss limits; the daily limit also caps realized loss plus open and new stop risk |
 | `PAPER_MIN_STOP_DISTANCE_PCT` | `0.0005` | Refuse stops nearer than 0.05% of the entry |
+| `PAPER_MIN_REWARD_RISK` | `1.0` | Refuse entries whose target is under this many stop distances away |
 | `PAPER_MAX_TRADES_PER_DAY` | `20` | Daily entry cap |
 | `PAPER_ENTRY_CUTOFF` / `PAPER_SQUARE_OFF_TIME` | `15:00` / `15:15` | IST session discipline |
 | `PAPER_ENFORCE_SESSION` | `true` | `false` disables time gates (tests); the trade cap still applies |

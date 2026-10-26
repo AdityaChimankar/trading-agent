@@ -246,22 +246,33 @@ async def latest_price(symbol: str) -> float:
     return float(frame["close"].iloc[-1])
 
 
+BAR_SECONDS = {"minute": 60, "1minute": 60, "5minute": 300, "15minute": 900}
+
+
 async def fresh_price(symbol: str) -> float | None:
-    """Latest stored close no older than EXECUTION_MAX_QUOTE_AGE_SECONDS, else None."""
+    """Close of the most recently ended stored bar, 1-minute or the live interval.
+
+    None when that bar ended more than EXECUTION_MAX_QUOTE_AGE_SECONDS ago. The live
+    ticker's 5-minute bar can be minutes behind backfilled 1-minute bars, so the bar
+    that ended last wins, never a fixed interval.
+    """
     from trading_agent.storage.parquet_store import get_parquet_store
 
     settings = get_settings()
-    try:
-        frame = await run_in_threadpool(get_parquet_store().read_latest, symbol,
-                                        settings.storage.candle_interval, 1)
-    except Exception:
+    newest = None
+    for interval in dict.fromkeys(("minute", settings.storage.candle_interval)):
+        try:
+            frame = await run_in_threadpool(get_parquet_store().read_latest, symbol, interval, 1)
+        except Exception:
+            continue
+        if frame.empty:
+            continue
+        ended = frame["timestamp"].iloc[-1].to_pydatetime() + timedelta(seconds=BAR_SECONDS.get(interval, 60))
+        if newest is None or ended > newest[0]:
+            newest = (ended, float(frame["close"].iloc[-1]))
+    if newest is None or datetime.now(UTC) - newest[0] > timedelta(seconds=settings.execution.max_quote_age_seconds):
         return None
-    if frame.empty:
-        return None
-    age = datetime.now(UTC) - frame["timestamp"].iloc[-1].to_pydatetime()
-    if age > timedelta(seconds=settings.execution.max_quote_age_seconds):
-        return None
-    return float(frame["close"].iloc[-1])
+    return newest[1]
 
 
 def get_order_router() -> OrderRouter:

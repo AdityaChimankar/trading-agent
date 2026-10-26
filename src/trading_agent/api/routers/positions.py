@@ -106,6 +106,12 @@ async def create_position(position: PositionCreate):
             raise HTTPException(status_code=409, detail=(
                 f"Stop {position.stop_loss:g} is within {limits.min_stop_distance_pct:.2%} of the entry "
                 f"{position.entry_price:g}: too tight to survive the spread; widen it"))
+        if position.take_profit is not None:
+            reward_risk = abs(position.take_profit - position.entry_price) / abs(position.entry_price - position.stop_loss)
+            if reward_risk < limits.min_reward_risk:
+                raise HTTPException(status_code=409, detail=(
+                    f"Reward:risk {reward_risk:.2f} at {position.entry_price:g} (stop {position.stop_loss:g}, target "
+                    f"{position.take_profit:g}) is under the {limits.min_reward_risk:g} minimum; re-plan"))
         # Serialize check-and-create in the supported SQLite deployment.
         if session.bind.dialect.name != "sqlite":
             raise HTTPException(status_code=503, detail="Paper entry risk locking requires SQLite")
