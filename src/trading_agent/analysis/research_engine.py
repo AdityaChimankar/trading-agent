@@ -182,7 +182,8 @@ def size_opportunities(rows, capital, positions, limits, risk_pct=1.0, reward_ri
     # Worst case today: realized P&L and every open stop already count (ledger_guard).
     daily_left = math.inf if daily_risk_headroom is None else daily_risk_headroom
     for row in ranked:
-        entry, distance = row["price"], row["atr"] * 1.5
+        entry = row["price"]
+        distance = max(row["atr"] * 1.5, entry * limits.stop_floor_pct)
         sign = 1 if row["action"] == "BUY" else -1
         direction = row["action"] in {"BUY", "SELL"}
         stop = entry - sign * distance if direction else None

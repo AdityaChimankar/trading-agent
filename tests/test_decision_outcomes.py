@@ -39,6 +39,7 @@ def test_price_window_enters_on_the_next_bar_and_exits_by_horizon_or_1515():
     late = do.price_window(bars, ist("2026-10-23 14:50"), 60)
     assert late["exit_time"] == ist("2026-10-23 15:10")          # capped at the 15:15 MIS exit
     assert do.price_window(bars, ist("2026-10-23 15:16"), 60)["status"] == "after_cutoff"
+    assert do.price_window(bars, ist("2026-10-23 15:12"), 60)["status"] == "after_cutoff"  # next bar is 15:15
     today = _bars(end="11:30")                                    # store stops before the window ends
     assert do.price_window(today, ist("2026-10-23 11:00"), 60)["status"] == "pending"
     thin = _bars(end="10:00")                                     # no bar after the signal that day

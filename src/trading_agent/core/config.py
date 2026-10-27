@@ -114,6 +114,10 @@ class PaperRiskSettings(BaseSettings):
     # A stop nearer than this fraction of the entry sits inside normal spread
     # and noise, and inflates quantity under fixed-risk sizing: refused.
     min_stop_distance_pct: float = Field(default=0.0005, ge=0, lt=1)
+    # Planned stops are at least this fraction of the entry, wider than 1.5 x ATR when
+    # needed. On 1-minute ATR stops (median 0.16%), 14 bps of costs are about 0.9R; at
+    # 0.7% they are 0.2R (2026-10-27 replay on the live set). 0 keeps pure ATR stops.
+    stop_floor_pct: float = Field(default=0.007, ge=0, lt=1)
     # Target distance over stop distance at the price risk is measured from; a plan
     # whose target the market has nearly reached is refused, not entered at a poor ratio.
     min_reward_risk: float = Field(default=1.0, ge=0, le=10)
