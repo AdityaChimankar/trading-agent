@@ -11,6 +11,7 @@ Project status, open work and decision history: [MEMORY.md](MEMORY.md).
 | Tab | What it is for |
 |---|---|
 | **Dashboard** | Classic view: watchlist sidebar with bias and contradictions, bullish/bearish Top Opportunity, symbol detail (chart, patterns, technical summary with floor pivots, sizing, news, rule/LLM/ML signals), wallet, position monitor, morning digest |
+| **Screener** | Groww-style market screener: top movers by index, sectors trending today (NSE industries), preset trading screens (R1 breakout, MACD positive / vs signal, RSI ≥ 70 / ≤ 30, near 52W high, volume shockers) and an intraday screener with combinable filters; **Update technicals** recomputes them in the background with live Kite quotes |
 | **Research** | Find → Inspect → Validate → Paper review workflow: full-watchlist scan, Plotly chart, walk-forward optimizer, trade-outcome validation, BUY/SELL outcome models |
 | **Paper operations** | Persistent paper book: open, monitor and close positions |
 | **Risk & execution** | Kill switch, square-off, session status, router orders, reconciliation, cost calculator, audit trail |
@@ -187,6 +188,9 @@ trading-agent optimize cross-sectional --interval minute             # --max-lag
 # Ranking lab: 60 pre-registered cross-sectional variants, selection frozen on validation
 trading-agent optimize ranking-lab --snapshots data/research/ranking_lab/snapshots.parquet
 
+# Odds that one bracket hits its target, its stop or neither by 15:15, from recent sessions
+trading-agent optimize trade-replay TCS --side BUY --entry 3000 --stop 2985 --target 3030 --at "2026-10-23 11:00"
+
 # Score stored rule/ML/LLM signals on realised returns (scheduler runs it at 15:55)
 trading-agent optimize decision-outcomes --days 30 --horizon 60
 
@@ -225,6 +229,9 @@ Every entry, whether from the dashboard, the paper book or the API, passes the s
 - Session: no entries before 09:15, after `PAPER_ENTRY_CUTOFF` (15:00) or on weekends.
 - Daily trade cap (`PAPER_MAX_TRADES_PER_DAY`), and optionally one entry per symbol per day (`PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY`).
 - Portfolio exposure, stop risk, position count, single-name cap, realized daily loss and drawdown.
+- Worst-case daily loss: today's realized P&L, minus every open position's risk at its stop, minus the new trade's risk, must stay inside `PAPER_MAX_DAILY_LOSS_PCT`.
+- Fresh price: risk is measured from the worse of the plan price and the most recently ended stored bar (1-minute or the live interval) no older than `EXECUTION_MAX_QUOTE_AGE_SECONDS`; an entry whose price is already through the stop or the target, or whose reward:risk at that price is under `PAPER_MIN_REWARD_RISK`, is refused, and live entries need such a bar.
+- Stop distance: a stop nearer than `PAPER_MIN_STOP_DISTANCE_PCT` of the entry is refused. Scan plans round stops to the instrument's tick, away from the entry.
 - Participation caps: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value, or above `EXECUTION_MAX_REMAINING_VOLUME_PCT` of the volume still forecast to trade today.
 
 The scheduler squares off every open position at `PAPER_SQUARE_OFF_TIME` (15:15). Each entry, exit, fill, rejection and halt is written to `data/controls/audit-YYYY-MM-DD.jsonl`.
@@ -257,7 +264,9 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `PAPER_MAX_POSITIONS` | `10` | Open positions |
 | `PAPER_MAX_EXPOSURE_PCT` / `PAPER_MAX_RISK_PCT` | `0.50` / `0.06` | Aggregate notional and stop risk |
 | `PAPER_MAX_TRADE_RISK_PCT` / `PAPER_MAX_SINGLE_POSITION_PCT` | `0.02` / `0.10` | Per-trade risk and per-symbol notional |
-| `PAPER_MAX_DAILY_LOSS_PCT` / `PAPER_MAX_DRAWDOWN_PCT` | `0.03` / `0.15` | Realized loss limits |
+| `PAPER_MAX_DAILY_LOSS_PCT` / `PAPER_MAX_DRAWDOWN_PCT` | `0.03` / `0.15` | Realized loss limits; the daily limit also caps realized loss plus open and new stop risk |
+| `PAPER_MIN_STOP_DISTANCE_PCT` | `0.0005` | Refuse stops nearer than 0.05% of the entry |
+| `PAPER_MIN_REWARD_RISK` | `1.0` | Refuse entries whose target is under this many stop distances away |
 | `PAPER_MAX_TRADES_PER_DAY` | `20` | Daily entry cap |
 | `PAPER_ENTRY_CUTOFF` / `PAPER_SQUARE_OFF_TIME` | `15:00` / `15:15` | IST session discipline |
 | `PAPER_ENFORCE_SESSION` | `true` | `false` disables time gates (tests); the trade cap still applies |
@@ -266,6 +275,7 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `EXECUTION_SLIPPAGE_BPS` / `EXECUTION_PRODUCT` | `5` / `MIS` | Paper slippage; live product |
 | `EXECUTION_MAX_PARTICIPATION_PCT` | `0.01` | Share of average daily traded value |
 | `EXECUTION_MAX_REMAINING_VOLUME_PCT` | `0.05` | Share of the volume still forecast to trade today |
+| `EXECUTION_MAX_QUOTE_AGE_SECONDS` | `900` | Oldest stored candle used as a fresh entry price |
 | `LLM_PROVIDER` | `mock` in code, `openrouter` in `.env.example` | `mock` makes no calls |
 | `LLM_API_KEY` / `OPENROUTER_API_KEY` / `LLM_MODEL` | empty / empty / `gpt-4o-mini` in code (`.env.example`: `google/gemini-2.0-flash-001`) | OpenRouter credentials and model id |
 | `LLM_QUICK_MODEL` / `LLM_DEEP_MODEL` | empty (use `LLM_MODEL`) | Cheap model for headline sentiment and setup checks; stronger model for LLM decisions |
@@ -355,7 +365,7 @@ Keep separate databases per branch until schemas are checked; `data/trading_agen
 | `No data available` | Log in, `trading-agent ingest SYMBOL`, then `trading-agent storage-stats` |
 | Kite token rejected | `trading-agent login` again |
 | Playwright browser missing | `playwright install chromium`, or `python manual_login.py` |
-| Entry rejected with 409 | Read the reason: kill switch, after 15:00, weekend, trade cap, duplicate symbol, exposure, risk, daily loss, drawdown or participation |
+| Entry rejected with 409 | Read the reason: kill switch, after 15:00, weekend, trade cap, duplicate symbol, exposure, risk, daily loss (realized or worst case), drawdown, participation, stop too tight, or price already through the stop or target |
 | Entry rejected with 502 | The broker rejected the order; the reservation was removed. Check the audit log |
 | Sentiment calls return 429 | Raise `LLM_MIN_INTERVAL_SECONDS`; retries already honour `Retry-After` |
 | Drift monitor says "no baseline" | Run `python -m trading_agent.strategy.model_monitoring baseline` |

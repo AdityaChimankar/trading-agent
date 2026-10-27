@@ -15,16 +15,16 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-25 (data-check and fetch manifest, decision outcomes, LLM model tiers, ranker paper trial). Active branch: `unified-platform`, merged with `origin/main` and pushed for a pull request into `main`.
+Last updated: 2026-10-26 (market screener on branch `feature/market-screener`, from `risk-hardening`; see the decision log). Before that, 2026-10-26 (first live paper session: candle read cache and compaction, paper bracket exits, test DB isolation). Earlier: 2026-10-25 (worst-case daily loss, fresh-price entry risk, stop checks, trade replay). Active branch: `risk-hardening`, from `main` after PR #2, pushed for a pull request into `main`.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
-**Verified** (2026-10-25, on the pull-request head): 553 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, both offline browser smokes passed, and the Docker smoke stack passed on the current images. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
+**Verified** (2026-10-25, on `risk-hardening` at `5c0f3ac`): 593 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, both offline browser smokes passed, and the Docker smoke stack passed on the rebuilt images. The trade-replay panel was also driven in a browser against the real API and stored candles at desktop and phone width. Before that (on the PR #2 head): 553 Python tests passed (`PYTHONPATH=src`), repo-wide Ruff passed, the frontend type-check and production build passed, both offline browser smokes passed, and the Docker smoke stack passed on the current images. An earlier Playwright pass on a copy of the real 2026-10-21 scan and stored candles covered all eight dashboard routes with no console errors, failed API calls or mobile overflow.
 
 **Not verified:**
 
 - Live Zerodha orders and broker-side reconciliation (tested only against a stubbed Kite client).
-- A full live market session with ticker, scheduler, square-off and drift check running.
+- A full live market session with ticker, scheduler, square-off and drift check running. The 2026-10-26 session ran them but needed manual recovery (see the decision log).
 - The cost model against the current Zerodha charge sheet.
 - Any trading edge. Volume signals are rules of thumb. The first BUY/SELL outcome-model candidate failed qualification. Rule walk-forward results on RELIANCE were negative after costs.
 
@@ -47,13 +47,15 @@ Keep paper mode until those are evidenced.
 | Decisions | Rule agent is the validated path; LLM and ML run in parallel in separate tables and never override it | `strategy/`, `signals` / `llm_signals` / `ml_signals` |
 | Decisions | Full-universe research scan, watchlist bias, contradictions, Top Opportunity by conviction and room to S/R | `analysis/research_jobs.py`, `api/routers/legacy_ui.py` |
 | Risk | ATR stop/target/sizing, portfolio exposure/risk caps, realized daily-loss and drawdown gates | `risk/`, `risk/ledger_guard.py` |
+| Risk | Worst-case daily loss (realized P&L + every open stop + the new risk within `PAPER_MAX_DAILY_LOSS_PCT`), enforced at entry and in scan sizing; stops nearer than `PAPER_MIN_STOP_DISTANCE_PCT` refused; scan stops rounded to the Kite tick away from entry (ideas from the day-trader-skill pack) | `ledger_guard.daily_risk_headroom`, `api/routers/positions.py`, `research_engine.size_opportunities`, `position_sizing.round_to_tick` |
 | Risk | Kill switch (persisted, fails closed), session gates (09:15 / 15:00 cutoff / weekends), trade cap, optional one entry per symbol per day, 15:15 square-off, JSONL audit | `risk/controls.py`, scheduler `square_off_cycle` |
-| Execution | Order router: risk checks before any order, paper fills with slippage, live Kite MARKET/MIS behind double opt-in, reconciliation | `execution/router.py`, `execution/reconcile.py` |
+| Execution | Order router: risk checks before any order at the worse of the plan price and a fresh stored candle (`EXECUTION_MAX_QUOTE_AGE_SECONDS`; refused through the stop or target; live needs one), paper fills with slippage, live Kite MARKET/MIS behind double opt-in, reconciliation | `execution/router.py`, `execution/reconcile.py` |
 | Execution | Zerodha intraday cost model | `execution/costs.py` |
 | Analytics | Net-of-cost performance, Sharpe/Sortino/drawdown/profit factor/expectancy/R, attribution | `analysis/performance.py` |
 | Analytics | RVOL by time of day, VWAP, liquidity tiers, participation cap, confirm/contradict vs scan | `analysis/volume_insights.py` |
 | Analytics | U-shape remaining-volume forecast with out-of-sample check; router caps size at 5% of forecast remaining volume | `volume_insights.forecast_day_volume / evaluate_volume_forecast`, `/api/v1/analytics/volume/{s}/forecast-check` |
 | Data | `trading-agent data-check`: per-symbol coverage against the store-wide session calendar (up to date / behind / holes / empty / not listed by Kite), store staleness against the last closed weekday, Kite token, ticker heartbeat, trial arms; exit 1 on gaps. `backfill --universe all` fills them | `ingest/coverage.py`, `cli` |
+| Research | Trade replay (after the day-trader-skill Time Machine): 1-minute bars when complete (else 5-minute), filtered historical simulation (bars standardized by session and time-of-day volatility, rescaled to today's), stationary block bootstrap with Politis–White mean block (cap 60 min), 10,000 seeded replays to 15:15; stop-first/gap exits as trade outcomes, net R after 14 bps; conclusion trigger: `conclusive_negative/positive` only with 40+ sessions, a 90% pool-resample range clear of zero and break-even, and agreement of single-bar, unscaled and real-history runs, else `inconclusive`; display only, never blocks. On 2026-10-23 11:00 2R brackets in TCS and RELIANCE were conclusive negative | `research/trade_replay.py`, `trading-agent optimize trade-replay`, `POST /api/v1/analytics/trade-replay`, Dashboard Position Sizing → Replay this plan |
 | Research | Decision outcomes (from TradingAgents' settlement): every stored BUY/SELL signal priced at the next bar, exit at horizon or 15:15, net of 14 bps, alpha vs NIFTY50 when stored; grouped by strategy, action and confidence; HOLD/pending/unpriced never losses; scheduler 15:55 | `research/decision_outcomes.py`, `trading-agent optimize decision-outcomes`, `/api/v1/analytics/decision-outcomes`, Analytics panel |
 | Research | Ranking lab: 60 pre-registered cross-sectional variants (fixed-sign gap/reversal/opening-drive ranks; RF/logit/HGB walk-forward; 09:15 or 09:45 entry; 10:15/12:00/15:15 exit; k 5/10/20); validation-only selection with a Bonferroni t over 60, frozen before holdout; rolling choose-best | `research/ranking_lab.py`, `trading-agent optimize ranking-lab` |
 | Research | Ranker paper trial, two arms (`rf`, `hgb`), each with its own hashed frozen spec (config, universe, first session), pick after 09:15 bar (deadline 09:45), entry at the first bar after the pick, 15:15 exit, random book, missed sessions recorded, verdict fixed on the first 60 settled sessions | `research/ranker_trial.py`, `trading-agent optimize ranker-trial`, scheduler `ranker_trial_pick`/`ranker_trial_settle`, `/api/v1/analytics/cross-sectional/trial`, Analytics panel |
@@ -63,7 +65,9 @@ Keep paper mode until those are evidenced.
 | Research | Strategy Lab opening-range breakout and Nifty-gap-regime profiles; NIFTY50/BANKNIFTY index candles | `research/strategy_lab.py`, `ingest/instrument_lookup.INDEX_TOKENS` |
 | ML | PSI/KS drift monitor; withdraws ML (or loads `ml_model.previous.joblib`) on drift; daily 15:40 check | `strategy/model_monitoring.py` |
 | Validation | Vectorized backtest `--selftest` vs loop reference, walk-forward `--all`, lookahead and train/serve skew checks | `research/walk_forward_optimizer.py`, `strategy/session_features.py` |
-| UI | React + MUI: Dashboard, Research, Paper operations, Risk & execution, Analytics, Signal Pipeline, Transactions, News | `frontend/src/App.tsx`, `lib/router.ts` |
+| Analytics | Market screener (after Groww Explore): top movers by index, sector breadth per NSE industry, 10 preset screens, intraday screener filters (5m/15m/1h/1D change, daily RSI(14)/MACD(12,26,9) on completed sessions, 52W proximity, R1–R3 pivots, index, sector); background multi-process scan with live Kite quotes over stored candles, a technicals check (stale, lagging, quoted, short history) and per-symbol recheck | `analysis/screener.py`, `analysis/screener_jobs.py`, `ingest/sector_map.py`, `ingest/live_quotes.py`, `/api/v1/screener/*`, `trading-agent sector-map / screener-scan`, `components/ScreenerPage.tsx` |
+| Research | Screen outcomes: every screener preset evaluated historically at a decision time (default 10:15) with no look-ahead; flagged names are entered at the 10:15 open and exited before 15:15, net of 14 bps, against the liquid universe (random baseline), with a development/holdout split and a Bonferroni t ≥ 2.81 for an `edge_candidate`; track record shown under the Screener's screen chips | `research/screen_outcomes.py`, `trading-agent optimize screen-outcomes`, `/api/v1/screener/outcomes` |
+| UI | React + MUI: Dashboard, Screener, Research, Paper operations, Risk & execution, Analytics, Signal Pipeline, Transactions, News | `frontend/src/App.tsx`, `lib/router.ts` |
 
 ## Open work
 
@@ -74,6 +78,12 @@ Keep paper mode until those are evidenced.
 | P0 | Verify charge rates | `execution/costs.py` matches zerodha.com/charges on the test date |
 | P0 | Build the drift baseline on real data | `python -m trading_agent.strategy.model_monitoring baseline` run; `/api/v1/analytics/drift` reports `ok`/`warn`, not "no baseline" |
 | P0 | Broker order lifecycle hardening | partial fills, rejects, cancels, reconnect replay and idempotent intent IDs covered by fault-injection tests |
+| P0 | Strategy edge before more plumbing | a signal family with positive net R after 14 bps on held-out sessions; see the 2026-10-26 plan in the decision log. The current rule/hybrid signals have none |
+| P1 | Gate entries on the trade-replay verdict | entries whose replay is `conclusive_negative` are refused (today display only); 5 of 6 entries on 2026-10-26 were |
+| P1 | Current LLM model | `LLM_MODEL` in `.env` names a model OpenRouter still serves; `gemini-2.0-flash-001` returned 404 on 2026-10-26 |
+| P1 | Ticker reloads the Kite token | after `trading-agent login` the running ticker reconnects without a restart (it stayed on 403 on 2026-10-26) |
+| P1 | Scheduler survives host sleep | jobs fire after the laptop wakes (on 2026-10-26 none ran until a restart) |
+| P1 | Live 1-minute bars | the ticker also writes 1-minute bars for a live set and a scan runs on each bar close. A 1-minute plan expires about 75 s after its bar closes, so a Kite backfill (~30 s for 50 names) plus a scan (~20 s) leaves the dashboard's plans expired almost always (2026-10-26). Writing 1-minute files for all 2,319 symbols would be ~38 files/s, too many for the bind mount, so restrict it to a live set |
 | P1 | Prospective paper evidence | ≥ 20 trading days of paper results so analytics stop warning about sample size |
 | P0 | Re-run research on corrected timestamps | earlier walk-forward, outcome-validation and outcome-model results were computed on history whose legacy sessions were shifted 5h30m; rerun before relying on any of them |
 | P1 | Ingest Nifty 50 candles and run `orb` / `orb_gap` in Strategy Lab | NIFTY50 minute candles stored; profiles compared with baselines after costs on several symbols |
@@ -95,6 +105,8 @@ Keep paper mode until those are evidenced.
 | Limitation | Workaround |
 |---|---|
 | Kite token expires daily | `trading-agent login` or `python manual_login.py` |
+| Docker Desktop's Windows bind mount (`./data`) is 7-10x slower than native disk | the candle read cache and nightly compaction hide most of it; a named volume or WSL-native checkout removes it |
+| Never open `data/trading.db` from a Windows process while the stack runs | a host pytest run locked it on 2026-10-26; tests now use a throwaway DB (conftest), recovery steps in the decision log |
 | SQLite writer concurrency is limited | one API worker, one ticker, one scheduler, one downloader |
 | Session gates are weekday/time rules, not an exchange calendar | check holidays manually |
 | Ledger limits use realized gross P&L | unrealized losses are not in the daily-loss gate |
@@ -109,6 +121,72 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-26: Screen outcomes (do the screener's screens predict anything?)
+
+The new Screener puts 10 trading screens on the dashboard, and RULES.md requires a signal to be validated out of sample, after costs, against a random baseline before anyone relies on it. `research/screen_outcomes.py` evaluates each screen on every stored session with only information known at the decision time. The setup:
+
+- Previous-session pivots, completed-session RSI and MACD, and the 52-week high from completed sessions.
+- Volume so far against the same time of day over the previous 20 sessions. Groww's full-day average would be meaningless at 10:15.
+- Flagged names are traded on the screen's side, from the 10:15 bar's open to the last bar before 15:15, net of 14 bps.
+- The baseline is the liquid universe's mean on the same day (a random pick). The universe is names with a 20-session mean daily value of at least INR 10 crore.
+
+**Result** (point in time; Nifty 500-plus list, 495 liquid names, 254 sessions 2025-10-14..2026-10-26, holdout from 2026-06-24): no screen has an edge.
+
+- Holdout net per trade-day ran from −2.8 bps (RSI ≥ 70, short) to −28.5 bps (near R1, long). The universe itself nets −16.5 bps long and −11.5 bps short.
+- The edge against the universe was within ±8 bps in the holdout: R1 breakout +0.7, MACD positive +1.0, RSI ≤ 30 long +7.9 (t −1.66 net).
+- The development period showed the same signs, apart from RSI ≥ 70 short at +10 bps, which faded to +1 in the holdout.
+- With a 09:30 decision the picture is unchanged: every screen is `no_edge`, and breakouts did worse (−10 bps against the universe in development).
+
+The UI now says so under the screen chips: they are watchlists, not signals. This agrees with the earlier rule-signal findings: small gross moves, costs of 14 bps decide.
+
+### 2026-10-26: Market screener after Groww Explore
+
+A **Screener** tab rebuilds Groww Explore's top movers, sectors trending, trading screens and intraday screener (`/stocks/user/explore`, `/stocks/sectors-trending`, `/stocks/screens/*`, `/stocks/intraday`). It uses our stored minute candles, live Kite quotes and an NSE sector map. Groww's page data was read in the browser: server-rendered `__NEXT_DATA__`, plus `POST /bff/web/stocks/screener/web-pages/screener_stocks` for filter changes. Its screens are presets of a single intraday screener.
+
+**Groww conventions found and adopted.** RSI, MACD, pivots and the 52-week range use completed sessions. The 1-week average volume is the mean over the previous 7 calendar days (four sessions that week, because of Dussehra). The previous close is the official close. Groww's "MACD above signal line" screen is really MACD line > 0: 93 of its 100 names, against 50 for a signal-line test. It is offered as "MACD positive" next to a true signal-line screen.
+
+**Groww behaviour not copied.** Its R1 breakouts matched pivots from the session before the previous one (90/95 recalled, against 73/95 for the previous session, with far fewer extra flags in a 150-stock sample). Its RSI also sat between those two sessions, so on 2026-10-26 its technicals lagged a session. We keep standard previous-session pivots and RSI. Groww uses about 60 sectors of its own; we use NSE's 22 industries for the about 750 Nifty Total Market names, and other names stay unclassified. Market cap and "most bought" (Groww user data) are not available.
+
+**Side-by-side after the fixes** (Groww captured at 15:12, our scan at the close): 94 of Groww's top 100 intraday names are current in our scan; the other 5 are new listings not stored. Previous close was exact for 94/94, LTP within 1% for 90/94, 52-week high and low exact for most names, and the 1-week average volume had a median difference of 0.5%. Screen recall: RSI ≥ 70 7/7, RSI ≤ 30 87/92, MACD positive 93/100, R1 breakout 73/95 (the lag above). RSI was within about 2 points of Groww's (median about 1.5).
+
+**Fixes found by the comparison.**
+
+- Stored candles alone left 1,819-2,263 of 2,312 rows lagging, because the ticker streams only part of the universe and most minute series stopped at 09:18. One `kite.quote` call per 500 symbols now supplies LTP, OHLC, volume and the official previous close (2,288 returned).
+- After the close, most quotes freeze at about 15:31 while a few keep updating. Lag is now counted to 15:30 at the latest.
+- `.dt.date` took most of the CPU: 0.27 s a symbol, down to 0.08 s with integer IST session keys.
+- Four threads were GIL-bound: 9 minutes for the full scan, now about 2 minutes in 4 spawned processes. The worker read cache is off, because one process grew to 1.3 GB and four broke the pool.
+
+Verified on 2026-10-26: 11 screener tests passed, and the full suite passed (637). `test_data_coverage::test_backfill_window_starts_where_data_check_starts` had failed on Mondays: it measured the backfill span from now, not from the last closed session with the weekend roll-forward. That is fixed in the same branch. Ruff passed, and the frontend type-check and build passed. The Screener tab was driven in Playwright against a second API instance (port 8011) at 1440 and 390 px: no console errors or failed API calls, and no page overflow. The pre-existing `test_research_lifecycle` failure seen once only appeared when runs overlapped; it passed on its own.
+
+### 2026-10-26: First live paper session, storage speed, paper brackets
+
+Paper only (live stayed off). Kite login, the ticker, the scheduler and a scratch driver (50 most liquid names: 1-minute backfill every 5 minutes, a full validated scan for the dashboard, and one unvalidated hybrid entry every 15 minutes, at most 6) ran from 09:50 IST.
+
+**Incidents.** The scheduler fired nothing after host sleep until restarted, and the ranker-trial pick was run by hand (both arms picked, 483 eligible). The ticker stayed on 403 after the morning login until restarted. A host pytest run opened the live `data/trading.db` and Windows locked it, so the API failed for about 5 minutes. It was recovered with SQLite's backup API from an `immutable=1` read (integrity ok), the original kept as `data/backups/trading-pre-recovery-20261026T050427Z.db`, and fixed in `6d0ff6a`.
+
+**Fixed.**
+
+- `26ee9b7`: entries priced from the bar that ended last, not the 5-minute series. BSE filled at a several-minute-old price.
+- `607b899`: the dashboard keeps the last completed scan while a new one runs.
+- `fa8fa64`: candle read cache and compaction. The ticker commits one file per symbol per bar and nothing merged them, so wallet, positions and rankings took 12-34 s and the decision loops over an hour a pass. The `signals` table was still empty at 11:30, which is why Signal History and the ML/LLM panels showed no rows. Reads now take milliseconds. Empty legacy `date=` partitions (250 per symbol for 7 large names) were removed, and a 16:05 job compacts every interval with more than 20 files.
+- `ca8b15c`: paper bracket exits. The monitor only alerted, on the latest bar only, so stops never executed and IDEA lost INR 225 against INR 52 of planned risk.
+- `194a68f`: UTC offsets on dashboard times ("Opened 8h ago").
+
+**Trades** (all SELL, unvalidated hybrid signals; BSE, IDEA, GROWW and KARURVYSYA were closed at market by the operator after their brackets had triggered unenforced; BHARTIARTL and NYKAA by the new enforcement): 6 trades, 2 wins, gross INR -337.78, charges 59.34, net -397.12, average -1.14R. Five of six had a `conclusive_negative` trade replay before entry. Charges were about INR 10 a round trip against INR 19-91 of risk, because the 10% position cap binds long before the 1% risk budget.
+
+**Analysis on real data.** Rule signals over about 182k trades on the 50 liquid names win about 28% against about 38% needed, about -0.13% net a trade, no positive name. In 100 replayed standard brackets (1.5x 1-minute ATR stop, 2R), gross R is about 0 to +0.1 in every stop-width quartile while net R tracks the cost share: -0.85R at 0.12-0.19% stops, -0.22R at 0.35-0.67%. Wider brackets lose less but cannot create an edge; breaking even needs a gross edge first.
+
+**End-to-end validation (afternoon).** Every GET route was swept with a 1-second `/health` heartbeat, and all eight dashboard pages were driven in a browser. Fixed along the way:
+
+- `2153ea1`: the v1 digest routes ran the generator over every stored symbol on the event loop. One call froze the whole API, dashboard included, until a restart. They are now bounded to the scan's strongest 30 names and run in the threadpool. `/api/symbols/news` lists the news folder once instead of 2,300 `exists()` calls (12 s to 0.2 s). Nightly compaction uses 8 workers, about 4x faster on the bind mount.
+- `8617d67`: failed LLM calls were stored as HOLD signals, and the cycle never stopped. The configured OpenRouter model `google/gemini-2.0-flash-001` is retired, so every call returns 404. Failures are no longer stored, and the cycle aborts after 3 in a row. **Set a current `LLM_MODEL` in `.env`** (for example a `google/gemini-3.x-flash` slug) to get real LLM decisions.
+- `f863fa6`: nine `async` endpoints never awaited, so their disk work ran on the event loop. `/liveness/storage/stats` froze the API for over 10 minutes. They are plain `def` now, and `tests/test_endpoint_event_loop.py` fails any new one.
+- `8a9f016`: `/api/v1/opportunities/` defaulted to every stored symbol; it now uses the scan's strongest names. Storage details returned 500 on a NaN `oi`.
+
+Result: every route returns 200 except `/liveness/storage/stats`, which opens every file and takes minutes (it no longer blocks anything). The heartbeat never exceeded 0.51 s. All pages render with no console errors or failed calls. The 5-minute store was compacted once (2,286 symbols). After any scheduler restart the first decision pass still reads every symbol cold, about 30 minutes for 2,319 symbols.
+
+**Plan, in order.** (1) Stop adding live plumbing; research a signal with positive gross R on held-out sessions. Candidates: the ranker trial already running (60 sessions), `orb_gap` with NIFTY50 data, and session-structure filters (time of day, gap, relative volume). (2) Make costs small in R by construction: a minimum stop of about 0.7% (14 bps is 0.2R) via 5- or 15-minute ATR, a position cap that lets the risk budget bind, and liquid names only. (3) Gate entries on `conclusive_negative` replays and on `qualified_research` evidence (`require_validated` stays on). (4) Only then, 20+ paper sessions before any live discussion.
 
 ### 2026-10-24: TradingAgents adaptations (decision outcomes, LLM model tiers)
 
@@ -173,6 +251,8 @@ The smoke stack then passed: migrations, Parquet replay and compaction, nginx pr
 **Rebuilt again from `adfa557`** (adds `data-check`, `backfill --universe`): app `dcfcebec8d50`, tagged `unified-platform` and `latest`. The previous images are kept as `unified-4494f3f`. There was no new migration (head still `003`), so the stack was recreated directly: API ready, frontend 200, scheduler trial jobs registered, and `data-check --universe nifty500` run inside the container (494 up to date, 7 not listed by Kite).
 
 **Rebuilt again from `c2d4d6d`** (adds the fetch manifest, the aligned windows, decision outcomes and LLM model tiers): app `ddd202c66e31`, tagged `unified-platform` and `latest`. The previous images are kept as `unified-adfa557`. The migration head is still `003`. Stack recreated: API ready, frontend 200; the scheduler registered `decision_outcomes_cycle` (15:55) and both trial jobs; `/api/v1/analytics/decision-outcomes` returns 200; both arms are collecting from 2026-10-26.
+
+**Rebuilt again from `5c0f3ac`** (`risk-hardening`: worst-case daily loss, fresh-price entry risk, stop checks, trade replay): app `d04512552406`, frontend `b54427ee7ed5`, tagged `risk-hardening` and `latest`. The previous images are kept as `unified-c2d4d6d`. No migration (head still `003`), so the stack was recreated directly with ticker and scheduler: API ready, frontend 200, all 15 scheduler jobs registered including both trial jobs and `decision_outcomes_cycle`, both arms `collecting`, the ledger reports `daily_risk_headroom`, and `POST /api/v1/analytics/trade-replay` answers on real candles inside the container. The trial code is unchanged, so the frozen specs still apply to the first session on 2026-10-26.
 
 ### 2026-10-24: Second paper-trial arm (gradient boosting)
 

@@ -3,7 +3,7 @@ import { useIsFetching, useQueryClient } from '@tanstack/react-query'
 import { Alert, Box, Button, TextField, Typography } from '@mui/material'
 
 import { setApiToken } from './api/client'
-import { useWallet, useWatchlist } from './api/queries'
+import { useRankings, useWallet, useWatchlist } from './api/queries'
 import { useApiAuth } from './api/useApiAuth'
 import { useHashRoute } from './lib/router'
 import DigestPanel from './components/DigestPanel'
@@ -19,6 +19,7 @@ import NewsPage from './components/NewsPage'
 import ResearchDashboard from './ResearchDashboard'
 import RiskExecutionPage from './components/RiskExecutionPage'
 import AnalyticsPage from './components/AnalyticsPage'
+import ScreenerPage from './components/ScreenerPage'
 
 export default function App() {
   const [capital, setCapital] = useState(100_000)
@@ -31,10 +32,18 @@ export default function App() {
   const { data: wallet } = useWallet()
   const walletCapitalSynced = useRef(false)
 
-  // Default the selected symbol to the first watchlist entry once loaded.
+  const rankings = useRankings(capital)
+
+  // Open on the latest scan's strongest name: the first watchlist entry is just
+  // the alphabetical start of the universe, usually without live data.
   useEffect(() => {
-    if (!symbol && watchlist?.symbols.length) setSymbol(watchlist.symbols[0])
-  }, [watchlist, symbol])
+    if (symbol) return
+    const strongest = [...(rankings.data?.scored ?? [])]
+      .sort((a, b) => Math.max(b.bullish_score, b.bearish_score) - Math.max(a.bullish_score, a.bearish_score))[0]
+    const scanned = rankings.data?.scanned?.[0]
+    if (strongest || scanned) setSymbol(strongest?.symbol ?? scanned!)
+    else if (rankings.isFetched && watchlist?.symbols.length) setSymbol(watchlist.symbols[0])
+  }, [rankings.data, rankings.isFetched, watchlist, symbol])
 
   // Seed the sizing capital from the wallet book balance on first load, so
   // "available capital" tracks the paper wallet instead of a hardcoded
@@ -132,6 +141,7 @@ export default function App() {
           {route === 'news' && <NewsPage onSelectSymbol={openSymbol} />}
           {route === 'risk' && <RiskExecutionPage />}
           {route === 'analytics' && <AnalyticsPage onSelectSymbol={openSymbol} />}
+          {route === 'screener' && <ScreenerPage onSelectSymbol={openSymbol} />}
         </main>
       )}
     </div>

@@ -10,8 +10,9 @@ import {
   useSignals,
   useSizing,
 } from '../api/queries'
-import { actionClass, cx, inr, num, shortTime } from '../lib/format'
+import { actionClass, cx, inr, num, shortTime, timeAgo } from '../lib/format'
 import TechnicalsPanel from './TechnicalsPanel'
+import TradeReplay from './TradeReplay'
 import { DataTable, Metric, Panel, StateMessage, type Column } from './ui'
 
 const PriceChart = lazy(() => import('./PriceChart'))
@@ -45,11 +46,15 @@ export default function SymbolDetail({
   const adjusted = sizingData?.has_signal ? sizingData.adjusted : null
   const plan = adjusted?.base_plan ?? null
   const canRecord = Boolean(adjusted && !adjusted.blocked && adjusted.approved_size > 0)
+  const bars = chart.data?.insufficient_data === false ? chart.data : null
+  const lastBar = bars?.candles.timestamp.at(-1)
+  const barsLabel = bars?.interval === 'minute' ? '1-minute' : bars?.interval?.replace('minute', '-minute')
 
   return (
     <>
       <Panel
         title={`${symbol} — Price, Indicators & Patterns`}
+        subtitle={lastBar ? `${barsLabel ?? 'Stored'} bars · last bar ${shortTime(lastBar)} (${timeAgo(lastBar)})` : undefined}
         actions={chart.data?.insufficient_data === false ? (
           <div className="metric-row compact">
             <Metric label="RSI" value={num(chart.data.latest.rsi, 1)} />
@@ -144,6 +149,19 @@ export default function SymbolDetail({
             >
               Record as open position ({adjusted?.approved_size ?? 0} shares)
             </button>
+
+            {(sizingData.action === 'BUY' || sizingData.action === 'SELL') && (
+              <TradeReplay
+                key={`${symbol}-${sizingData.action}-${plan.stop_loss}-${plan.take_profit}`}
+                plan={{
+                  symbol,
+                  side: sizingData.action,
+                  entry: plan.entry_price,
+                  stop: plan.stop_loss,
+                  target: plan.take_profit,
+                }}
+              />
+            )}
           </>
         )}
         <p className="muted small">This is a calculated plan, not an order — nothing is placed automatically.</p>

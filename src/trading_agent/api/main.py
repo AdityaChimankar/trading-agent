@@ -20,6 +20,7 @@ from trading_agent.api.routers import (
     opportunities,
     pipeline,
     positions,
+    screener,
     research,
     strategy_lab,
     symbols,
@@ -58,6 +59,12 @@ async def lifespan(app: FastAPI):
         worker.pause("API started. Enable automatic research explicitly for this session.")
         if get_settings().api.workers == 1:
             worker.start_worker()
+            if get_settings().api.research_autostart == "live":
+                from trading_agent.api.routers.research import AutomaticScanRequest
+                try:
+                    worker.enable(AutomaticScanRequest(scope="live").model_dump(), min_scan_seconds=60)
+                except (ValueError, RuntimeError) as error:
+                    logger.warning("research_autostart_failed", error=str(error))
         yield
     finally:
         logger.info("application_shutting_down")
@@ -126,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(wallet.router, prefix="/api/v1/wallet", tags=["wallet"])
     app.include_router(pipeline.router, prefix="/api/v1/pipeline", tags=["pipeline"])
     app.include_router(research.router, prefix="/api/v1/research", tags=["research"])
+    app.include_router(screener.router, prefix="/api/v1/screener", tags=["screener"])
     app.include_router(strategy_lab.router, prefix="/api/v1/strategy-lab", tags=["strategy-lab"])
     app.include_router(digest.router, prefix="/api/v1/digest", tags=["digest"])
     app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["watchlist"])

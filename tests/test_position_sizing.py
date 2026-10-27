@@ -193,3 +193,12 @@ def test_position_sizing_config_defaults():
     assert config.take_profit_multiplier == 2.0
     assert config.min_position_value == 5000
     assert config.max_positions == 10
+
+def test_round_to_tick_moves_stops_away_from_entry():
+    from trading_agent.core.position_sizing import round_to_tick
+
+    assert round_to_tick(96.9805, 0.05, away_from=100) == 96.95   # long stop: down
+    assert round_to_tick(103.0195, 0.05, away_from=100) == 103.05  # short stop: up
+    assert round_to_tick(96.95, 0.05, away_from=100) == 96.95      # already on the tick
+    assert round_to_tick(1234.56, 0.10, away_from=1250) == 1234.5
+    assert round_to_tick(106.12, 0.05) == 106.1                    # targets: nearest tick

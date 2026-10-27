@@ -75,6 +75,7 @@ def _write_candles(store, symbol, close, n=120):
 def test_rankings_and_opportunities_come_from_the_scan(client):
     ranked = client.get("/api/rankings").json()
     assert [e["symbol"] for e in ranked["scored"]] == ["AAA", "BBB", "CCC", "OLD"]
+    assert ranked["scanned"] == ["AAA", "BBB", "CCC", "OLD"]  # every evaluated name, strongest first
     assert [e["symbol"] for e in ranked["bullish"]] == ["AAA", "CCC", "OLD"]
     assert [e["blocked"] for e in ranked["bullish"]] == [False, True, True]  # OLD expired
     assert ranked["bearish"][0]["symbol"] == "BBB"
@@ -185,3 +186,99 @@ def test_classic_routes_require_auth_when_configured(tmp_path, monkeypatch):
     finally:
         db_module.reset_database()
         get_settings.cache_clear()
+
+
+def test_v1_digest_is_bounded_to_the_scan_and_never_blocks_other_requests(client, monkeypatch, scan_rows):
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from trading_agent.analysis import digest as digest_module
+
+    monkeypatch.setattr("trading_agent.analysis.research_jobs.get_research_jobs",
+                        lambda: SimpleNamespace(snapshot=lambda completed=False: {"rows": scan_rows}))
+    started, release, seen = threading.Event(), threading.Event(), []
+
+    class SlowGenerator:
+        def __init__(self, symbols):
+            seen.append(symbols)
+
+        def generate(self, target=None):
+            started.set()
+            release.wait(10)  # a full-universe digest ran for minutes on 2026-10-26
+            return SimpleNamespace(date=datetime(2026, 10, 26).date(), market_summary={}, top_opportunities=[],
+                                   portfolio_summary={}, risk_metrics={}, news_sentiment={},
+                                   technical_highlights=[], generated_at=datetime(2026, 10, 26))
+
+        def format_digest(self, digest):
+            return "digest"
+
+    monkeypatch.setattr(digest_module, "DigestGenerator", SlowGenerator)
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(r=client.get("/api/v1/digest/daily/text")))
+    worker.start()
+    assert started.wait(10)
+    begun = time.monotonic()
+    assert client.get("/api/v1/controls/status").status_code == 200
+    assert time.monotonic() - begun < 5
+    release.set()
+    worker.join(10)
+    assert result["r"].json() == {"text": "digest"}
+    assert seen == [["AAA", "BBB", "CCC", "OLD"]]  # directional scan rows by score, not every stored symbol
+
+
+def test_all_news_reads_only_stored_news_files(client, tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setattr("trading_agent.analysis.research_engine.universe", lambda: ["AAA", "BBB", "CCC"])
+    news = tmp_path / "research" / "news"
+    news.mkdir(parents=True)
+    (news / "AAA.json").write_text(json.dumps({"articles": [
+        {"headline": "AAA wins order", "published_at": "2026-10-26T04:00:00Z", "source": "x"}],
+        "analysis": {"score": 0.4, "rationale": "positive"}}), encoding="utf-8")
+    (news / "ZZZ.json").write_text(json.dumps({"articles": [{"headline": "not on the watchlist"}]}), encoding="utf-8")
+    rows = client.get("/api/symbols/news").json()
+    assert [(r["symbol"], r["headline"], r["score"]) for r in rows] == [("AAA", "AAA wins order", 0.4)]
+
+
+def test_symbol_storage_details_survive_nan_candle_fields(client):
+    stamps = pd.date_range(end=datetime.now(UTC).replace(second=0, microsecond=0), periods=3, freq="5min")
+    client.store.write_candles(pd.DataFrame({"timestamp": stamps, "open": 100.0, "high": 101.0, "low": 99.0,
+                                             "close": 100.0, "volume": 10, "oi": np.nan}), "AAA", "5minute")
+    response = client.get("/api/v1/liveness/storage/symbols/AAA")
+    assert response.status_code == 200
+    assert response.json()["intervals"]["5minute"]["latest_candle"]["oi"] is None
+
+
+def test_v1_opportunities_default_to_the_scan_not_every_stored_symbol(client, monkeypatch, scan_rows):
+    from types import SimpleNamespace
+
+    from trading_agent.analysis import opportunity_finder
+
+    monkeypatch.setattr("trading_agent.analysis.research_jobs.get_research_jobs",
+                        lambda: SimpleNamespace(snapshot=lambda completed=False: {"rows": scan_rows}))
+    seen = []
+    monkeypatch.setattr(opportunity_finder.OpportunityFinder, "find_opportunities",
+                        lambda self, symbols, interval="5minute", *a, **k: seen.append(list(symbols)) or [])
+    assert client.get("/api/v1/opportunities/").json() == []
+    assert seen == [["AAA", "BBB", "CCC", "OLD"]]
+
+
+def _bars(store, symbol, interval, freq, end):
+    ts = pd.date_range(end=end, periods=120, freq=freq)
+    store.write_candles(pd.DataFrame({"timestamp": ts, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                                      "volume": 1000, "oi": 0}), symbol, interval)
+
+
+def test_charts_use_minute_bars_while_fresh_else_the_live_feed(client):
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    live = get_settings().storage.candle_interval
+    assert live != "minute"
+    _bars(client.store, "AAA", "minute", "min", now - timedelta(days=3))  # last backfill: days ago
+    _bars(client.store, "AAA", live, "5min", now - timedelta(minutes=10))  # the ticker's live bars
+    for path in ("chart", "patterns", "technicals"):
+        assert client.get(f"/api/symbols/AAA/{path}").status_code == 200
+    assert client.get("/api/symbols/AAA/chart").json()["interval"] == live
+    _bars(client.store, "AAA", "minute", "min", now - timedelta(minutes=2))
+    assert client.get("/api/symbols/AAA/chart").json()["interval"] == "minute"
+    assert client.get("/api/symbols/AAA/chart?interval=5minute").json()["interval"] == "5minute"

@@ -13,6 +13,7 @@ The top bar has a tab per page and a searchable symbol picker that sets the symb
 | Tab | Use it to |
 |---|---|
 | Dashboard | Review the watchlist (bias, blocked/stale flags, contradictions with open positions), the bullish/bearish Top Opportunity, symbol detail, wallet, Position Monitor and the morning digest. Open a paper trade from a fresh, unblocked plan |
+| Screener | Sectors trending today, preset trading screens and the intraday screener (below); **Update technicals** recomputes them |
 | Research | Run the full-watchlist scan and the Find → Inspect → Validate → Paper review workflow (below) |
 | Paper operations | Record, monitor and close paper positions manually |
 | Risk & execution | Engage or release the kill switch, square off everything, check session status, inspect orders and reconciliation, preview charges, read the audit trail |
@@ -23,6 +24,25 @@ The top bar has a tab per page and a searchable symbol picker that sets the symb
 
 The symbol view's **Technical summary** shows a Groww-style vote across RSI, MACD, Stochastic, Williams %R, CCI, ADX/DI and moving averages. Next to it are classic floor pivots for today, calculated from the previous IST session's high, low and close: pivot = (H+L+C)/3, R1 = 2P−L, S1 = 2P−H, R2/S2 = P ± (H−L), R3 = H + 2(P−L), S3 = L − 2(H−P). The panel also shows the nearest pivot above and below the price. Both are context only. They never change the rule signal or the scan's room-to-target, and pivots need a completed previous session in stored candles (`GET /api/symbols/{symbol}/technicals`).
 
+### Market screener
+
+The **Screener** tab rebuilds four sections of Groww's Explore page from stored minute candles and live Kite quotes:
+
+- **Top movers today**: gainers, losers and volume shockers within an index (NIFTY100 by default).
+- **Sectors trending today**: for each NSE industry, gainers and losers, plus the equal-weighted mean and median 1D change. Click a sector to filter the screener to it.
+- **Trading screens**: resistance breakouts (above the previous session's R1), near R1 (within 1% below), support breakdowns (below S1), MACD positive (line above zero: what Groww's "MACD above signal line" screen actually filters), MACD above or below its signal line, RSI ≥ 70 and ≤ 30, near the 52-week high (within 5%) and volume shockers (today's volume at least 2x the 1-week daily average). Each chip shows how many stocks match.
+- **Intraday screener**: combine price change (last 5 minutes, 15 minutes, 1 hour or today), RSI band, MACD side, 52-week proximity, R1–R3 breakout or nearness, index and sector. Sort by turnover, change, volume against the 1-week average, RSI or price.
+
+The conventions follow Groww's. RSI(14), MACD(12,26,9), pivots and the 52-week range use completed daily sessions. The 1-week average volume covers the sessions of the previous 7 calendar days. The previous close is the exchange's official close taken from the quote. The live-bar RSI is shown when you **Check** a row. Turnover is LTP × today's volume. Market cap is not available.
+
+Nothing is computed when a page loads. **Update technicals** (or `trading-agent screener-scan`) runs in the background. It first fetches live Kite quotes for the whole universe (about 5 calls for 2,300 symbols, one per second), then lays them over each symbol's stored minute history in worker processes, and saves `data/research/screener.json`. A full scan took about 2 minutes on 2026-10-26. Without a valid Kite token, the scan uses stored candles only, and the header says quotes were unavailable. In that case, names the ticker does not stream show as lagging. `--no-quotes` (or `{"quotes": false}`) skips the calls. **Indexed only** scans just the roughly 750 names in the sector map. During the session, `trading-agent screener-scan --watch 5` repeats the scan every 5 minutes until 15:30.
+
+The header shows the technicals check: current rows, live-quoted rows, stale rows (an older session) and lagging rows (more than 15 minutes behind the newest price, counted to 15:30 at the latest, usually a ticker gap), plus rows without enough history for RSI (15 sessions), MACD (35 sessions) or a full 52 weeks. Stale and lagging rows are left out of screens and sector breadth. **Check** on a row recomputes that stock now and lists what changed since the saved scan.
+
+Below the screen chips, a **track record** shows how each screen did historically. `trading-agent optimize screen-outcomes [--decision HH:MM] [--cost-bps X]` re-runs it over the Nifty 500-plus list in about a minute and a half, and the result is saved to `data/research/screen_outcomes.json`. Each screen is evaluated at the decision time (default 10:15) with only what was known then. Flagged names are entered at the 10:15 bar's open on the screen's side and exited before 15:15. The table shows the net result after costs and the edge against the whole liquid universe (a random pick), for a development period and a later holdout. A screen counts as an `edge candidate` only with positive net and edge in both periods and a holdout t of at least 2.81 (corrected for testing 10 screens). On 2026-10-26, no screen passed, at either 10:15 or 09:30, so treat the screens as watchlists, not signals.
+
+Sectors and index filters need the sector map. Run `trading-agent sector-map` to download NSE's index lists (Nifty Total Market, which is Nifty 500 plus Microcap 250, with 22 industries) into `data/cache/sector_map.csv`. A copy is committed, so a fresh checkout works offline. Unlisted symbols stay unclassified.
+
 The Dashboard digest is built in the background from the top 30 scan names and cached for 15 minutes. Run a research scan first; without one, the classic pages show empty states rather than invented rankings.
 
 ## Intraday risk controls and execution
@@ -32,8 +52,9 @@ All entry paths (Dashboard, Paper operations, `POST /api/v1/execution/enter`) us
 1. kill switch: **Risk & execution → Engage kill switch** writes `data/controls/kill_switch.json`, which survives restarts. An unreadable file blocks entries; **Resume trading** clears it;
 2. session: no entries before 09:15 IST, after `PAPER_ENTRY_CUTOFF` (15:00) or at weekends. `PAPER_ENFORCE_SESSION=false` disables only these time gates;
 3. the daily trade cap (`PAPER_MAX_TRADES_PER_DAY`), and, when `PAPER_ONE_ENTRY_PER_SYMBOL_PER_DAY=true`, no second entry in a symbol already traded today (no re-entry after its stop or target);
-4. the participation cap: quantity × price must not exceed `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value;
-5. the paper-ledger limits inside one SQLite `BEGIN IMMEDIATE` transaction: duplicates, positions, exposure, stop risk, single-name cap, realized daily loss and drawdown.
+4. the entry price: the most recently ended stored bar, 1-minute or the live interval, if it ended no more than `EXECUTION_MAX_QUOTE_AGE_SECONDS` (900) ago, is the fresh price. Risk is measured from the worse of it and the plan price, and the paper fill starts from it. A fresh price at or through the stop or the target refuses the entry. Live entries need a fresh price;
+5. the participation cap: quantity × price must not exceed `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value;
+6. the paper-ledger limits inside one SQLite `BEGIN IMMEDIATE` transaction: stop distance (`PAPER_MIN_STOP_DISTANCE_PCT`), reward:risk at the entry price (`PAPER_MIN_REWARD_RISK`), duplicates, positions, exposure, stop risk, single-name cap, realized daily loss, worst-case daily loss and drawdown.
 
 The router reserves the position, sends the order and then rewrites the position at the fill price. If the broker rejects the order, the reservation is deleted and the API returns 502. Exits always remain available.
 
@@ -81,6 +102,18 @@ Run it from **Analytics → Run evaluation** or `trading-agent optimize cross-se
 - **Not losses:** HOLD, pending (the window has not finished), unpriced (no bars) and after-cutoff signals are counted but never scored as losses.
 
 The scheduler scores the last 30 days at 15:55 on weekdays. See **Analytics → Decision outcomes**, or `GET /api/v1/analytics/decision-outcomes` (`POST …/run` re-scores). With `LLM_PROVIDER=mock` (the code default), stored `llm` signals come from the mock client, and the report says so.
+
+**Trade replay (research).** `trading-agent optimize trade-replay` (module `research/trade_replay.py`, after the day-trader-skill pack's Time Machine) asks how the rest of today could treat one bracket before you size it. On the Dashboard, **Position Sizing → Replay this plan** runs it for the shown plan; the API is `POST /api/v1/analytics/trade-replay`.
+
+- **Bars:** fixed, non-overlapping bars anchored at 09:15 IST (open first, high max, low min, close last). 1-minute bars are used when the 1-minute history has at least 90% as many usable sessions as the 5-minute one, so exits are checked minute by minute; otherwise 5-minute bars (`--bar-minutes` overrides). A session needs its 09:15 bar and at most 2% of its bars missing; a missing bar had no trade and is filled flat.
+- **Simulation:** filtered historical simulation with a stationary block bootstrap. Each past bar is divided by its session's volatility and the time-of-day volatility profile, then rescaled to today's volatility (today's bars before the entry, blended with the median of the last 10 sessions). Each of 10,000 replays (seed 19, repeatable) copies runs of consecutive bars from random past sessions at the same time of day (±10 minutes). Run length is random, with a mean chosen per stock from the data (Politis–White, capped at 60 minutes), so trends and volatility bursts inside a run survive.
+- **History:** the same percentage bracket entered at the same time on each of those real sessions. It is a base rate for the time of day, not for the signal.
+- **Exits:** the same as the outcome research. A bar that opens through the stop exits at that open, one that opens through the target exits at the target, a bar touching both counts as the stop, and anything still open exits at 15:15.
+- **Verdict:** weighs the target's R and costs. A 2R bracket with 14 bps of costs only has to hit the target first in about 1 of 3 replays that hit a side, plus the cost share.
+- **Conclusion:** the replay is rerun on 200 resamples of the session pool to get a 90% range of net R and of the target-first share. It reports `conclusive negative` or `conclusive positive` only when the pool has 40+ sessions, both ranges clear zero and break-even on the same side, and three checks agree in sign: single-bar draws, unscaled bars, and the real-session history. Otherwise it reports `inconclusive` with the failed checks. A positive is a recent base rate for this bracket at this time of day, not evidence that the signal has an edge. The status is shown on the Dashboard; it never blocks an entry.
+- **Entry time:** defaults to the end of the latest stored bar. After the last bar before 15:15 there is nothing left to replay, so after hours pass `--at` (CLI) or `entry_time` (API). At least 20 usable sessions are required.
+
+News, earnings and halts are missing, and dependence longer than a block is lost. The odds are not a win probability, not a prediction and not evidence of an edge.
 
 **LLM model tiers.** `LLM_QUICK_MODEL` serves the high-volume, low-stakes calls (headline sentiment and the setup check), and `LLM_DEEP_MODEL` serves LLM trading decisions. Both fall back to `LLM_MODEL`. This mirrors TradingAgents' quick/deep split, which keeps cost down without weakening the decision model.
 
@@ -177,7 +210,7 @@ After a validation completes, news is refreshed or a paper position changes, the
 
 Sizing uses 1.5×ATR stops, the requested reward/risk target, integer shares, the configured single-stock notional cap (10% by default) and the paper book's exposure/risk/position-count limits. Both directional lists share reservations. Short-selling leverage, sector/correlation limits, taxes, fees and execution slippage are not modeled in these plans. A score measures rule/model evidence, not probability of profit.
 
-`PAPER_MAX_SINGLE_POSITION_PCT=0.10` caps each symbol's notional. `PAPER_MAX_DAILY_LOSS_PCT=0.03` blocks new paper entries once the day's realized loss reaches 3% of IST session-start equity. `PAPER_MAX_DRAWDOWN_PCT=0.15` blocks entries at 15% realized drawdown from the ledger's peak, including previous sessions. These are fractions, not whole percentages. Existing positions can still be closed. The entry API checks the limits and inserts the position in one serialized SQLite transaction. Missing or invalid ledger evidence blocks entries; these limits do not measure unrealized losses or actual execution costs.
+`PAPER_MAX_SINGLE_POSITION_PCT=0.10` caps each symbol's notional. `PAPER_MAX_DAILY_LOSS_PCT=0.03` blocks new paper entries once the day's realized loss reaches 3% of IST session-start equity. `PAPER_MAX_DRAWDOWN_PCT=0.15` blocks entries at 15% realized drawdown from the ledger's peak, including previous sessions. The daily limit also applies to the worst case: today's realized P&L, minus the risk at the stop of every open position, minus the new trade's risk, must not pass it, so a day that has lost 2.5% with 1% open risk takes no new risk. These are fractions, not whole percentages. Existing positions can still be closed. The entry API checks the limits and inserts the position in one serialized SQLite transaction. Missing or invalid ledger evidence blocks entries; these limits do not measure unrealized losses or actual execution costs.
 
 Each scan allocation records a fingerprint of the paper ledger, session date and risk settings. A later change from any client blocks that old allocation and asks for a re-scan. The original research result remains available. Keep initial capital fixed for an existing ledger; changing it redefines historical risk.
 
@@ -208,6 +241,8 @@ Automatic research scans stored candles only and starts disabled after every API
 ```
 
 Use `GET /api/v1/research/automation` to inspect status and `POST /api/v1/research/automation/pause` to stop new automatic scans. Canceling a scan also pauses automation. The worker requires `API_WORKERS=1`, qualified evidence and the full configured universe; it supports minute, 5-minute and 15-minute data. It checks for completed-candle or ledger changes, waits for the configured weekday session, prevents overlapping scans and pauses after repeated failures. The delay is measured after completion. Settings can change after pausing.
+
+**Live set.** `live_symbols.txt` (49 of the most traded names; a copy in `data/` overrides it) is the live set. The ticker builds 1-minute bars for it from ticks, beside its usual interval, and never writes the first, partial minute after a (re)connect. Add `"scope": "live"` to the scan settings to observe and scan only the live set; it looks for new bars every 10 seconds instead of 30, and its scans still require qualified evidence. With `API_RESEARCH_AUTOSTART=live` (set in `docker-compose.yml`), the API arms the live scope at startup, with `min_scan_seconds` 60. That keeps the dashboard's 1-minute plans current: a plan expires about 75 seconds after its bar closes, and a Kite backfill plus a scan took about as long. Leave it unset to keep the explicit opt-in.
 
 This worker does not start ingestion, fetch news, train, promote or record trades. It uses the same conservative allocation gates as a manual scan. A large universe can still outlast a signal's validity window; automatic rescanning does not make historical or stale candles tradable. Session checks are weekday/time rules, without an exchange holiday calendar.
 
@@ -497,6 +532,8 @@ docker compose down
 | `trading-agent backfill [SYMBOL...] [--days N] [--missing-only] [--universe watchlist\|nifty500\|all]` | Fetch a longer history; `--missing-only` requests only sessions missing or incomplete |
 | `trading-agent data-check [SYMBOL...] [--universe watchlist\|nifty500\|all] [--days N] [--no-token]` | Are candles, token, ticker and trial current? Exit 1 if not |
 | `trading-agent heal-gaps [SYMBOL...] --interval 5minute --limit 100` | Bounded catch-up with overlap, error summary, and failure exit status |
+| `trading-agent sector-map` | Download NSE index lists into `data/cache/sector_map.csv` (industry and index membership) |
+| `trading-agent screener-scan [--universe all\|indexed] [--watch MIN] [--no-quotes]` | Recompute screener technicals and sector breadth with live Kite quotes; `--watch` repeats during market hours |
 | `trading-agent storage-stats` | Summarize Parquet data |
 | `trading-agent compact SYMBOL` | Compact a symbol's Parquet data |
 | `trading-agent diagnose [SYMBOL...]` | Compare signal behavior with baselines |
@@ -513,7 +550,9 @@ docker compose down
 | `trading-agent optimize strategy-search [SYMBOL...] [--no-ml]` | Frozen-selection strategy search with baselines and walk-forward |
 | `trading-agent optimize cross-sectional [SYMBOL...]` | Cross-sectional ranking walk-forward vs random picks |
 | `trading-agent optimize ranker-trial start / pick / settle / status [--arm rf\|hgb\|all]` | Prospective paper trial of the frozen rankers (start needs one arm) |
+| `trading-agent optimize screen-outcomes [SYMBOL...] [--decision HH:MM] [--cost-bps X] [--min-value-cr X]` | Historical net return of each screener screen against the liquid universe, development vs holdout |
 | `trading-agent optimize decision-outcomes [--days N] [--horizon MIN] [--cost-bps X]` | Score stored rule/ML/LLM signals on realised returns after costs |
+| `trading-agent optimize trade-replay SYMBOL --side BUY\|SELL --entry X --stop X --target X [--at "YYYY-MM-DD HH:MM"] [--replays N] [--seed N] [--sessions N] [--json]` | Simulated and historical odds of target first, stop first or neither by 15:15 for one bracket |
 | `trading-agent optimize ranking-lab [SYMBOL...] [--snapshots FILE]` | 60 pre-registered cross-sectional variants, selection frozen on validation |
 
 Always use `--help` on a command before a long or quota-consuming run.
@@ -621,7 +660,7 @@ If an in-process API restart reports that the previous research worker is still 
 
 ### Entry rejected
 
-A 409 names the blocking rule: kill switch, before 09:15, after the cutoff, weekend, daily trade cap, participation cap, duplicate symbol, exposure, stop risk, daily loss or drawdown. Check **Risk & execution → Trading controls**. A 502 means the broker rejected the order and the reservation was removed; the audit trail has the broker message.
+A 409 names the blocking rule: kill switch, before 09:15, after the cutoff, weekend, daily trade cap, participation cap, duplicate symbol, exposure, stop risk, daily loss (realized or worst case), drawdown, a stop too near the entry, or a fresh price already through the stop or the target. Check **Risk & execution → Trading controls**. A 502 means the broker rejected the order and the reservation was removed; the audit trail has the broker message.
 
 ### Sentiment 429 errors
 

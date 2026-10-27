@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
@@ -34,6 +34,10 @@ from trading_agent.storage.db import Position, Signal, get_database
 router = APIRouter()
 IST = ZoneInfo("Asia/Kolkata")
 DEFAULT_INTERVAL = "minute"
+# 1-minute bars stay the default while fresh. Only backfill refreshes them, so for
+# the rest of the watchlist the charts follow the live feed's interval instead of
+# showing the last backfilled session (20MICRONS showed Friday on 2026-10-26).
+FRESH_MINUTE_SECONDS = 600
 
 
 # --- shared helpers ----------------------------------------------------------
@@ -41,7 +45,8 @@ DEFAULT_INTERVAL = "minute"
 def _scan() -> dict:
     from trading_agent.analysis.research_jobs import get_research_jobs
 
-    return get_research_jobs().snapshot()
+    # The classic dashboard keeps the last finished scan on screen while a new one runs.
+    return get_research_jobs().snapshot(completed=True)
 
 
 def _scan_rows() -> list[dict]:
@@ -77,7 +82,12 @@ def _position_dict(p: Position) -> dict:
     return {"id": p.id, "symbol": p.symbol, "action": p.action, "entry_price": p.entry_price,
             "position_size": p.position_size, "position_value": p.position_value,
             "risk_amount": p.risk_amount, "stop_loss": p.stop_loss, "take_profit": p.take_profit,
-            "opened_at": p.opened_at.isoformat() if p.opened_at else None, "status": p.status}
+            "opened_at": _utc(p.opened_at), "status": p.status}
+
+
+def _utc(stamp: datetime | None) -> datetime | None:
+    """SQLite returns naive UTC; an explicit offset stops browsers reading it as local time."""
+    return stamp.replace(tzinfo=UTC) if stamp is not None and stamp.tzinfo is None else stamp
 
 
 async def _statuses() -> list[dict]:
@@ -150,7 +160,8 @@ async def rankings(capital: float = Query(100_000.0, gt=0)):
     ``capital`` is accepted for compatibility; sizing comes from the scan's own
     capital so the sidebar and the Opportunity panel never disagree.
     """
-    rows = await run_in_threadpool(_scan_rows)
+    scan = await run_in_threadpool(_scan)
+    rows = [row for row in scan.get("rows", []) if row.get("action") in {"BUY", "SELL"}]
     held = {s["position"]["symbol"]: s for s in await _statuses()}
     scored = [_ranked_entry(row, held) for row in rows]
     # Like the original sized lists, blocked names stay in (flagged) so the
@@ -160,6 +171,9 @@ async def rankings(capital: float = Query(100_000.0, gt=0)):
         "bullish": [e for e in scored if e["action"] == "BUY"][:10],
         "bearish": [e for e in scored if e["action"] == "SELL"][:10],
         "contradictions": [e for e in scored if e["contradiction"]],
+        # Every symbol the scan evaluated, strongest first: these have live data
+        # even when none has a signal, unlike the alphabetical watchlist.
+        "scanned": [row["symbol"] for row in sorted(scan.get("rows", []), key=lambda row: -row.get("score", 0))],
     })
 
 
@@ -324,8 +338,8 @@ async def transactions(limit: int = Query(200, ge=1, le=2000)):
         )).scalars())[:limit]
     trades = [{
         "id": p.id, "symbol": p.symbol, "action": p.action, "position_id": p.id,
-        "entry_price": p.entry_price, "entry_at": p.opened_at, "exit_price": p.exit_price,
-        "exit_at": p.exit_time, "position_size": p.position_size,
+        "entry_price": p.entry_price, "entry_at": _utc(p.opened_at), "exit_price": p.exit_price,
+        "exit_at": _utc(p.exit_time), "position_size": p.position_size,
         "realized_pnl_rupees": float(p.pnl or 0), "exit_reason": "closed", "slippage_deducted": 0.0,
     } for p in closed]
     ledger = [{"id": 0, "type": "deposit", "amount": book.initial_cash, "note": "Paper starting capital",
@@ -421,6 +435,24 @@ def _build_digest(key: str, target) -> None:
 
 # --- per-symbol views --------------------------------------------------------------
 
+def _view_interval(symbol: str, requested: str | None) -> str:
+    """The requested interval, else 1-minute bars if fresh, else the live feed's."""
+    from trading_agent.core.config import get_settings
+    from trading_agent.storage.parquet_store import get_parquet_store
+
+    if requested:
+        return requested
+    live = get_settings().storage.candle_interval
+    if live == DEFAULT_INTERVAL:
+        return live
+    latest = get_parquet_store().read_latest(symbol, DEFAULT_INTERVAL, 1)
+    if not latest.empty:
+        ended = latest["timestamp"].iloc[-1].to_pydatetime() + timedelta(minutes=1)
+        if (_now() - ended).total_seconds() <= FRESH_MINUTE_SECONDS:
+            return DEFAULT_INTERVAL
+    return live
+
+
 def _research_frame(symbol: str, interval: str):
     from trading_agent.analysis.research_engine import completed_frame
     from trading_agent.storage.parquet_store import get_parquet_store
@@ -433,10 +465,16 @@ def _research_frame(symbol: str, interval: str):
 @router.get("/symbols/news")
 def all_news(limit: int = Query(100, ge=1, le=500)):
     from trading_agent.analysis.research_engine import universe
+    from trading_agent.core.config import get_settings
 
+    # One directory listing, not an exists() per watchlist symbol: 2,300 of those
+    # took 12 s on the Docker Desktop bind mount for a dozen news files.
+    directory = get_settings().data_dir / "research" / "news"
+    stored = {path.stem for path in directory.glob("*.json")} if directory.is_dir() else set()
     rows = []
     for symbol in universe():
-        rows.extend(_news_rows(symbol))
+        if symbol in stored:
+            rows.extend(_news_rows(symbol))
     rows.sort(key=lambda r: r["published_at"] or "", reverse=True)
     return rows[:limit]
 
@@ -455,16 +493,18 @@ def _news_rows(symbol: str) -> list[dict]:
 
 
 @router.get("/symbols/{symbol}/chart")
-async def chart(symbol: str, limit: int = Query(200, ge=20, le=2000), interval: str = Query(DEFAULT_INTERVAL)):
+async def chart(symbol: str, limit: int = Query(200, ge=20, le=2000), interval: str | None = Query(None)):
     from trading_agent.analysis.research_engine import INTERVAL_SECONDS, chart_payload
 
     symbol = _require_symbol(symbol)
+    interval = await run_in_threadpool(_view_interval, symbol, interval)
     if interval not in INTERVAL_SECONDS:
         raise HTTPException(422, "Unsupported interval")
     df = await run_in_threadpool(_research_frame, symbol, interval)
     if df is None:
         return {"symbol": symbol, "insufficient_data": True, "candles": None}
     payload = chart_payload(symbol, df, limit)
+    payload["interval"] = interval
     payload["candles"]["timestamp"] = [t.isoformat() for t in payload["candles"]["timestamp"]]
     for marker in payload["signal_markers"]:
         marker["timestamp"] = marker["timestamp"].isoformat()
@@ -472,8 +512,13 @@ async def chart(symbol: str, limit: int = Query(200, ge=20, le=2000), interval: 
 
 
 @router.get("/symbols/{symbol}/patterns")
-async def patterns(symbol: str, interval: str = Query(DEFAULT_INTERVAL)):
+async def patterns(symbol: str, interval: str | None = Query(None)):
+    from trading_agent.analysis.research_engine import INTERVAL_SECONDS
+
     symbol = _require_symbol(symbol)
+    interval = await run_in_threadpool(_view_interval, symbol, interval)
+    if interval not in INTERVAL_SECONDS:
+        raise HTTPException(422, "Unsupported interval")
     df = await run_in_threadpool(_research_frame, symbol, interval)
     if df is None:
         return {"patterns": [], "bias": "neutral"}
@@ -483,14 +528,15 @@ async def patterns(symbol: str, interval: str = Query(DEFAULT_INTERVAL)):
 
 
 @router.get("/symbols/{symbol}/technicals")
-async def technicals(symbol: str, interval: str = Query(DEFAULT_INTERVAL)):
+async def technicals(symbol: str, interval: str | None = Query(None)):
     from trading_agent.analysis.research_engine import INTERVAL_SECONDS
     from trading_agent.analysis.technical_summary import summary_from_frame
 
     symbol = _require_symbol(symbol)
+    interval = await run_in_threadpool(_view_interval, symbol, interval)
     if interval not in INTERVAL_SECONDS:
         raise HTTPException(422, "Unsupported interval")
-    df =await run_in_threadpool(_research_frame, symbol, interval)
+    df = await run_in_threadpool(_research_frame, symbol, interval)
     summary = summary_from_frame(symbol, interval, df) if df is not None else None
     return to_jsonable(summary or {"symbol": symbol, "insufficient_data": True})
 

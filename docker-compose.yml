@@ -17,6 +17,9 @@ x-app: &app
     CACHE_DIR: /app/data/cache
     STORAGE_PARQUET_ROOT: /app/data/parquet
     ML_MODEL_DIR: /app/models
+    # Read by the API only: arm research automation over live_symbols.txt at startup,
+    # so the dashboard's 1-minute plans are rescanned as each bar closes.
+    API_RESEARCH_AUTOSTART: live
   volumes:
     - ./data:/app/data
     - ./models:/app/models

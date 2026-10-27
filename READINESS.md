@@ -70,7 +70,7 @@ These are requirements, not claims.
 | # | Gate | Exists now | Still missing |
 |---|---|---|---|
 | 1 | Execution and reconciliation | Router with pre-trade checks, paper/live brokers, `orders` table, reconciliation endpoint, kill switch, square-off | Idempotent client intent IDs, partial fills, cancels, reconnect replay, fault-injection tests, a supervised live round trip |
-| 2 | Financial controls | Realized daily-loss/drawdown gates, trade cap, participation cap, Zerodha cost model | Unrealized P&L in limits, decimal ledger, broker statement reconciliation, short/margin rules, sector/correlation limits |
+| 2 | Financial controls | Realized daily-loss/drawdown gates, worst-case daily loss (realized + open stop risk), fresh-price entry risk, minimum stop distance, trade cap, participation cap, Zerodha cost model | Unrealized P&L in limits, decimal ledger, broker statement reconciliation, short/margin rules, sector/correlation limits |
 | 3 | Data quality | Immutable Parquet, overlap gap healing, freshness checks | Exchange calendar, interior-gap audit, corporate actions, point-in-time universe |
 | 4 | Security and governance | Optional bearer token, loopback ports, secrets ignored | TLS gateway, users/roles, secret rotation, immutable audit, SBOM review |
 | 5 | Reliability | Heartbeats, scheduler signal handling, background candle writer | Durable job queue, metrics/alerts, soak and forced-disconnect tests, restore drills |

@@ -67,6 +67,11 @@ class StorageSettings(BaseSettings):
         default="5minute",
         description="Default candle interval",
     )
+    read_cache_rows: int = Field(
+        default=4_000_000,
+        ge=0,
+        description="Candle rows each process keeps in memory between reads (0 disables)",
+    )
     compression: Literal["snappy", "gzip", "zstd", "lz4"] = Field(
         default="snappy",
         description="Parquet compression codec",
@@ -85,6 +90,8 @@ class APISettings(BaseSettings):
     port: int = Field(default=8000, description="Server port")
     reload: bool = Field(default=False, description="Auto-reload on changes")
     workers: int = Field(default=1, description="Number of workers")
+    research_autostart: Literal["off", "live"] = Field(
+        default="off", description="Arm research automation at startup: off, or the live set (live_symbols.txt)")
     cors_origins: list[str] = Field(
         default=["http://localhost:3000", "http://localhost:5173"],
         description="CORS allowed origins",
@@ -104,6 +111,14 @@ class PaperRiskSettings(BaseSettings):
     max_trade_risk_pct: float = Field(default=0.02, gt=0, le=1)
     max_daily_loss_pct: float = Field(default=0.03, gt=0, le=1)
     max_drawdown_pct: float = Field(default=0.15, gt=0, le=1)
+    # A stop nearer than this fraction of the entry sits inside normal spread
+    # and noise, and inflates quantity under fixed-risk sizing: refused.
+    min_stop_distance_pct: float = Field(default=0.0005, ge=0, lt=1)
+    # Target distance over stop distance at the price risk is measured from; a plan
+    # whose target the market has nearly reached is refused, not entered at a poor ratio.
+    min_reward_risk: float = Field(default=1.0, ge=0, le=10)
+    # Paper only: the monitor closes a position once its stop or target trades.
+    enforce_brackets: bool = True
     # Intraday session discipline (IST). No new entries after the cutoff; every
     # open position is squared off at square_off_time, like broker MIS.
     # Session gates (cutoff, open, weekend) can be disabled for back-office
@@ -129,6 +144,9 @@ class ExecutionSettings(BaseSettings):
     # Also cap at this share of the forecast volume still to trade today.
     max_remaining_volume_pct: float = Field(default=0.05, gt=0, le=1)
     max_participation_pct: float = Field(default=0.01, gt=0, le=0.25)
+    # Entry risk is measured from the worse of the plan price and the latest
+    # stored candle no older than this. Live entries need such a candle.
+    max_quote_age_seconds: int = Field(default=900, ge=60)
 
 
 class MonitoringSettings(BaseSettings):

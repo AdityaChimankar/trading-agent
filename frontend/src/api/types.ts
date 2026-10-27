@@ -33,6 +33,7 @@ export interface RankedEntry {
 
 export interface RankingsResponse {
   scored: RankedEntry[]
+  scanned?: string[]
   bullish: RankedEntry[]
   bearish: RankedEntry[]
   contradictions: RankedEntry[]
@@ -161,6 +162,8 @@ export type ChartResponse =
   | {
       symbol: string
       insufficient_data: false
+      // The bars shown: 1-minute while fresh, else the live feed's interval.
+      interval?: string
       candles: CandleArrays
       indicators: IndicatorArrays
       patterns: PatternFlags
@@ -388,4 +391,55 @@ export interface TechnicalsResponse {
   symbol: string; interval?: string; as_of?: string; insufficient_data?: boolean
   readings?: TechnicalReading[]; bullish_count?: number; bearish_count?: number; neutral_count?: number
   total?: number; verdict?: string; pivots?: PivotLevels | null
+}
+
+export interface ReplayOutcomes {
+  count: number
+  p_target: number
+  p_stop: number
+  p_neither: number
+  p_green: number
+  avg_r: number
+  avg_r_net: number
+  targets: number
+  stops: number
+  neither: number
+}
+
+export interface TradeReplayResponse {
+  symbol: string
+  side: 'BUY' | 'SELL'
+  entry: number
+  stop: number
+  target: number
+  entry_time: string
+  first_bar: string
+  exit_time: string
+  bar_minutes: number
+  bars_left: number
+  risk_per_share: number
+  r_target: number
+  break_even_share: number
+  mean_block_minutes: number
+  config: { replays: number; seed: number; sessions: number; window_minutes: number; cost_bps: number }
+  pool: { sessions: number; first: string; last: string; interval: string }
+  volatility: { today: number | null; today_bars: number; recent: number; used: number; ratio: number }
+  simulation: ReplayOutcomes & {
+    close_p5: number
+    close_median: number
+    close_p95: number
+    avg_r_net_range: [number, number]
+    share_range: [number, number]
+    bands: { time: string[]; p5: number[]; p25: number[]; p50: number[]; p75: number[]; p95: number[] }
+  }
+  variants: { single_bars: ReplayOutcomes; unscaled: ReplayOutcomes }
+  history: ReplayOutcomes
+  verdict: string
+  conclusion: {
+    status: 'conclusive_negative' | 'conclusive_positive' | 'inconclusive'
+    line: string
+    checks: { name: string; passed: boolean; detail: string }[]
+  }
+  notes: string[]
+  limitations: string
 }

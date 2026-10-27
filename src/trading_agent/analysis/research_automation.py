@@ -24,6 +24,9 @@ def research_session_open(now: datetime) -> bool:
 
 class ResearchAutomation:
     CHECK_SECONDS = 30
+    # The live set's 1-minute plans expire ~75 s after their bar closes, so its
+    # new bars are looked for more often.
+    LIVE_CHECK_SECONDS = 10
     MAX_FAILURES = 3
 
     def __init__(self, jobs=None, observe=None, ledger=None, clock=None, symbols=None):
@@ -67,6 +70,12 @@ class ResearchAutomation:
         # numeric settings through ScanRequest before reaching this controller.
         if options.get("require_validated") is not True or options.get("symbols") is not None:
             raise ValueError("Automation requires qualified evidence and the full configured universe")
+        if options.get("scope", "universe") not in {"universe", "live"}:
+            raise ValueError("Automation scope must be the universe or the live set")
+        if options.get("scope") == "live":
+            from trading_agent.analysis.research_engine import live_symbols
+            if not live_symbols():
+                raise ValueError("The live scope needs live_symbols.txt")
         if options.get("interval") not in {"minute", "5minute", "15minute"}:
             raise ValueError("Automation supports intraday candles only")
         if not 60 <= min_scan_seconds <= 3600:
@@ -148,7 +157,8 @@ class ResearchAutomation:
                 if not self.state["enabled"] or (self._due and now < self._due):
                     return
                 generation = self._generation
-                self._due = now + timedelta(seconds=self.CHECK_SECONDS)
+                live = self.state["options"].get("scope") == "live"
+                self._due = now + timedelta(seconds=self.LIVE_CHECK_SECONDS if live else self.CHECK_SECONDS)
                 self.state.update(last_check_at=now.isoformat(), next_check_at=self._due.isoformat())
                 options = copy.deepcopy(self.state["options"])
             jobs = self._jobs()
@@ -192,11 +202,14 @@ class ResearchAutomation:
                 observe = observe_candles
             else:
                 observe = self._observe
-            if self._symbols is None:
+            if self._symbols is not None:
+                symbols = self._symbols()
+            elif live:
+                from trading_agent.analysis.research_engine import live_symbols
+                symbols = live_symbols()
+            else:
                 from trading_agent.analysis.research_engine import universe
                 symbols = universe()
-            else:
-                symbols = self._symbols()
             data = observe(symbols, options["interval"], now)
             # A readable risk ledger is mandatory, even for automatic research.
             # A blocked ledger may still be scanned: existing sizing gates keep
@@ -225,14 +238,16 @@ class ResearchAutomation:
                     self._set("waiting_changes", "No new completed candles or paper-ledger changes since the last automatic scan.")
                     return
                 try:
-                    result = jobs.start(options, source="automation")
+                    # The live scope scans exactly the symbols it observed.
+                    result = jobs.start(dict(options, symbols=symbols) if live else options, source="automation")
                 except RuntimeError:
                     self._set("waiting_scan", "Another scan owns the data directory; retrying without overlap.")
                     return
                 self._pending = fingerprint
                 self._owned_scan = result["started_at"]
                 self.state.update(last_trigger_at=finished.isoformat(), scan_started_at=self._owned_scan)
-                self._set("scanning", "Fresh data or changed paper ledger: scanning the full universe with evidence gates.")
+                self._set("scanning", "Fresh data or changed paper ledger: scanning the "
+                          f"{'live set' if live else 'full universe'} with evidence gates.")
         except CandleObservationPending as error:
             with self._lock:
                 if generation == self._generation and self.state["enabled"]:

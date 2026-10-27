@@ -102,6 +102,16 @@ async def create_position(position: PositionCreate):
         limits = get_settings().paper
         if not limits.entries_enabled:
             raise HTTPException(status_code=409, detail="Paper entries disabled by operator")
+        if abs(position.entry_price - position.stop_loss) < position.entry_price * limits.min_stop_distance_pct:
+            raise HTTPException(status_code=409, detail=(
+                f"Stop {position.stop_loss:g} is within {limits.min_stop_distance_pct:.2%} of the entry "
+                f"{position.entry_price:g}: too tight to survive the spread; widen it"))
+        if position.take_profit is not None:
+            reward_risk = abs(position.take_profit - position.entry_price) / abs(position.entry_price - position.stop_loss)
+            if reward_risk < limits.min_reward_risk:
+                raise HTTPException(status_code=409, detail=(
+                    f"Reward:risk {reward_risk:.2f} at {position.entry_price:g} (stop {position.stop_loss:g}, target "
+                    f"{position.take_profit:g}) is under the {limits.min_reward_risk:g} minimum; re-plan"))
         # Serialize check-and-create in the supported SQLite deployment.
         if session.bind.dialect.name != "sqlite":
             raise HTTPException(status_code=503, detail="Paper entry risk locking requires SQLite")
@@ -129,6 +139,11 @@ async def create_position(position: PositionCreate):
             raise HTTPException(status_code=409, detail="Paper exposure limit exceeded")
         if risk_amount > equity * limits.max_trade_risk_pct or sum(p["risk_amount"] for p in opened) + risk_amount > equity * limits.max_risk_pct:
             raise HTTPException(status_code=409, detail="Paper risk limit exceeded")
+        if risk_amount > ledger["daily_risk_headroom"]:
+            raise HTTPException(status_code=409, detail=(
+                f"Paper worst-case daily loss limit: INR {risk_amount:,.0f} risk at the stop, "
+                f"INR {ledger['daily_risk_headroom']:,.0f} left today after realized P&L "
+                f"and open positions' risk"))
         pos = await repo.create(
             symbol=position.symbol.upper(),
             action=position.action.upper(),

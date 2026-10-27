@@ -10,7 +10,7 @@ The BUY/SELL lifecycle adds `outcome_contract.py` (features, policy, calibration
 
 `/research/outcome-models` is read-only lifecycle status. The full scanner loads the promoted adapter when an active pointer exists, otherwise the legacy classifier. Invalid active evidence fails closed. Qualified outcome estimates apply only to the evaluated ML-only policy, trained symbols and fixed bracket configuration; hybrid estimates do not inherit qualification. Shadow evidence is separate from the operational paper ledger and does not simulate shared capital or real market fills.
 
-`research/trade_outcomes.py` owns conservative next-open stop/target replay. `analysis/outcome_validation.py` owns fixed-rule chronological calibration/holdout reports, sample/expectancy/Brier gates, policy matching and expiry. `/research/outcome-validation` is an explicit single-symbol action; it never calls brokers or trains the active model. The dashboard distinguishes this from the separate rule-parameter Walk-Forward Optimizer.
+`research/trade_outcomes.py` owns conservative next-open stop/target replay. `research/trade_replay.py` reuses those exit rules for one plan's bracket: a volatility-filtered stationary block bootstrap of the rest of the session from recent sessions' 1- or 5-minute bars, the same bracket on each real past session, and a conclusion trigger that reports conclusive only when a pool-resample range and three robustness runs agree (`POST /api/v1/analytics/trade-replay`, Dashboard Position Sizing). It reads stored candles only and never sizes, records, blocks or sends anything. `analysis/outcome_validation.py` owns fixed-rule chronological calibration/holdout reports, sample/expectancy/Brier gates, policy matching and expiry. `/research/outcome-validation` is an explicit single-symbol action; it never calls brokers or trains the active model. The dashboard distinguishes this from the separate rule-parameter Walk-Forward Optimizer.
 
 `ResearchJobs` scans all configured symbols, attaches evidence, rechecks candle freshness at completion and reads, and defaults to blocking unvalidated sizing. Qualified rule estimates rank by estimated net expectancy; other scores are exploratory. A long scan may outlive minute-candle eligibility. Incremental feature caches/stream-driven recomputation are not implemented.
 
@@ -90,7 +90,7 @@ No inference path retrains or overwrites models. No scan makes broker requests, 
 | Module | Responsibility |
 |---|---|
 | `risk/controls.py` | Kill switch, session gates, trade cap, square-off, JSONL audit |
-| `risk/ledger_guard.py` | Realized equity, daily-loss and drawdown state inside `BEGIN IMMEDIATE` |
+| `risk/ledger_guard.py` | Realized equity, daily-loss, worst-case daily risk headroom and drawdown state inside `BEGIN IMMEDIATE` |
 | `analysis/performance.py` | Closed-trade rows net of order or modelled charges; summary, attribution, equity curve |
 | `analysis/volume_insights.py` | Time-of-day RVOL, VWAP, liquidity tier, participation-capped size, agreement with scan |
 | `analysis/technical_summary.py` | Groww-style indicator votes and verdict |

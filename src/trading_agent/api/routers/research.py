@@ -104,6 +104,8 @@ class AutomaticScanRequest(ScanRequest):
     symbols: None = None
     interval: Literal["minute", "5minute", "15minute"] = "minute"
     require_validated: Literal[True] = True
+    # "live": live_symbols.txt, scanned as its 1-minute bars close; never a hand-picked list.
+    scope: Literal["universe", "live"] = "universe"
 
 
 class AutomationRequest(BaseModel):

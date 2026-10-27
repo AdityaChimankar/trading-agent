@@ -319,6 +319,70 @@ def data_check(
         raise typer.Exit(1)
 
 
+@app.command("sector-map")
+def sector_map():
+    """Download NSE index lists and cache each symbol's industry and index membership."""
+    from trading_agent.ingest.sector_map import SectorMapError, fetch_sector_map, save_sector_map
+
+    try:
+        entries = fetch_sector_map()
+    except SectorMapError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    path = save_sector_map(entries)
+    industries = {e["industry"] for e in entries.values() if e["industry"]}
+    typer.echo(f"Saved {len(entries)} symbols across {len(industries)} industries to {path}")
+
+
+@app.command("screener-scan")
+def screener_scan(
+    universe: str = typer.Option("all", help="all (every stored minute symbol) | indexed (sector map only)"),
+    watch: int = typer.Option(0, help="Repeat every N minutes while the NSE session is open (0 = once)"),
+    quotes: bool = typer.Option(True, help="Overlay live Kite quotes (about 5 calls for the full universe)"),
+):
+    """Recompute screener technicals (RSI, MACD, pivots, 52W, sectors) from stored minute candles."""
+    import time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from trading_agent.analysis.screener_jobs import get_screener_jobs
+
+    if universe not in {"all", "indexed"}:
+        raise typer.BadParameter("universe must be all or indexed")
+    job = get_screener_jobs()
+
+    def market_open() -> bool:
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        return now.weekday() < 5 and (9, 15) <= (now.hour, now.minute) <= (15, 30)
+
+    while True:
+        try:
+            job.start(universe, quotes=quotes)
+        except RuntimeError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(1) from error
+        try:
+            while job.snapshot(rows=False)["status"] == "running":
+                time.sleep(2)
+        except KeyboardInterrupt:
+            job.cancelled.set()
+            while job.snapshot(rows=False)["status"] == "running":
+                time.sleep(0.1)
+            raise typer.Exit(1) from None
+        state = job.snapshot(rows=False)
+        check = state.get("check") or {}
+        typer.echo(f"quotes: {state.get('quotes')}")
+        typer.echo(f"{state['status']}: {check.get('current', 0)} current rows ({check.get('quoted', 0)} quoted), "
+                   f"{check.get('stale', 0)} stale, "
+                   f"{state.get('skipped', 0)} skipped, {len(state['errors'])} errors; "
+                   f"session {state.get('latest_session')}")
+        if state["status"] != "completed":
+            raise typer.Exit(1)
+        if not watch or not market_open():
+            break
+        time.sleep(watch * 60)
+
+
 @app.command()
 def storage_stats():
     """Show storage statistics."""

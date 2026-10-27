@@ -17,6 +17,7 @@ import type {
   RankingsResponse,
   SignalRow,
   TechnicalsResponse,
+  TradeReplayResponse,
   SizingResponse,
   TransactionsResponse,
   WatchlistResponse,
@@ -215,4 +216,20 @@ export function useClosePosition() {
   return usePortfolioMutation((id: number) =>
     apiPost<{ closed: number }>(`/api/positions/${id}/close`),
   )
+}
+
+export interface TradeReplayRequest {
+  symbol: string
+  side: 'BUY' | 'SELL'
+  entry: number
+  stop: number
+  target: number
+}
+
+// Research only: runs the replay on demand and changes nothing, so no cache invalidation.
+export function useTradeReplay() {
+  return useMutation({
+    mutationFn: (vars: TradeReplayRequest) =>
+      apiPost<TradeReplayResponse>('/api/v1/analytics/trade-replay', vars),
+  })
 }

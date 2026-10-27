@@ -1,0 +1,53 @@
+# Live set: the ticker also builds 1-minute bars for these, and research automation
+# in live scope scans them as each bar closes. Chosen 2026-10-26 from the 50 most
+# traded names by turnover (the most trades, tightest spreads, lowest cost per
+# trade); MOREPENLAB dropped, no longer listed. A copy in data/ overrides this file.
+ABB
+APOLLO
+AXISBANK
+BAJFINANCE
+BHARTIARTL
+BHEL
+BSE
+CANBK
+CGCL
+CGPOWER
+CHENNPETRO
+CUPID
+CYIENTDLM
+DIXON
+EICHERMOT
+ETERNAL
+EUROPRATIK
+GABRIEL
+GROWW
+HBLENGINE
+HCLTECH
+HDFCBANK
+HEROMOTOCO
+ICICIBANK
+IDEA
+INFY
+IXIGO
+JUSTDIAL
+KARURVYSYA
+KROSS
+LAURUSLABS
+LT
+LTM
+MARUTI
+MOLBIO
+NYKAA
+PCJEWELLER
+PERSISTENT
+PNB
+RATNAVEER
+RELIANCE
+SBIN
+TCS
+TECHM
+TIPSMUSIC
+ULTRACEMCO
+UNIONBANK
+WELCORP
+YESBANK

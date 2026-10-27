@@ -93,11 +93,23 @@ def mock_candidate():
 @pytest.fixture(autouse=True)
 def _isolated_controls(tmp_path_factory, monkeypatch):
     """Tests run at any hour: lift the IST session window unless a test opts in,
-    and keep the audit log / kill switch out of the working tree."""
-    from trading_agent.core.config import get_settings
+    and keep the audit log / kill switch and the database out of the working tree.
 
+    Every test gets a throwaway SQLite file. Without this, a test that starts the app
+    without its own DB_URL opened the .env database: on 2026-10-26 a host test run
+    took a Windows lock on the live stack's data/trading.db mid-session.
+    """
+    from trading_agent.core.config import get_settings
+    from trading_agent.storage import db as db_module
+
+    data = tmp_path_factory.mktemp("data")
+    database = data / "test.db"
     monkeypatch.setenv("PAPER_ENFORCE_SESSION", "false")
-    monkeypatch.setenv("DATA_DIR", str(tmp_path_factory.mktemp("data")))
+    monkeypatch.setenv("DATA_DIR", str(data))
+    monkeypatch.setenv("DB_URL", f"sqlite:///{database.as_posix()}")
+    monkeypatch.setattr(db_module, "DB_PATH", str(database))
     get_settings.cache_clear()
+    db_module.reset_database()
     yield
+    db_module.reset_database()
     get_settings.cache_clear()

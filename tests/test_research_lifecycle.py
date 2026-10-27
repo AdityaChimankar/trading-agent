@@ -20,7 +20,7 @@ def lifecycle(monkeypatch):
     database = SimpleNamespace(create_tables=AsyncMock(), close=AsyncMock())
     cleanup = SimpleNamespace(register_signals=Mock(side_effect=AssertionError("ASGI host owns signals")),
                               run_cleanup=AsyncMock())
-    settings = SimpleNamespace(api=SimpleNamespace(workers=1))
+    settings = SimpleNamespace(api=SimpleNamespace(workers=1, research_autostart="off"))
     monkeypatch.setattr(research_automation, "get_research_automation", lambda: worker)
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_shutdown_manager", lambda: cleanup)

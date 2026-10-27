@@ -31,6 +31,7 @@ CANDLES_PARQUET_DIR = PARQUET_DIR / "candles"
 # --- credentials & market-data inputs ------------------------------------
 ACCESS_TOKEN_PATH = DATA_DIR / ".access_token"
 SYMBOLS_TXT = PROJECT_ROOT / "symbols.txt"
+LIVE_SYMBOLS_TXT = PROJECT_ROOT / "live_symbols.txt"
 INSTRUMENTS_CSV = PACKAGE_ROOT / "ingest" / "instruments.csv"
 WATCHLIST_RESOLVED = PACKAGE_ROOT / "ingest" / "watchlist_resolved.py"
 

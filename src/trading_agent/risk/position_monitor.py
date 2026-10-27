@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
+import pandas as pd
+
 from trading_agent.core.logging_config import get_logger
 from trading_agent.storage.db import (
     Position,
@@ -632,26 +634,103 @@ async def run_monitor_cycle(now: datetime | None = None) -> dict:
     checked = 0
     alerts = 0
     recorded = 0
-    
+
     async with db.session() as session:
-        repo = PositionRepository(session)
-        open_positions = await repo.get_open()
-        
-        for pos in open_positions:
-            checked += 1
-            status = await get_position_status(pos, now=now, fetch_current_signals=True)
-            
-            if status.alert_kind is not None:
-                alerts += 1
+        open_positions = await PositionRepository(session).get_open()
+    # Evaluate outside the write session: candle reads can take seconds, and an open
+    # write transaction meanwhile made order writes fail with "database is locked".
+    flagged = []
+    for pos in open_positions:
+        checked += 1
+        status = await get_position_status(pos, now=now, fetch_current_signals=True)
+        if status.alert_kind is not None:
+            alerts += 1
+            flagged.append((pos, status))
+    if flagged:
+        async with db.session() as session:
+            for pos, status in flagged:
                 # Record alert if not already recorded for this candle
                 recorded_flag = await _record_alert(
-                    session, pos.id, pos.symbol, 
+                    session, pos.id, pos.symbol,
                     status.alert_kind, status.recommendation, now
                 )
                 if recorded_flag:
                     recorded += 1
-    
+
     return {"checked": checked, "alerts": alerts, "recorded": recorded}
+
+
+def bracket_exit(bars, action: str, stop_loss: float, take_profit: float | None) -> tuple[float, str] | None:
+    """The first stop or target fill in ``bars``, by the replay's rules (research/trade_outcomes).
+
+    An opening gap through the stop fills at the open; a gap through the target
+    fills at the target; a bar that touches both counts as the stop.
+    """
+    sign = 1 if action == "BUY" else -1
+
+    def beyond_stop(price):
+        return sign * (price - stop_loss) <= 0
+
+    def beyond_target(price):
+        return take_profit is not None and sign * (price - take_profit) >= 0
+
+    for bar in bars.itertuples():
+        o, high, low = float(bar.open), float(bar.high), float(bar.low)
+        adverse, favourable = (low, high) if sign == 1 else (high, low)
+        if beyond_stop(o):
+            return o, "gap_stop"
+        if beyond_target(o):
+            return take_profit, "target"
+        if beyond_stop(adverse):
+            return stop_loss, "stop"
+        if beyond_target(favourable):
+            return take_profit, "target"
+    return None
+
+
+async def enforce_brackets(now: datetime | None = None) -> dict:
+    """Paper mode: close each open position whose stop or target traded after entry.
+
+    Behaves like a resting bracket order. Bars come from the live interval
+    (``STORAGE_CANDLE_INTERVAL``) and only bars starting at or after the entry
+    count, so the part of the entry bar after the fill is not checked. Never runs
+    in live mode, where exits stay with the operator and the broker.
+    """
+    from fastapi import HTTPException
+    from starlette.concurrency import run_in_threadpool
+
+    from trading_agent.core.config import get_settings
+    from trading_agent.execution.router import get_order_router
+    from trading_agent.storage.parquet_store import get_parquet_store
+
+    settings = get_settings()
+    router = get_order_router()
+    if router.mode != "paper" or not settings.paper.enforce_brackets:
+        return {"checked": 0, "closed": []}
+    async with get_database().session() as session:
+        open_positions = await PositionRepository(session).get_open()
+    closed = []
+    for pos in open_positions:
+        opened = pd.Timestamp(pos.opened_at)  # SQLite may hand back naive UTC or an ISO string
+        opened = opened.tz_localize(UTC) if opened.tzinfo is None else opened.tz_convert(UTC)
+        bars = await run_in_threadpool(get_parquet_store().read_candles, pos.symbol,
+                                       settings.storage.candle_interval, start=opened)
+        if bars.empty:
+            continue
+        hit = bracket_exit(bars, pos.action, pos.stop_loss, pos.take_profit)
+        if hit is None:
+            continue
+        price, reason = hit
+        try:
+            result = await router.exit_position(pos.id, reason=f"paper_bracket_{reason}", price=price)
+        except HTTPException as error:  # already closed elsewhere, or the order write failed
+            logger.warning("paper_bracket_exit_failed", position_id=pos.id, symbol=pos.symbol,
+                           reason=reason, detail=error.detail)
+            continue
+        logger.info("paper_bracket_exit", position_id=pos.id, symbol=pos.symbol, reason=reason,
+                    level=price, exit_price=result["exit_price"], gross_pnl=result["gross_pnl"])
+        closed.append({"position_id": pos.id, "symbol": pos.symbol, "reason": reason, **result})
+    return {"checked": len(open_positions), "closed": closed}
 
 
 _last_alert_cache: dict[tuple, datetime] = {}

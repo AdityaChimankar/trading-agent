@@ -358,3 +358,161 @@ def test_order_timestamps_carry_utc_offset(client):
     client.post("/api/v1/execution/enter", json=ENTRY)
     created = client.get("/api/v1/execution/orders").json()[0]["created_at"]
     assert created.endswith("+00:00")
+
+
+def _stale_candles(store, symbol, close, minutes_old):
+    end = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=minutes_old)
+    ts = pd.date_range(end=end, periods=5, freq="min")
+    df = pd.DataFrame({"timestamp": ts, "open": close, "high": close + 1, "low": close - 1, "close": close,
+                       "volume": 1000, "oi": 0})
+    store.write_candles(df, symbol, get_settings().storage.candle_interval)
+
+
+def test_entry_risk_and_fill_use_a_fresh_price_when_it_is_worse(client):
+    _candles(client.store, "TEST", 104.0)
+    # Target 120 keeps reward:risk above 1 at 104; at the default 110 it would be refused (0.67).
+    filled = client.post("/api/v1/execution/enter", json=ENTRY | {"take_profit": 120.0}).json()
+    assert filled["fill_price"] == 104.1  # the market plus slippage, not the 100 plan price
+
+
+def test_stale_price_is_ignored(client):
+    _stale_candles(client.store, "TEST", 104.0, minutes_old=60)
+    assert client.post("/api/v1/execution/enter", json=ENTRY).json()["fill_price"] == 100.1
+
+
+@pytest.mark.parametrize("close, message", [(94.0, "through the stop"), (111.0, "past the target")])
+def test_price_through_the_stop_or_target_blocks_entry(client, close, message):
+    _candles(client.store, "TEST", close)
+    response = client.post("/api/v1/execution/enter", json=ENTRY)
+    assert response.status_code == 409 and message in response.json()["detail"]
+    assert client.get("/api/v1/positions/").json() == []
+
+
+def test_fresh_price_risk_is_checked_against_limits(client):
+    # 2% trade risk on 10L = 20,000. At the plan price: 900 x 17 = 15,300. At 106: 900 x 23 = 20,700.
+    _candles(client.store, "TEST", 106.0)
+    entry = ENTRY | {"quantity": 900, "stop_loss": 83.0, "take_profit": 130.0}
+    response = client.post("/api/v1/execution/enter", json=entry)
+    assert response.status_code == 409 and "risk limit" in response.json()["detail"]
+
+
+def test_live_entry_needs_a_fresh_price(client):
+    from trading_agent.execution.router import OrderRouter
+
+    calls = []
+
+    class LiveRecording:
+        mode, slippage_bps = "live", 0.0
+
+        async def execute(self, order):
+            calls.append(order)
+
+    with pytest.raises(Exception, match="fresh price"):
+        asyncio.run(OrderRouter(LiveRecording()).enter(symbol="TEST", side="BUY", quantity=1, reference_price=100,
+                                                       stop_loss=95, take_profit=None))
+    assert calls == []
+
+
+def test_worst_case_daily_loss_blocks_a_new_entry(client):
+    # Daily limit 3% of 10L = 30,000. Each trade risks 18,000 (under the 20,000 per-trade cap).
+    first = ENTRY | {"quantity": 1000, "stop_loss": 82.0, "take_profit": 130.0}
+    assert client.post("/api/v1/execution/enter", json=first).status_code == 200
+    response = client.post("/api/v1/execution/enter", json=first | {"symbol": "OTHER"})
+    assert response.status_code == 409 and "worst-case daily loss" in response.json()["detail"]
+
+
+def test_stop_inside_the_spread_is_refused(client):
+    response = client.post("/api/v1/execution/enter", json=ENTRY | {"stop_loss": 99.99})
+    assert response.status_code == 409 and "too tight" in response.json()["detail"]
+
+
+def _bars(store, symbol, close, interval, minutes_per_bar, ends_minutes_ago):
+    end = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=ends_minutes_ago + minutes_per_bar)
+    ts = pd.date_range(end=end, periods=3, freq=f"{minutes_per_bar}min")
+    df = pd.DataFrame({"timestamp": ts, "open": close, "high": close + 1, "low": close - 1, "close": close,
+                       "volume": 1000, "oi": 0})
+    store.write_candles(df, symbol, interval)
+
+
+def test_fresh_price_is_the_bar_that_ended_last_not_the_live_interval(client):
+    # 2026-10-26 BSE: the ticker's last closed 5-minute bar was minutes behind the backfilled 1-minute bars.
+    _bars(client.store, "TEST", 104.0, "5minute", 5, ends_minutes_ago=5)
+    _bars(client.store, "TEST", 100.5, "minute", 1, ends_minutes_ago=0)
+    filled = client.post("/api/v1/execution/enter", json=ENTRY).json()
+    assert filled["fill_price"] == 100.6  # 100.5 plus 10 bps slippage on the tick, not the older 104
+
+
+def test_entry_under_the_minimum_reward_risk_is_refused(client):
+    response = client.post("/api/v1/execution/enter", json=ENTRY | {"take_profit": 104.0})  # 0.8R
+    assert response.status_code == 409 and "Reward:risk 0.80" in response.json()["detail"]
+
+
+# --- paper bracket exits -------------------------------------------------------------
+
+def _after_entry(store, symbol, bars):
+    """Live-interval bars starting after the entry; each is (open, high, low, close)."""
+    start = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(minutes=5)
+    df = pd.DataFrame(bars, columns=["open", "high", "low", "close"])
+    df["timestamp"] = pd.date_range(start, periods=len(df), freq="5min")
+    df["volume"], df["oi"] = 1000, 0
+    store.write_candles(df, symbol, get_settings().storage.candle_interval)
+
+
+@pytest.mark.parametrize("action, bars, expected", [
+    ("BUY", [(100, 101, 99, 100), (99, 100, 94.5, 96)], (95, "stop")),
+    ("BUY", [(100, 111, 94, 100)], (95, "stop")),  # both sides in one bar: the stop
+    ("BUY", [(93, 96, 92, 95)], (93, "gap_stop")),
+    ("BUY", [(100, 110.5, 99, 110)], (110, "target")),
+    ("BUY", [(112, 113, 111, 112)], (110, "target")),
+    ("BUY", [(100, 104, 96, 101)], None),
+    ("SELL", [(100, 105.2, 99, 104)], (105, "stop")),
+    ("SELL", [(100, 101, 89.5, 90)], (90, "target")),
+])
+def test_bracket_exit_follows_the_replay_rules(action, bars, expected):
+    from trading_agent.risk.position_monitor import bracket_exit
+
+    frame = pd.DataFrame(bars, columns=["open", "high", "low", "close"])
+    stop, target = (95, 110) if action == "BUY" else (105, 90)
+    assert bracket_exit(frame, action, stop, target) == expected
+
+
+def test_monitor_closes_a_paper_position_once_its_stop_trades(client):
+    from trading_agent.risk.position_monitor import enforce_brackets
+
+    filled = client.post("/api/v1/execution/enter", json=ENTRY).json()
+    _after_entry(client.store, "TEST", [(100, 101, 99, 100), (99, 100, 94.5, 96)])
+    result = asyncio.run(enforce_brackets())
+    assert [c["reason"] for c in result["closed"]] == ["stop"]
+    assert result["closed"][0]["exit_price"] == 94.91  # the stop less 10 bps slippage, rounded
+    assert client.get("/api/v1/positions/").json() == []
+    exit_order = client.get("/api/v1/execution/orders").json()[0]
+    assert exit_order["position_id"] == filled["position_id"] and exit_order["reason"] == "paper_bracket_stop"
+    assert asyncio.run(enforce_brackets())["closed"] == []
+
+
+def test_bars_before_the_entry_never_close_it(client):
+    from trading_agent.risk.position_monitor import enforce_brackets
+
+    stamps = pd.date_range(end=datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=10),
+                           periods=3, freq="5min")
+    client.store.write_candles(pd.DataFrame({"timestamp": stamps, "open": 100.0, "high": 101.0, "low": 90.0,
+                                             "close": 100.0, "volume": 1000, "oi": 0}),
+                               "TEST", get_settings().storage.candle_interval)
+    client.post("/api/v1/execution/enter", json=ENTRY)
+    assert asyncio.run(enforce_brackets()) == {"checked": 1, "closed": []}
+
+
+def test_brackets_are_left_alone_in_live_mode_or_when_disabled(client, monkeypatch):
+    from trading_agent.execution import router as router_module
+    from trading_agent.risk.position_monitor import enforce_brackets
+
+    client.post("/api/v1/execution/enter", json=ENTRY)
+    _after_entry(client.store, "TEST", [(99, 100, 94.5, 96)])
+    monkeypatch.setenv("PAPER_ENFORCE_BRACKETS", "false")
+    get_settings.cache_clear()
+    assert asyncio.run(enforce_brackets()) == {"checked": 0, "closed": []}
+    monkeypatch.delenv("PAPER_ENFORCE_BRACKETS")
+    get_settings.cache_clear()
+    monkeypatch.setattr(router_module.OrderRouter, "mode", property(lambda self: "live"))
+    assert asyncio.run(enforce_brackets()) == {"checked": 0, "closed": []}
+    assert len(client.get("/api/v1/positions/").json()) == 1

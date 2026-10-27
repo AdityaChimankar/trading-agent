@@ -112,9 +112,7 @@ def test_thin_stocks_are_covered_once_their_sessions_were_fully_fetched(tmp_path
 
 
 def test_backfill_window_starts_where_data_check_starts(monkeypatch):
-    from datetime import datetime as real_datetime, timezone
-
-    from trading_agent.ingest.coverage import window_start
+    from trading_agent.ingest.coverage import last_closed_session, window_start
     from trading_agent.ingest.fetch_historical import HistoricalFetcher
 
     seen = {}
@@ -126,4 +124,6 @@ def test_backfill_window_starts_where_data_check_starts(monkeypatch):
     start = pd.Timestamp(seen["start"]).tz_convert(IST)
     first = window_start(30)  # the first weekday on or after it, if it falls on a weekend
     assert first <= start.date() <= first + pd.Timedelta(days=2) and (start.hour, start.minute) == (9, 15)
-    assert real_datetime.now(timezone.utc) - seen["start"] > pd.Timedelta(days=30)
+    # The span counts back from the last closed session, and a weekend start rolls forward to
+    # Monday, so it can be 28 days. Measured from "now" this failed on Mondays (2026-10-26).
+    assert last_closed_session() - start.date() >= pd.Timedelta(days=30 - 2)

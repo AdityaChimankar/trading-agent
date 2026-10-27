@@ -14,6 +14,7 @@ env/
 .idea/
 *.swp
 *.swo
+.claude/settings.local.json
 
 # Testing
 .pytest_cache/
@@ -39,6 +40,7 @@ data/controls/
 data/ml_monitoring/
 data/ticker-heartbeat.json
 data/research/
+data/ingest_coverage/
 *.db
 # SQLite WAL-mode sidecar files
 *.db-wal

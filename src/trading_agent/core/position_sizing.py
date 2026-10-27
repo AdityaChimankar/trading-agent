@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -70,6 +71,22 @@ def calculate_atr_percentile(
         return 0.5
 
     return float(np.searchsorted(np.sort(valid_atr), current_atr) / len(valid_atr))
+
+
+def round_to_tick(price: float, tick: float, away_from: float | None = None) -> float:
+    """Snap a price to the exchange tick.
+
+    With ``away_from`` (the entry), round away from it, so a stop never ends up
+    nearer the entry than planned. Otherwise round to the nearest tick.
+    """
+    steps = price / tick
+    if away_from is None:
+        count = round(steps)
+    elif price < away_from:
+        count = math.floor(steps + 1e-9)
+    else:
+        count = math.ceil(steps - 1e-9)
+    return round(count * tick, 2)
 
 
 def calculate_position_size(

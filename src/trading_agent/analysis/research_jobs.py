@@ -17,6 +17,8 @@ class ResearchJobs:
         self.lock = threading.RLock()
         self.cancelled = threading.Event()
         self.state = {"status": "idle", "processed": 0, "total": 0, "rows": [], "errors": [], "skipped": []}
+        # The last completed scan, shown by the classic dashboard while a new one runs.
+        self.previous = None
         self.path = get_settings().data_dir / "research" / "latest_scan.json"
         self.run_lock = FileLock(str(self.path) + ".run.lock", timeout=0, thread_local=False)
         if self.path.exists():
@@ -27,9 +29,11 @@ class ResearchJobs:
             except (ValueError, KeyError):
                 pass
 
-    def snapshot(self):
+    def snapshot(self, completed=False):
+        """The current scan; with ``completed``, the last finished one while a scan runs."""
         with self.lock:
-            state = copy.deepcopy(self.state)
+            running = self.state["status"] == "running"
+            state = copy.deepcopy(self.previous if completed and running and self.previous else self.state)
         now = datetime.now(UTC)
         allocation_warning = None
         try:
@@ -97,6 +101,8 @@ class ResearchJobs:
             except Timeout as error:
                 raise RuntimeError("Another process is scanning this data directory") from error
             self.cancelled.clear()
+            if self.state.get("status") == "completed":
+                self.previous = copy.deepcopy(self.state)
             self.state = {"status": "running", "processed": 0, "total": len(symbols), "rows": [],
                           "errors": [], "skipped": [], "started_at": datetime.now(UTC).isoformat(),
                           "options": options, "source": source}
@@ -144,7 +150,8 @@ class ResearchJobs:
             ledger = read_ledger_state()
             capital = max(0, min(options["capital"], ledger["realized_equity"]))
             sized = size_opportunities(rows, capital, ledger["positions"], get_settings().paper,
-                                       options["risk_pct"], options["reward_risk"], options.get("require_validated", True))
+                                       options["risk_pct"], options["reward_risk"], options.get("require_validated", True),
+                                       daily_risk_headroom=ledger["daily_risk_headroom"], tick_size=_tick_size)
             if not ledger["entries_allowed"]:
                 for row in sized:
                     row["plan"].update(blocked=True, block_reason=ledger["block_reason"],
@@ -164,6 +171,31 @@ class ResearchJobs:
                 self.save()
         finally:
             self.run_lock.release()
+
+
+def strongest_scan_symbols(limit: int = 30) -> list[str]:
+    """The latest completed scan's strongest directional names, else the first stored symbols.
+
+    For endpoints that analyse "the market" by default: run over every stored
+    symbol (~2,300), one request took minutes on 2026-10-26.
+    """
+    from trading_agent.storage.parquet_store import get_parquet_store
+
+    rows = [row for row in get_research_jobs().snapshot(completed=True).get("rows", [])
+            if row.get("action") in {"BUY", "SELL"}]
+    if rows:
+        return [row["symbol"] for row in sorted(rows, key=lambda row: -row["score"])[:limit]]
+    return get_parquet_store().get_symbols()[:limit]
+
+
+def _tick_size(symbol):
+    """Tick from the cached Kite instrument dump; None (sizing assumes 0.05) when unknown."""
+    from trading_agent.ingest.instrument_lookup import get_instrument_lookup
+
+    try:
+        return get_instrument_lookup().get_tick_size(symbol)
+    except Exception:
+        return None
 
 
 _jobs = None
