@@ -84,7 +84,7 @@ Keep paper mode until those are evidenced.
 | P1 | Gate entries on the trade-replay verdict | entries whose replay is `conclusive_negative` are refused (today display only); 5 of 6 entries on 2026-10-26 were. Decide on the forward test's verdict (first 20 sessions from 2026-10-28), not before |
 | P1 | Current LLM model | `LLM_MODEL` in `.env` names a model OpenRouter still serves; `gemini-2.0-flash-001` returned 404 on 2026-10-26 |
 | P1 | Ticker reloads the Kite token | after `trading-agent login` the running ticker reconnects without a restart (it stayed on 403 on 2026-10-26) |
-| P1 | Scheduler survives host sleep | jobs fire after the laptop wakes (on 2026-10-26 none ran until a restart) |
+| P1 | Scheduler survives host sleep | jobs fire after the laptop wakes (on 2026-10-26 none ran until a restart; on 2026-10-27 both ranker arms missed the session). Late jobs need a misfire grace within each job's own limit, e.g. the pick until its 09:45 deadline |
 | P1 | Live 1-minute bars | the ticker also writes 1-minute bars for a live set and a scan runs on each bar close. A 1-minute plan expires about 75 s after its bar closes, so a Kite backfill (~30 s for 50 names) plus a scan (~20 s) leaves the dashboard's plans expired almost always (2026-10-26). Writing 1-minute files for all 2,319 symbols would be ~38 files/s, too many for the bind mount, so restrict it to a live set |
 | P1 | Prospective paper evidence | ≥ 20 trading days of paper results so analytics stop warning about sample size |
 | P0 | Re-run research on corrected timestamps | earlier walk-forward, outcome-validation and outcome-model results were computed on history whose legacy sessions were shifted 5h30m; rerun before relying on any of them |
@@ -134,6 +134,9 @@ Steps (2) and (3) of the 2026-10-26 plan below, without touching live entries ye
 - **Evidence so far.** One scored session of live rule signals: 38.7% win, −15.5 bps at 60 minutes (411 signals, 1,198 SELL vs 152 BUY over two sessions). The LLM path returned only HOLD. Nothing to conclude.
 - **Verified:** 649 Python tests passed; `test_dashboard_keeps_the_last_completed_scan_while_a_new_one_runs` timed out under the full suite and passed alone (a 5 s wait in the test). Ruff passed.
 - `LLM_HANDOFF_INSTRUCTIONS.md` summarises this file for another model; it defers to this file.
+- **Deployment.** The full image build failed twice (Debian and PyPI timeouts inside Docker), so `trading-agent-app:latest` was refreshed as a source-only layer over the running image (dependencies unchanged; the runtime imports from `/app/src`); the old image is `trading-agent-app:rollback-20261027`. API, scheduler and ticker were recreated at 16:14 IST, after compaction; the scheduler registered `forward_filters_cycle`.
+- **Missed session.** Both ranker arms recorded 2026-10-27 as missed: the scheduler first started at 13:49 IST. APScheduler's default misfire grace is 1 s, so a host that wakes after 09:16:30 skips the pick even though the spec allows until 09:45 (open work: scheduler survives host sleep).
+- **Decision outcomes job.** The 15:55 run on the old image failed (`single positional indexer is out-of-bounds`) on a signal whose next bar opened at 15:15; rerun on the new image it completed: 2 sessions, rule 1,668 scored, 32.4% win, −31.9 bps, session t −1.31; 671 after-cutoff.
 
 ### 2026-10-26: Screen outcomes (do the screener's screens predict anything?)
 

@@ -194,6 +194,9 @@ trading-agent optimize trade-replay TCS --side BUY --entry 3000 --stop 2985 --ta
 # Score stored rule/ML/LLM signals on realised returns (scheduler runs it at 15:55)
 trading-agent optimize decision-outcomes --days 30 --horizon 60
 
+# Forward test of the 09:30-14:30 window and the replay gate (scheduler records each session at 15:57)
+trading-agent optimize forward-filters [--record]
+
 # Prospective paper trial of the frozen ranker (scheduler runs pick 09:16 and settle 15:50)
 trading-agent optimize ranker-trial start --arm rf                 # freezes config, universe, first session
 trading-agent optimize ranker-trial start --arm hgb                # second arm: gradient boosting
@@ -231,7 +234,7 @@ Every entry, whether from the dashboard, the paper book or the API, passes the s
 - Portfolio exposure, stop risk, position count, single-name cap, realized daily loss and drawdown.
 - Worst-case daily loss: today's realized P&L, minus every open position's risk at its stop, minus the new trade's risk, must stay inside `PAPER_MAX_DAILY_LOSS_PCT`.
 - Fresh price: risk is measured from the worse of the plan price and the most recently ended stored bar (1-minute or the live interval) no older than `EXECUTION_MAX_QUOTE_AGE_SECONDS`; an entry whose price is already through the stop or the target, or whose reward:risk at that price is under `PAPER_MIN_REWARD_RISK`, is refused, and live entries need such a bar.
-- Stop distance: a stop nearer than `PAPER_MIN_STOP_DISTANCE_PCT` of the entry is refused. Scan plans round stops to the instrument's tick, away from the entry.
+- Stop distance: a stop nearer than `PAPER_MIN_STOP_DISTANCE_PCT` of the entry is refused. Scan plans place stops at 1.5 x ATR or `PAPER_STOP_FLOOR_PCT` (0.7%) of the entry, whichever is wider, so costs stay near 0.2R, and round them to the instrument's tick, away from the entry.
 - Participation caps: no position above `EXECUTION_MAX_PARTICIPATION_PCT` of the stock's average daily traded value, or above `EXECUTION_MAX_REMAINING_VOLUME_PCT` of the volume still forecast to trade today.
 
 The scheduler squares off every open position at `PAPER_SQUARE_OFF_TIME` (15:15). Each entry, exit, fill, rejection and halt is written to `data/controls/audit-YYYY-MM-DD.jsonl`.
@@ -266,6 +269,7 @@ Settings come from environment variables, then `.env`, then code defaults. Full 
 | `PAPER_MAX_TRADE_RISK_PCT` / `PAPER_MAX_SINGLE_POSITION_PCT` | `0.02` / `0.10` | Per-trade risk and per-symbol notional |
 | `PAPER_MAX_DAILY_LOSS_PCT` / `PAPER_MAX_DRAWDOWN_PCT` | `0.03` / `0.15` | Realized loss limits; the daily limit also caps realized loss plus open and new stop risk |
 | `PAPER_MIN_STOP_DISTANCE_PCT` | `0.0005` | Refuse stops nearer than 0.05% of the entry |
+| `PAPER_STOP_FLOOR_PCT` | `0.007` | Scan-plan stops are at least 0.7% of the entry (wider than 1.5 x ATR when needed); `0` keeps pure ATR stops |
 | `PAPER_MIN_REWARD_RISK` | `1.0` | Refuse entries whose target is under this many stop distances away |
 | `PAPER_MAX_TRADES_PER_DAY` | `20` | Daily entry cap |
 | `PAPER_ENTRY_CUTOFF` / `PAPER_SQUARE_OFF_TIME` | `15:00` / `15:15` | IST session discipline |
