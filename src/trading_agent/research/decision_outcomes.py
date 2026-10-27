@@ -84,8 +84,10 @@ def price_window(candles: pd.DataFrame, signal_time: pd.Timestamp, horizon: int)
     if after.empty:
         return {"status": "pending" if latest < signal_time else "unpriced"}
     entry = after.iloc[0]
-    end = min(entry["stamp"] + pd.Timedelta(minutes=horizon),
-              pd.Timestamp(f"{local.date()} 15:15", tz=IST).tz_convert("UTC"))
+    cutoff = pd.Timestamp(f"{local.date()} 15:15", tz=IST).tz_convert("UTC")
+    if entry["stamp"] >= cutoff:  # the next bar opens at or after the 15:15 exit: no trade to enter
+        return {"status": "after_cutoff"}
+    end = min(entry["stamp"] + pd.Timedelta(minutes=horizon), cutoff)
     if latest < end - pd.Timedelta(minutes=1):  # the store does not reach the end of the window yet
         return {"status": "pending"}
     exit_ = after[after["stamp"] < end].iloc[-1]

@@ -174,6 +174,16 @@ def decision_outcomes(
     main(["--days", str(days), "--horizon", str(horizon), "--cost-bps", str(cost_bps)])
 
 
+@app.command("forward-filters")
+def forward_filters(
+    record: bool = typer.Option(False, "--record", help="Record every completed session first"),
+):
+    """Forward test of the 09:30-14:30 window and the trade-replay gate; research only."""
+    from trading_agent.research.forward_filters import main
+
+    main(["--record"] if record else [])
+
+
 @app.command("trade-replay")
 def trade_replay(
     symbol: str = typer.Argument(..., help="Symbol with stored minute or 5-minute candles"),

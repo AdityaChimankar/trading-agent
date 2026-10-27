@@ -296,6 +296,16 @@ def ranker_trial_settle_cycle():
         logger.error("ranker_trial_settle_failed", error=str(e))
 
 
+def forward_filters_cycle():
+    """Record each completed session of the entry-filter forward test (research record only)."""
+    from trading_agent.research.forward_filters import record_due
+
+    try:
+        logger.info("forward_filters_recorded", sessions=record_due())
+    except Exception as e:
+        logger.error("forward_filters_failed", error=str(e))
+
+
 def decision_outcomes_cycle():
     """Score the last 30 days of rule/ML/LLM signals on realised returns (research report only)."""
     from trading_agent.research.decision_outcomes import run
@@ -448,6 +458,12 @@ scheduler.add_job(
     decision_outcomes_cycle,
     CronTrigger(day_of_week="mon-fri", hour=15, minute=55),
     id="decision_outcomes",
+)
+# Entry-filter forward test after the repair; its replays read history, so before compaction.
+scheduler.add_job(
+    forward_filters_cycle,
+    CronTrigger(day_of_week="mon-fri", hour=15, minute=57),
+    id="forward_filters",
 )
 # Storage compaction after every post-close job has read the session's files.
 scheduler.add_job(

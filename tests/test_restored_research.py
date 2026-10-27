@@ -230,8 +230,16 @@ def test_stops_snap_to_tick_away_from_entry_and_risk_follows():
 
 def test_stop_inside_the_spread_is_blocked():
     rows = [candidate("TIGHT") | {"price": 1000.0, "atr": 0.1}]
-    plan = engine.size_opportunities(rows, 1000000, [], PaperRiskSettings())[0]["plan"]
+    plan = engine.size_opportunities(rows, 1000000, [], PaperRiskSettings(stop_floor_pct=0))[0]["plan"]
     assert plan["blocked"] and "too tight" in plan["block_reason"] and plan["quantity"] == 0
+
+
+def test_stop_floor_widens_tight_atr_stops():
+    rows = [candidate("TIGHT") | {"price": 1000.0, "atr": 0.1}, candidate("WIDE", "SELL")]
+    result = {r["symbol"]: r["plan"] for r in engine.size_opportunities(rows, 1000000, [], PaperRiskSettings())}
+    assert result["TIGHT"]["stop_loss"] == 993.0 and result["TIGHT"]["take_profit"] == 1014.0  # 0.7% floor, 2R
+    assert not result["TIGHT"]["blocked"]
+    assert result["WIDE"]["stop_loss"] == 103.0  # 1.5 x ATR (3%) is already wider than the floor
 
 
 def test_daily_headroom_caps_the_basket():
