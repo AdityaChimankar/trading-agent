@@ -15,7 +15,7 @@ This file is the **single source of truth for project status**: what exists, wha
 
 ## Current status
 
-Last updated: 2026-10-26 (market screener on branch `feature/market-screener`, from `risk-hardening`; see the decision log). Before that, 2026-10-26 (first live paper session: candle read cache and compaction, paper bracket exits, test DB isolation). Earlier: 2026-10-25 (worst-case daily loss, fresh-price entry risk, stop checks, trade replay). Active branch: `risk-hardening`, from `main` after PR #2, pushed for a pull request into `main`.
+Last updated: 2026-10-27 (0.7% stop floor and the entry-filter forward test, merged to `main`; see the decision log). Before that, 2026-10-26 (market screener on branch `feature/market-screener`, from `risk-hardening`; see the decision log). Before that, 2026-10-26 (first live paper session: candle read cache and compaction, paper bracket exits, test DB isolation). Earlier: 2026-10-25 (worst-case daily loss, fresh-price entry risk, stop checks, trade replay). Active branch: `risk-hardening`, from `main` after PR #2, pushed for a pull request into `main`.
 
 The application is a single intraday NSE workbench: Kite data pipeline, rule/ML/LLM analysis, classic and research dashboards, a persistent paper book, intraday risk controls, a guarded order router, performance analytics, volume-based recommendations and ML drift monitoring.
 
@@ -57,6 +57,8 @@ Keep paper mode until those are evidenced.
 | Data | `trading-agent data-check`: per-symbol coverage against the store-wide session calendar (up to date / behind / holes / empty / not listed by Kite), store staleness against the last closed weekday, Kite token, ticker heartbeat, trial arms; exit 1 on gaps. `backfill --universe all` fills them | `ingest/coverage.py`, `cli` |
 | Research | Trade replay (after the day-trader-skill Time Machine): 1-minute bars when complete (else 5-minute), filtered historical simulation (bars standardized by session and time-of-day volatility, rescaled to today's), stationary block bootstrap with Politis–White mean block (cap 60 min), 10,000 seeded replays to 15:15; stop-first/gap exits as trade outcomes, net R after 14 bps; conclusion trigger: `conclusive_negative/positive` only with 40+ sessions, a 90% pool-resample range clear of zero and break-even, and agreement of single-bar, unscaled and real-history runs, else `inconclusive`; display only, never blocks. On 2026-10-23 11:00 2R brackets in TCS and RELIANCE were conclusive negative | `research/trade_replay.py`, `trading-agent optimize trade-replay`, `POST /api/v1/analytics/trade-replay`, Dashboard Position Sizing → Replay this plan |
 | Research | Decision outcomes (from TradingAgents' settlement): every stored BUY/SELL signal priced at the next bar, exit at horizon or 15:15, net of 14 bps, alpha vs NIFTY50 when stored; grouped by strategy, action and confidence; HOLD/pending/unpriced never losses; scheduler 15:55 | `research/decision_outcomes.py`, `trading-agent optimize decision-outcomes`, `/api/v1/analytics/decision-outcomes`, Analytics panel |
+| Research | Entry-filter forward test: each strategy's first directional signal per symbol and session, a fixed 0.7%/2R bracket to 15:15 net of 14 bps; asks whether the 09:30–14:30 window beats all first signals, and whether trades the replay does not mark `conclusive_negative` beat those it does (up to 40 replays a session, seeded sample). Hashed spec, first session 2026-10-28, one record per session written once, verdict on the first 20 sessions (paired t ≥ 2); scheduler 15:57 | `research/forward_filters.py`, `trading-agent optimize forward-filters`, `data/research/forward_filters/` |
+| Risk | Plan stop floor: planned stops are at least `PAPER_STOP_FLOOR_PCT` (0.7%) of the entry, wider than 1.5 x ATR when needed, so 14 bps of costs are about 0.2R instead of 0.9R on 1-minute ATR stops | `analysis/research_engine.size_opportunities`, `core/config.PaperRiskSettings` |
 | Research | Ranking lab: 60 pre-registered cross-sectional variants (fixed-sign gap/reversal/opening-drive ranks; RF/logit/HGB walk-forward; 09:15 or 09:45 entry; 10:15/12:00/15:15 exit; k 5/10/20); validation-only selection with a Bonferroni t over 60, frozen before holdout; rolling choose-best | `research/ranking_lab.py`, `trading-agent optimize ranking-lab` |
 | Research | Ranker paper trial, two arms (`rf`, `hgb`), each with its own hashed frozen spec (config, universe, first session), pick after 09:15 bar (deadline 09:45), entry at the first bar after the pick, 15:15 exit, random book, missed sessions recorded, verdict fixed on the first 60 settled sessions | `research/ranker_trial.py`, `trading-agent optimize ranker-trial`, scheduler `ranker_trial_pick`/`ranker_trial_settle`, `/api/v1/analytics/cross-sectional/trial`, Analytics panel |
 | Research | Cross-sectional ranking (Ghosh et al. 2021) walk-forward vs random picks, 15:15 MIS exit, >= INR 10 crore liquidity filter, research gate, long/short list only when passed | `research/cross_sectional.py`, `trading-agent optimize cross-sectional`, `/api/v1/analytics/cross-sectional`, Analytics panel |
@@ -79,7 +81,7 @@ Keep paper mode until those are evidenced.
 | P0 | Build the drift baseline on real data | `python -m trading_agent.strategy.model_monitoring baseline` run; `/api/v1/analytics/drift` reports `ok`/`warn`, not "no baseline" |
 | P0 | Broker order lifecycle hardening | partial fills, rejects, cancels, reconnect replay and idempotent intent IDs covered by fault-injection tests |
 | P0 | Strategy edge before more plumbing | a signal family with positive net R after 14 bps on held-out sessions; see the 2026-10-26 plan in the decision log. The current rule/hybrid signals have none |
-| P1 | Gate entries on the trade-replay verdict | entries whose replay is `conclusive_negative` are refused (today display only); 5 of 6 entries on 2026-10-26 were |
+| P1 | Gate entries on the trade-replay verdict | entries whose replay is `conclusive_negative` are refused (today display only); 5 of 6 entries on 2026-10-26 were. Decide on the forward test's verdict (first 20 sessions from 2026-10-28), not before |
 | P1 | Current LLM model | `LLM_MODEL` in `.env` names a model OpenRouter still serves; `gemini-2.0-flash-001` returned 404 on 2026-10-26 |
 | P1 | Ticker reloads the Kite token | after `trading-agent login` the running ticker reconnects without a restart (it stayed on 403 on 2026-10-26) |
 | P1 | Scheduler survives host sleep | jobs fire after the laptop wakes (on 2026-10-26 none ran until a restart) |
@@ -121,6 +123,17 @@ Keep paper mode until those are evidenced.
 ## Decision log
 
 Newest first. Each entry records what changed and why; verification counts were true on that date only.
+
+### 2026-10-27: Stop floor and entry-filter forward test
+
+Steps (2) and (3) of the 2026-10-26 plan below, without touching live entries yet.
+
+- **Stop floor.** Planned stops are at least 0.7% of the entry (`PAPER_STOP_FLOOR_PCT`). On the live set, 1-minute ATR stops had a median of 0.16%, so 14 bps of costs were about 0.9R; at 0.7% they are 0.2R. `0` restores pure ATR stops.
+- **Forward test** (`research/forward_filters.py`). Every historical window has been inspected, so the time-of-day window and the replay gate are judged only on sessions from 2026-10-28, under a spec hashed before the first one. Its replays see only earlier sessions and today's bars before the entry; one replay takes about 5.5 s.
+- **Decision outcomes.** A signal whose next bar opens at or after the 15:15 exit is now `after_cutoff`, not priced.
+- **Evidence so far.** One scored session of live rule signals: 38.7% win, −15.5 bps at 60 minutes (411 signals, 1,198 SELL vs 152 BUY over two sessions). The LLM path returned only HOLD. Nothing to conclude.
+- **Verified:** 649 Python tests passed; `test_dashboard_keeps_the_last_completed_scan_while_a_new_one_runs` timed out under the full suite and passed alone (a 5 s wait in the test). Ruff passed.
+- `LLM_HANDOFF_INSTRUCTIONS.md` summarises this file for another model; it defers to this file.
 
 ### 2026-10-26: Screen outcomes (do the screener's screens predict anything?)
 
