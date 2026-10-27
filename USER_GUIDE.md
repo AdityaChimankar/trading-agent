@@ -136,6 +136,15 @@ There are two arms, each with its own frozen spec and records: `rf` (the random 
 
 The verdict is computed once per arm, on its first 60 settled sessions: mean net > 0, t ≥ 2 and above the random book. A t of 2.0 keeps the one-sided family-wise error across the two arms below 5%. Later sessions are shown but cannot change it. See **Analytics → Ranker paper trial**, `trading-agent optimize ranker-trial status`, or `GET /api/v1/analytics/cross-sectional/trial`. The trial needs a valid Kite token each morning and places no orders.
 
+**Entry-filter forward test (prospective).** `trading-agent optimize forward-filters` (module `research/forward_filters.py`) asks two questions of the stored signals, fixed in a hashed spec before its first session (2026-10-28):
+
+1. **Time window.** Do directional signals do better when taken inside 09:30–14:30 IST than when each strategy's first signal of the session is taken, whenever it comes?
+2. **Replay gate.** Inside the window, do trades whose trade replay is not `conclusive_negative` do better than the ones it would refuse?
+
+Each strategy gets at most one trade per symbol and session. Entry is at the open of the first bar at or after the signal, with a stop 0.7% away, a 2R target and an exit by 15:15, net of 14 bps. Up to 40 window trades a session, in a seeded random order, are replayed at their entry time; the replay sees only earlier sessions and today's bars before the entry.
+
+The scheduler records each completed session at 15:57 under `data/research/forward_filters/sessions/`, once; `--record` records any that are due by hand. The verdict uses the first 20 recorded sessions only: a filter is adopted when its per-session mean net R beats the comparison with a paired t of at least 2. Research only: it changes no plan, size or order.
+
 **Moving averages.** The chart shows MA20 and MA50, plus EMA9, EMA21 and session VWAP (VWAP restarts at each 09:15). Click EMA9 or EMA21 in the legend to show them. Strategy Lab has two moving-average profiles:
 
 - `rule_ma`: the existing rule, keeping a BUY only while EMA9 > EMA21 and a SELL only while EMA9 < EMA21.
@@ -208,7 +217,7 @@ Walk-forward results are keyed by symbol, interval, training/test windows and co
 
 After a validation completes, news is refreshed or a paper position changes, the workspace marks its existing scan plans as needing a new scan. It does not rewrite old rankings or silently recalculate sizing. A newly qualified report applies only to later candles; wait for those candles and explicitly re-scan. Full-universe scans continue in the background while you inspect or validate. Scores are not profit probabilities, and stale, incomplete, failed or mismatched evidence must not be treated as a current plan.
 
-Sizing uses 1.5×ATR stops, the requested reward/risk target, integer shares, the configured single-stock notional cap (10% by default) and the paper book's exposure/risk/position-count limits. Both directional lists share reservations. Short-selling leverage, sector/correlation limits, taxes, fees and execution slippage are not modeled in these plans. A score measures rule/model evidence, not probability of profit.
+Sizing uses stops at 1.5×ATR or `PAPER_STOP_FLOOR_PCT` (0.7%) of the entry, whichever is wider, the requested reward/risk target, integer shares, the configured single-stock notional cap (10% by default) and the paper book's exposure/risk/position-count limits. Both directional lists share reservations. Short-selling leverage, sector/correlation limits, taxes, fees and execution slippage are not modeled in these plans. A score measures rule/model evidence, not probability of profit.
 
 `PAPER_MAX_SINGLE_POSITION_PCT=0.10` caps each symbol's notional. `PAPER_MAX_DAILY_LOSS_PCT=0.03` blocks new paper entries once the day's realized loss reaches 3% of IST session-start equity. `PAPER_MAX_DRAWDOWN_PCT=0.15` blocks entries at 15% realized drawdown from the ledger's peak, including previous sessions. The daily limit also applies to the worst case: today's realized P&L, minus the risk at the stop of every open position, minus the new trade's risk, must not pass it, so a day that has lost 2.5% with 1% open risk takes no new risk. These are fractions, not whole percentages. Existing positions can still be closed. The entry API checks the limits and inserts the position in one serialized SQLite transaction. Missing or invalid ledger evidence blocks entries; these limits do not measure unrealized losses or actual execution costs.
 
@@ -552,6 +561,7 @@ docker compose down
 | `trading-agent optimize ranker-trial start / pick / settle / status [--arm rf\|hgb\|all]` | Prospective paper trial of the frozen rankers (start needs one arm) |
 | `trading-agent optimize screen-outcomes [SYMBOL...] [--decision HH:MM] [--cost-bps X] [--min-value-cr X]` | Historical net return of each screener screen against the liquid universe, development vs holdout |
 | `trading-agent optimize decision-outcomes [--days N] [--horizon MIN] [--cost-bps X]` | Score stored rule/ML/LLM signals on realised returns after costs |
+| `trading-agent optimize forward-filters [--record]` | Forward test of the 09:30–14:30 window and the trade-replay gate; `--record` writes any due sessions first |
 | `trading-agent optimize trade-replay SYMBOL --side BUY\|SELL --entry X --stop X --target X [--at "YYYY-MM-DD HH:MM"] [--replays N] [--seed N] [--sessions N] [--json]` | Simulated and historical odds of target first, stop first or neither by 15:15 for one bracket |
 | `trading-agent optimize ranking-lab [SYMBOL...] [--snapshots FILE]` | 60 pre-registered cross-sectional variants, selection frozen on validation |
 
